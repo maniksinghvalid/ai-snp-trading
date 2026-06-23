@@ -234,3 +234,29 @@ class TestSafetyInvariants:
         assert "sys.exit" not in source, (
             "paper_guard.py must not call sys.exit — it raises PaperGuardError instead"
         )
+
+    def test_uses_ret_ok_constant_not_literal(self):
+        """WR-04: the guard must compare ret against the SDK RET_OK constant,
+        not a bare literal 0."""
+        import inspect
+        import bot.safety.paper_guard as mod
+        source = inspect.getsource(mod)
+        assert "from moomoo import RET_OK" in source, (
+            "paper_guard.py must import RET_OK from moomoo (WR-04)"
+        )
+        assert "ret != RET_OK" in source, (
+            "paper_guard.py must check 'ret != RET_OK', not a bare literal 0 (WR-04)"
+        )
+        assert "ret != 0" not in source, (
+            "paper_guard.py must not use the bare literal 'ret != 0' (WR-04)"
+        )
+
+    def test_ret_ok_success_passes_guard3(self, tmp_audit_path):
+        """A get_acc_list ret == RET_OK must be treated as success (fail closed
+        only on non-success)."""
+        from moomoo import RET_OK
+        cfg = MockConfig(paper_trading=True, trd_env="SIMULATE", acc_id=123456789)
+        ctx = MagicMock()
+        df = pd.DataFrame([{"acc_id": 123456789, "trd_env": "SIMULATE"}])
+        ctx.get_acc_list.return_value = (RET_OK, df)
+        assert assert_paper_account(cfg, ctx) is None

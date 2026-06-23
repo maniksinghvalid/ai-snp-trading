@@ -15,6 +15,11 @@ Per D-06 and PATTERNS.md: raises PaperGuardError, never terminates the process �
 
 Exports: assert_paper_account, PaperGuardError
 """
+# SDK success sentinel imported directly so the guard binds to the SDK's own
+# constant rather than a hardcoded literal (WR-04). Mirrors how the gateway
+# imports RET_OK from moomoo.
+from moomoo import RET_OK
+
 from bot._utils import safe_get, safe_int, format_enum
 from bot.safety.audit_log import append_audit
 
@@ -85,8 +90,10 @@ def assert_paper_account(cfg, trade_ctx) -> None:
     # No auto-selection — operator must set FUTU_ACC_ID explicitly (D-03).
     ret, data = trade_ctx.get_acc_list()
 
-    # SDK returns RET_OK (0) on success; any other value means the broker call failed.
-    if ret != 0:
+    # SDK returns RET_OK on success; any other value means the broker call
+    # failed. Bind to the SDK constant so a future change to its success value
+    # cannot mis-classify a failed broker call as success (WR-04). Fails closed.
+    if ret != RET_OK:
         _fail(
             f"get_acc_list() failed with ret={ret} — cannot verify broker account type"
         )
