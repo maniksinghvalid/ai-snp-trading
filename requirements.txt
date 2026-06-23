@@ -1,7 +1,7 @@
 # Runtime dependencies for the AI S&P Trading Bot
 # Phase 1: Foundation — broker access layer, safety primitives
 moomoo-api>=10.4.6408,<11.0
-pandas
+pandas>=2.0,<4.0
 numpy==2.5.0
-jsonschema
+jsonschema>=4.0,<5.0
 structlog==26.1.0
