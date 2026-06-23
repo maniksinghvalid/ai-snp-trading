@@ -56,7 +56,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### State & Safety
 
-- [ ] **STATE-01**: Durable SQLite state with atomic writes for positions, stops, scans, and trades
+- [x] **STATE-01**: Durable SQLite state with atomic writes for positions, stops, scans, and trades *(01-02: StateStore + migration 0001 + atomic_write_json crash-injection proven)*
 - [x] **SAFE-01**: Hard paper-trading guard at startup — an explicit `PAPER_TRADING=true` config flag is required AND the selected account's environment is asserted to be SIMULATE (via broker account-type check); any mismatch or REAL account hard-exits before any order path is reachable *(01-01: triple fail-closed guard implemented)*
 - [ ] **SAFE-02**: Startup reconciliation against broker truth completes before any signal processing
 - [ ] **SAFE-03**: A broker-reconciliation loop (every 60–90s) diffs in-memory state vs broker truth; broker wins
@@ -122,7 +122,7 @@ Which phases cover which requirements.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | CFG-01 | Phase 1 | Pending |
-| STATE-01 | Phase 1 | Pending |
+| STATE-01 | Phase 1 | Implemented (01-02) |
 | SAFE-01 | Phase 1 | Implemented (01-01) |
 | SAFE-02 | Phase 1 | Skeleton (01-01); full logic Phase 4 |
 | SAFE-03 | Phase 1 | Skeleton (01-01); full logic Phase 4 |

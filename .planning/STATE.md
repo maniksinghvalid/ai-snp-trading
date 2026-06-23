@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 01-01 complete
-last_updated: "2026-06-23T17:54:00.000Z"
-last_activity: 2026-06-23 -- Plan 01-01 executed (scaffolding + paper guard + gateway)
+stopped_at: Plan 01-02 complete
+last_updated: "2026-06-23T18:03:00.000Z"
+last_activity: 2026-06-23 -- Plan 01-02 executed (StateStore, migrations, atomic write)
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
-  percent: 4
+  completed_plans: 2
+  percent: 8
 ---
 
 # Project State
@@ -26,30 +26,30 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 01 (foundation) — EXECUTING
-Plan: 2 of 4 (01-01 complete, advancing to 01-02)
+Plan: 3 of 4 (01-01 and 01-02 complete, advancing to 01-03)
 Status: Executing Phase 01
-Last activity: 2026-06-23 -- Plan 01-01 complete (scaffolding + paper guard + gateway)
+Last activity: 2026-06-23 -- Plan 01-02 complete (StateStore + migration runner + atomic write)
 
-Progress: [█░░░░░░░░░] 4%
+Progress: [██░░░░░░░░] 8%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 1
-- Average duration: 8 minutes
-- Total execution time: ~0.1 hours
+- Total plans completed: 2
+- Average duration: 6 minutes
+- Total execution time: ~0.2 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 1 complete | 8 min | 8 min |
+| 01 | 2 complete | 12 min | 6 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (8 min)
-- Trend: —
+- Last 5 plans: 01-01 (8 min), 01-02 (4 min)
+- Trend: improving
 
 *Updated after each plan completion*
 
@@ -72,6 +72,9 @@ Recent decisions affecting current work:
 - Refine: `rules.json` externalized config (CFG-01) as single source of truth for live + backtest
 - Refine: intraday re-scan every ~30 min (SCAN-07); top-20 gap-ranked watchlist cap (SCAN-08)
 - Refine: daily new-entry cap `max_trades_per_day` (RISK-05); order_id-keyed fill matching (EXEC-05); strengthened paper guard (SAFE-01); optional static HTML dashboard (DASH-01)
+- 01-02: bot/state/__init__.py started minimal and gained re-exports after store.py was created (avoids circular import during incremental task execution)
+- 01-02: StateStore.open() enables WAL journal mode for better concurrency
+- 01-02: atomic_write_json: temp in same dir as target guarantees same-filesystem atomic rename; chmod(0600) after os.replace
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -98,6 +101,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T17:54:00Z
-Stopped at: Plan 01-01 complete — advancing to 01-02
-Resume file: .planning/phases/01-foundation/01-02-PLAN.md
+Last session: 2026-06-23T18:03:00Z
+Stopped at: Plan 01-02 complete — advancing to 01-03
+Resume file: .planning/phases/01-foundation/01-03-PLAN.md
