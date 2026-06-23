@@ -10,18 +10,18 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### Scanner
 
-- [ ] **SCAN-01**: Bot fetches the current S&P 500 constituent list as the scan universe
-- [ ] **SCAN-02**: Premarket scan filters the universe by price ≥ $3 and the daily setup (above prior-day high, prior close > SMA200, gap ≥ 3% from prior close)
-- [ ] **SCAN-03**: Scan computes a 14-day RVOL baseline using only prior completed trading days (no look-ahead)
-- [ ] **SCAN-04**: Scan runs only on NYSE trading days (holiday/half-day aware) and writes a stored daily watchlist
-- [ ] **SCAN-05**: The daily scan is idempotent (re-running the same day does not duplicate the watchlist)
-- [ ] **SCAN-06**: Scan market data (daily bars across the ~500-symbol universe) is sourced from yfinance (free external source), not Moomoo snapshots/klines, to avoid broker quota; Moomoo is reserved for execution + live 5m subscriptions
-- [ ] **SCAN-07**: Scan re-runs intraday on a schedule (~every 30 min, ≈7 passes 09:55–12:55 ET) to catch post-open gappers/breakouts; each pass updates the watchlist idempotently
-- [ ] **SCAN-08**: The persisted watchlist is capped at the top 20 candidates by gap %, bounding downstream 5m subscriptions
+- [x] **SCAN-01**: Bot fetches the current S&P 500 constituent list as the scan universe
+- [x] **SCAN-02**: Premarket scan filters the universe by price ≥ $3 and the daily setup (above prior-day high, prior close > SMA200, gap ≥ 3% from prior close)
+- [x] **SCAN-03**: Scan computes a 14-day RVOL baseline using only prior completed trading days (no look-ahead)
+- [x] **SCAN-04**: Scan runs only on NYSE trading days (holiday/half-day aware) and writes a stored daily watchlist
+- [x] **SCAN-05**: The daily scan is idempotent (re-running the same day does not duplicate the watchlist)
+- [x] **SCAN-06**: Scan market data (daily bars across the ~500-symbol universe) is sourced from yfinance (free external source), not Moomoo snapshots/klines, to avoid broker quota; Moomoo is reserved for execution + live 5m subscriptions
+- [x] **SCAN-07**: Scan re-runs intraday on a schedule (~every 30 min, ≈7 passes 09:55–12:55 ET) to catch post-open gappers/breakouts; each pass updates the watchlist idempotently
+- [x] **SCAN-08**: The persisted watchlist is capped at the top 20 candidates by gap %, bounding downstream 5m subscriptions
 
 ### Signals
 
-- [ ] **SIG-01**: Bot subscribes to live 5m bars only for the (capped, top-20) watchlist candidates — never the full universe — to respect Moomoo subscription quota
+- [x] **SIG-01**: Bot subscribes to live 5m bars only for the (capped, top-20) watchlist candidates — never the full universe — to respect Moomoo subscription quota
 - [ ] **SIG-02**: Entry signals are evaluated only on closed 5m bars — never mid-bar (no repainting)
 - [ ] **SIG-03**: An entry triggers when price is above the premarket high, above today's HOD, and intraday RVOL ≥ 2.0, within 10:05–15:30 ET
 - [ ] **SIG-04**: No new entries when 5 concurrent positions are open or after the 15:30 ET cutoff
@@ -130,15 +130,15 @@ Which phases cover which requirements.
 | SAFE-05 | Phase 1 | Implemented (01-01) |
 | SVC-03 | Phase 1 | Implemented (01-04) |
 | SVC-04 | Phase 1 | Implemented (01-04) |
-| SCAN-01 | Phase 2 | Pending |
-| SCAN-02 | Phase 2 | Pending |
-| SCAN-03 | Phase 2 | Pending |
-| SCAN-04 | Phase 2 | Pending |
-| SCAN-05 | Phase 2 | Pending |
-| SCAN-06 | Phase 2 | Pending |
-| SCAN-07 | Phase 2 + Phase 5 (scheduler) | Pending |
-| SCAN-08 | Phase 2 | Pending |
-| SIG-01 | Phase 2 | Pending |
+| SCAN-01 | Phase 2 | Complete |
+| SCAN-02 | Phase 2 | Complete |
+| SCAN-03 | Phase 2 | Complete |
+| SCAN-04 | Phase 2 | Complete |
+| SCAN-05 | Phase 2 | Complete |
+| SCAN-06 | Phase 2 | Complete |
+| SCAN-07 | Phase 2 + Phase 5 (scheduler) | Complete |
+| SCAN-08 | Phase 2 | Complete |
+| SIG-01 | Phase 2 | Complete |
 | SIG-02 | Phase 3 | Pending |
 | SIG-03 | Phase 3 | Pending |
 | SIG-04 | Phase 3 | Pending |
@@ -170,6 +170,7 @@ Which phases cover which requirements.
 | BT-04 | Phase 6 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 47 total (1 CFG + 8 SCAN + 4 SIG + 5 RISK + 5 EXEC + 5 POS + 1 STATE + 5 SAFE + 4 SVC + 4 ALERT + 1 DASH + 4 BT)
 - Mapped to phases: 47 ✓
 - Unmapped: 0 ✓

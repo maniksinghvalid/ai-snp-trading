@@ -86,7 +86,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 02-00-PLAN.md — Wave 0 foundation: add yfinance + pandas-market-calendars (package-legitimacy checkpoints), create bot/scanner package + tests/scanner Wave 0 test stubs [Wave 1]
+- [x] 02-00-PLAN.md — Wave 0 foundation: add yfinance + pandas-market-calendars (package-legitimacy checkpoints), create bot/scanner package + tests/scanner Wave 0 test stubs [Wave 1]
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/4 | In progress | - |
-| 2. Premarket Scanner | 0/3 | Not started | - |
+| 2. Premarket Scanner | 1/4 | In Progress|  |
 | 3. Intraday Signal and Risk Engine | 0/3 | Not started | - |
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
