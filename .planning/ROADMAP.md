@@ -81,13 +81,24 @@ Plans:
   7. The persisted watchlist is capped at the top 20 candidates ranked by gap % (SCAN-08); a test with >20 passing candidates confirms exactly 20 are stored and subscribed
 
 **Resolved (was research flag):** yfinance supplies scan data, removing the Moomoo `get_market_snapshot`/kline batch-quota concern for 500+ codes. Remaining light research: S&P 500 constituent source (Wikipedia scrape vs. hardcoded list refreshed every 2–3 months) and yfinance batch-download reliability/rate behavior.
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
+**Wave 1**
 
-- [ ] 02-01: S&P 500 constituent source + yfinance daily-bar batch download (format normalization, threads≈5, degradation detection); D1/D3 daily filters
-- [ ] 02-02: SMA200 + RVOL 14-day baseline from yfinance history; idempotent daily_scan persistence; top-20 gap-ranked cap
-- [ ] 02-03: NYSE market calendar gate (pandas-market-calendars); intraday re-scan entrypoint (idempotent merge); watchlist-scoped K_5M subscriptions on the capped list
+- [ ] 02-00-PLAN.md — Wave 0 foundation: add yfinance + pandas-market-calendars (package-legitimacy checkpoints), create bot/scanner package + tests/scanner Wave 0 test stubs [Wave 1]
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 02-01-PLAN.md — universe.py (Wikipedia scrape + dated cache/fallback), fetcher.py (yfinance batch, threads=5, 10% degradation gate + audit), calendar.py (NYSE holiday/half-day gate) [Wave 2]
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 02-02-PLAN.md — migration 0002 (daily_scan rich columns, D-08), run_daily_scan (config-driven D1/D2/D3 + no-look-ahead SMA200/RVOL), idempotent upsert, top-20 gap cap [Wave 3]
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 02-03-PLAN.md — MoomooGateway.subscribe() K_5M (SIG-01), subscribe top-20 only, run_intraday_rescan (idempotent merge, protect active candidates D-04) [Wave 4]
 
 ### Phase 3: Intraday Signal and Risk Engine
 
