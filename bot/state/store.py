@@ -47,19 +47,24 @@ def resolve_db_path() -> str:
 def atomic_write_json(path: str, data: dict) -> None:
     """Write *data* as JSON to *path* atomically using temp-file + os.replace.
 
-    Protocol (write → parse-validate → replace):
+    Protocol (write → fsync → parse-validate → replace → fsync dir):
       1. Create a temp file in the SAME directory as *path* (same filesystem,
          so os.replace is guaranteed to be atomic on POSIX).
       2. Write JSON via json.dump (ensures_ascii=False for Unicode safety).
-      3. Flush + close the file descriptor.
+      3. flush() + os.fsync(fd) on the temp file so its data blocks are
+         durably on disk BEFORE the rename — without this, os.replace can
+         leave the directory entry pointing at a file whose data was never
+         flushed (zero-length/truncated) after a power loss or OS crash.
       4. Re-open the temp file and json.load it (parse-validate) — if the
          content is not valid JSON or was truncated, raise before swapping.
       5. Call os.replace(tmp, path) — atomic rename on POSIX.
-      6. Set restrictive 0600 permissions on the written file (T-01-07).
+      6. fsync the containing directory so the rename itself is durable.
+      7. Set restrictive 0600 permissions on the written file (T-01-07).
 
     On any exception before step 5, the temp file is unlinked and the
     original *path* is left untouched — a crash mid-write never corrupts
-    the prior state.
+    the prior state. fsync of the temp file (step 3) and the directory
+    (step 6) extend that guarantee across OS/power crashes (D-10).
 
     Args:
         path: Target file path. The containing directory must exist.
@@ -72,12 +77,13 @@ def atomic_write_json(path: str, data: dict) -> None:
     dir_ = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
     try:
-        # Step 1-2: Write JSON to temp file
+        # Step 1-3: Write JSON to temp file, then durably persist its data
+        # blocks to disk (flush + fsync) BEFORE the rename.
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())  # durably persist temp file data before replace
         fd = None  # fdopen took ownership; mark as consumed
-
-        # Step 3: (flush/close already happened in the with block above)
 
         # Step 4: Parse-validate before swapping
         with open(tmp, "r", encoding="utf-8") as f:
@@ -87,7 +93,18 @@ def atomic_write_json(path: str, data: dict) -> None:
         os.replace(tmp, path)
         tmp = None  # swap succeeded; mark tmp as consumed
 
-        # Step 6: Restrictive permissions (owner read/write only)
+        # Step 6: fsync the containing directory so the rename is durable
+        # (os.replace guarantees atomicity of the rename, not its durability).
+        try:
+            dir_fd = os.open(dir_, os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # some filesystems/platforms disallow directory fsync
+
+        # Step 7: Restrictive permissions (owner read/write only)
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
         except OSError:

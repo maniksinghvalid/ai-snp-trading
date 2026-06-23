@@ -262,6 +262,79 @@ class TestCrashInjectionCorruptTempWrite:
 
 
 # ============================================================
+# Durability: fsync ordering (CR-02)
+# ============================================================
+
+class TestFsyncDurability:
+    """fsync must persist the temp file before os.replace and the dir after."""
+
+    def test_fsync_called_before_replace_and_dir_after(
+        self, tmp_path, new_data, monkeypatch
+    ):
+        """
+        CR-02: the temp file must be fsync'd BEFORE os.replace (so its data is
+        durable before the rename) and the containing directory fsync'd AFTER
+        os.replace (so the rename itself is durable).
+        """
+        events = []
+
+        real_fsync = os.fsync
+
+        def tracking_fsync(fd):
+            events.append(("fsync", fd))
+            return real_fsync(fd)
+
+        real_replace = os.replace
+
+        def tracking_replace(src, dst):
+            events.append(("replace", src, dst))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "fsync", tracking_fsync)
+        monkeypatch.setattr(os, "replace", tracking_replace)
+
+        path = str(tmp_path / "state.json")
+        atomic_write_json(path, new_data)
+
+        kinds = [e[0] for e in events]
+        # At least one fsync (the temp file) before replace
+        assert "replace" in kinds, "os.replace was never called"
+        replace_idx = kinds.index("replace")
+        assert "fsync" in kinds[:replace_idx], (
+            "temp file must be fsync'd BEFORE os.replace"
+        )
+        # And a directory fsync after replace
+        assert "fsync" in kinds[replace_idx + 1:], (
+            "containing directory must be fsync'd AFTER os.replace"
+        )
+
+    def test_dir_fsync_failure_is_nonfatal(self, tmp_path, new_data, monkeypatch):
+        """A directory fsync that raises OSError must not fail the write."""
+        real_fsync = os.fsync
+        real_replace = os.replace
+        state = {"replaced": False}
+
+        def tracking_replace(src, dst):
+            state["replaced"] = True
+            return real_replace(src, dst)
+
+        def maybe_failing_fsync(fd):
+            # Fail only for the directory fsync (after replace)
+            if state["replaced"]:
+                raise OSError("simulated directory fsync failure")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "replace", tracking_replace)
+        monkeypatch.setattr(os, "fsync", maybe_failing_fsync)
+
+        path = str(tmp_path / "state.json")
+        atomic_write_json(path, new_data)  # must not raise
+
+        with open(path, "r", encoding="utf-8") as f:
+            assert json.load(f) == new_data
+
+
+# ============================================================
 # Nested data structure tests
 # ============================================================
 
