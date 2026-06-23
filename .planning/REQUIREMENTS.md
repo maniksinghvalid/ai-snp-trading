@@ -15,10 +15,13 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **SCAN-03**: Scan computes a 14-day RVOL baseline using only prior completed trading days (no look-ahead)
 - [ ] **SCAN-04**: Scan runs only on NYSE trading days (holiday/half-day aware) and writes a stored daily watchlist
 - [ ] **SCAN-05**: The daily scan is idempotent (re-running the same day does not duplicate the watchlist)
+- [ ] **SCAN-06**: Scan market data (daily bars across the ~500-symbol universe) is sourced from yfinance (free external source), not Moomoo snapshots/klines, to avoid broker quota; Moomoo is reserved for execution + live 5m subscriptions
+- [ ] **SCAN-07**: Scan re-runs intraday on a schedule (~every 30 min, ≈7 passes 09:55–12:55 ET) to catch post-open gappers/breakouts; each pass updates the watchlist idempotently
+- [ ] **SCAN-08**: The persisted watchlist is capped at the top 20 candidates by gap %, bounding downstream 5m subscriptions
 
 ### Signals
 
-- [ ] **SIG-01**: Bot subscribes to 5m bars only for watchlist candidates (snapshot-first to respect subscription quota)
+- [ ] **SIG-01**: Bot subscribes to live 5m bars only for the (capped, top-20) watchlist candidates — never the full universe — to respect Moomoo subscription quota
 - [ ] **SIG-02**: Entry signals are evaluated only on closed 5m bars — never mid-bar (no repainting)
 - [ ] **SIG-03**: An entry triggers when price is above the premarket high, above today's HOD, and intraday RVOL ≥ 2.0, within 10:05–15:30 ET
 - [ ] **SIG-04**: No new entries when 5 concurrent positions are open or after the 15:30 ET cutoff
@@ -29,6 +32,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **RISK-02**: Position notional is capped at 10% of portfolio value
 - [ ] **RISK-03**: Initial stop is computed as low-of-day − 1%
 - [ ] **RISK-04**: Maximum 5 concurrent positions is enforced at order-submission time
+- [ ] **RISK-05**: A daily new-entry cap (`max_trades_per_day`, default 5) is enforced separately from the concurrent cap — bounds total daily entries even as positions close and free slots
 
 ### Execution
 
@@ -36,6 +40,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **EXEC-02**: Exits use limit orders at aggressive prices (no reliance on paper market-order fills)
 - [ ] **EXEC-03**: Pending orders use a TTL with cancel-replace if unfilled
 - [ ] **EXEC-04**: Duplicate-order prevention via a broker-verified per-symbol position guard
+- [ ] **EXEC-05**: Stop-out and fill reconciliation matches broker fills by `order_id`, never by quantity (quantity matching produces false stop-outs after a partial exit)
 
 ### Position Lifecycle
 
@@ -45,10 +50,14 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **POS-04**: Force-close all open positions at 15:51 ET (calendar-aware for half-days)
 - [ ] **POS-05**: Per-position lifecycle state (the FSM) is persisted and survives restarts
 
+### Strategy Configuration
+
+- [ ] **CFG-01**: All strategy parameters (universe/daily/intraday filters, time gates, exit rules, risk + `max_trades_per_day`) are externalized to a `rules.json` config loaded at startup as the single source of truth — no strategy constants hardcoded in Python; live bot and backtester read the same file
+
 ### State & Safety
 
 - [ ] **STATE-01**: Durable SQLite state with atomic writes for positions, stops, scans, and trades
-- [ ] **SAFE-01**: Assert the SIMULATE environment at startup; hard-exit if the account is REAL
+- [ ] **SAFE-01**: Hard paper-trading guard at startup — an explicit `PAPER_TRADING=true` config flag is required AND the selected account's environment is asserted to be SIMULATE (via broker account-type check); any mismatch or REAL account hard-exits before any order path is reachable
 - [ ] **SAFE-02**: Startup reconciliation against broker truth completes before any signal processing
 - [ ] **SAFE-03**: A broker-reconciliation loop (every 60–90s) diffs in-memory state vs broker truth; broker wins
 - [ ] **SAFE-04**: Kill switch (file-touch or SIGINT) triggers graceful shutdown with a state flush
@@ -68,11 +77,16 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **ALERT-03**: Daily Telegram summary after force-close (trades, win/loss, realized PnL, open risk)
 - [ ] **ALERT-04**: Alert delivery failures never block or crash the trade loop
 
+### Reporting
+
+- [ ] **DASH-01** *(optional)*: A static, offline, no-JS HTML performance dashboard is generated (R-multiple histogram, open-positions table, last-20 closed trades) alongside the Telegram daily summary
+
 ### Backtesting
 
 - [ ] **BT-01**: Backtester replays historical 5m data through the exact same StrategyCore + PositionState FSM as the live bot
 - [ ] **BT-02**: Backtester enters at bar N+1 open (no look-ahead); gap/SMA200/premarket-high/RVOL computed point-in-time
 - [ ] **BT-03**: Backtester produces a performance report (win rate, avg R, max drawdown, profit factor, per-trade CSV)
+- [ ] **BT-04**: Backtest historical data is sourced from yfinance (or flat CSV/Parquet export), not Moomoo, avoiding broker historical-quota limits at 500-symbol scale
 
 ## v2 Requirements
 
@@ -107,6 +121,7 @@ Which phases cover which requirements.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| CFG-01 | Phase 1 | Pending |
 | STATE-01 | Phase 1 | Pending |
 | SAFE-01 | Phase 1 | Pending |
 | SAFE-02 | Phase 1 | Pending |
@@ -120,6 +135,9 @@ Which phases cover which requirements.
 | SCAN-03 | Phase 2 | Pending |
 | SCAN-04 | Phase 2 | Pending |
 | SCAN-05 | Phase 2 | Pending |
+| SCAN-06 | Phase 2 | Pending |
+| SCAN-07 | Phase 2 + Phase 5 (scheduler) | Pending |
+| SCAN-08 | Phase 2 | Pending |
 | SIG-01 | Phase 2 | Pending |
 | SIG-02 | Phase 3 | Pending |
 | SIG-03 | Phase 3 | Pending |
@@ -128,10 +146,12 @@ Which phases cover which requirements.
 | RISK-02 | Phase 3 | Pending |
 | RISK-03 | Phase 3 | Pending |
 | RISK-04 | Phase 3 | Pending |
+| RISK-05 | Phase 3 | Pending |
 | EXEC-01 | Phase 4 | Pending |
 | EXEC-02 | Phase 4 | Pending |
 | EXEC-03 | Phase 4 | Pending |
 | EXEC-04 | Phase 4 | Pending |
+| EXEC-05 | Phase 4 | Pending |
 | POS-01 | Phase 4 | Pending |
 | POS-02 | Phase 4 | Pending |
 | POS-03 | Phase 4 | Pending |
@@ -143,15 +163,17 @@ Which phases cover which requirements.
 | ALERT-02 | Phase 5 | Pending |
 | ALERT-03 | Phase 5 | Pending |
 | ALERT-04 | Phase 5 | Pending |
+| DASH-01 | Phase 5 | Pending |
 | BT-01 | Phase 6 | Pending |
 | BT-02 | Phase 6 | Pending |
 | BT-03 | Phase 6 | Pending |
+| BT-04 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 39 total (5 SCAN + 4 SIG + 4 RISK + 4 EXEC + 5 POS + 1 STATE + 5 SAFE + 4 SVC + 4 ALERT + 3 BT)
-- Mapped to phases: 39 ✓
+- v1 requirements: 47 total (1 CFG + 8 SCAN + 4 SIG + 5 RISK + 5 EXEC + 5 POS + 1 STATE + 5 SAFE + 4 SVC + 4 ALERT + 1 DASH + 4 BT)
+- Mapped to phases: 47 ✓
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-06-23*
-*Last updated: 2026-06-23 after roadmap creation — traceability populated*
+*Last updated: 2026-06-23 — refined with humbledtrader.com build-guide inputs (Steps 4–13), adapted IBKR→Moomoo: added CFG-01 (rules.json), SCAN-06/07/08 (yfinance data, intraday re-scan, top-20 cap), RISK-05 (daily entry cap), EXEC-05 (order_id fill matching), DASH-01 (HTML dashboard), BT-04 (yfinance backtest data); strengthened SAFE-01 and SIG-01*

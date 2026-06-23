@@ -61,10 +61,15 @@ The strategy is the product. It is fully specified and authoritative:
   "risk": {
     "max_risk_per_trade_pct": 1.0,
     "max_position_size_pct_of_portfolio": 10,
-    "max_concurrent_positions": 5
+    "max_concurrent_positions": 5,
+    "max_trades_per_day": 5
   }
 }
 ```
+
+> This block is the canonical content of the runtime **`rules.json`** config (CFG-01):
+> the bot loads it at startup as the single source of truth for all filters, time gates,
+> exit rules, and risk parameters — no strategy constants hardcoded in Python.
 
 **Plain-English summary:**
 - **Universe:** S&P 500 constituents, price ≥ $3.
@@ -75,7 +80,7 @@ The strategy is the product. It is fully specified and authoritative:
 - **Timing:** entries allowed 10:05–15:30 ET; all positions force-closed at 15:51 ET (flat by close → intraday/day-trading, no overnight risk).
 - **Exits:** initial stop = low-of-day − 1%; take ⅓ off at 0.75R; move stop to breakeven at 1.0R;
   thereafter trail on 5-minute swing lows (2/2 pattern).
-- **Risk:** risk 1% of account per trade; max 10% of portfolio per position; max 5 concurrent positions.
+- **Risk:** risk 1% of account per trade; max 10% of portfolio per position; max 5 concurrent positions; max 5 *new entries per day* (over-trading guard, distinct from the concurrent cap).
 
 ## Requirements
 
@@ -109,7 +114,7 @@ The strategy is the product. It is fully specified and authoritative:
 - Multiple strategies / strategy framework — one strategy (Trend Join Long) for now
 - Short selling — strategy is long-only by definition
 - Non-S&P 500 universes (broad market, crypto, options) — single universe for now
-- Web dashboard / UI — Telegram is the interface for v1
+- Interactive web dashboard / server-backed UI — Telegram is the primary interface for v1 (a *static, offline, no-JS* HTML performance report file is in scope as an optional reporting artifact; a live web app/server is not)
 - System-health Telegram alerts (OpenD down, scan-didn't-run) — internal logging covers this in v1; promote to alerts later
 
 ## Context
@@ -121,6 +126,11 @@ The strategy is the product. It is fully specified and authoritative:
 - **Broker model.** OpenD daemon runs locally on `127.0.0.1:11111`; the API talks to it over
   localhost. Paper trading is the `SIMULATE` environment (already the default). A trade audit
   log already exists at `~/.futu_trade_audit.jsonl`.
+- **Data/execution split.** Scanning is data-heavy across all ~500 constituents and would
+  strain Moomoo's snapshot/kline quota, so daily-bar scan data (and backtest history) come from
+  a free external source (**yfinance**). Moomoo/OpenD is reserved for what only the broker can
+  do: order execution, position/account truth, and live intraday 5m bar subscriptions for the
+  (small) watchlist. This is a supplementary read-only data source, not a rewrite of broker access.
 - **Strategy is stateful and intraday.** Trailing stops, partial fills, and breakeven moves
   require continuous per-position tracking through the session — this drives the long-running
   service architecture decision below.
@@ -129,7 +139,7 @@ The strategy is the product. It is fully specified and authoritative:
 
 ## Constraints
 
-- **Tech stack**: Python 3.6+ — must reuse the existing `moomoo-api` SDK and `skills/moomooapi` client (no rewrite of broker access).
+- **Tech stack**: Python 3.6+ — must reuse the existing `moomoo-api` SDK and `skills/moomooapi` client (no rewrite of broker access). `yfinance` is added as a read-only market-data source for scanning and backtest history only (not broker access).
 - **Dependency**: Requires OpenD GUI running and logged in on `127.0.0.1:11111`; the bot is non-functional without it.
 - **Safety**: Paper trading only (`FUTU_TRD_ENV=SIMULATE`); no real-money order path in this milestone.
 - **Timezone**: All strategy timing is US Eastern (ET); the bot must handle ET/market-session correctness regardless of host timezone.
@@ -146,6 +156,11 @@ The strategy is the product. It is fully specified and authoritative:
 | Paper-only this milestone | Prove correctness and safety before risking real capital | — Pending |
 | Reuse existing moomoo client | Mature, mapped, already handles OpenD/paper/audit; avoid reinventing broker access | — Pending |
 | Telegram as the v1 interface | Lightweight, push-based, no UI to build | — Pending |
+| yfinance for scan + backtest data; Moomoo for execution + live 5m | Scanning 500 symbols would exhaust Moomoo snapshot/kline quota; free daily bars from yfinance avoid the bottleneck and resolve the Phase 2/Phase 6 data-quota research flags. Broker still owns all trading + live intraday data. | — Pending |
+| `rules.json` externalized strategy config | All filters/time-gates/exit/risk params read from one JSON file (single source of truth); change strategy without code edits; live and backtest read the same config | — Pending |
+| Intraday re-scan (every 30 min, ~7 passes) | A single premarket snapshot misses stocks that gap/break out after the open; periodic re-scan through midday catches later setups (free, via yfinance) | — Pending |
+| Daily entry cap (max_trades_per_day) | Over-trading guard distinct from the 5-concurrent cap; bounds daily churn even as positions close and free up slots | — Pending |
+| HTML performance dashboard (optional) | Offline, no-JS R-multiple histogram + open/closed trade tables for at-a-glance edge validation; complements (does not replace) Telegram summary | — Pending |
 
 ## Evolution
 

@@ -18,7 +18,9 @@ If everything else is stripped away, a correct and safe automated trade loop is 
 
 ### Constraints
 
-- **Tech stack**: Python 3.6+ — must reuse the existing `moomoo-api` SDK and `skills/moomooapi` client (no rewrite of broker access).
+- **Tech stack**: Python 3.6+ — must reuse the existing `moomoo-api` SDK and `skills/moomooapi` client (no rewrite of broker access). `yfinance` is added as a read-only market-data source for scanning and backtest history only (not broker access).
+- **Data/execution split**: yfinance supplies scan + backtest daily-bar data (avoids broker quota); Moomoo/OpenD owns order execution, account/position truth, and live intraday 5m subscriptions on the (top-20-capped) watchlist.
+- **Strategy config**: All strategy parameters live in a single `rules.json` (the source of truth) read by both the live bot and the backtester.
 - **Dependency**: Requires OpenD GUI running and logged in on `127.0.0.1:11111`; the bot is non-functional without it.
 - **Safety**: Paper trading only (`FUTU_TRD_ENV=SIMULATE`); no real-money order path in this milestone.
 - **Timezone**: All strategy timing is US Eastern (ET); the bot must handle ET/market-session correctness regardless of host timezone.
