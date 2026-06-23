@@ -65,7 +65,12 @@ class KillSwitch:
             self._sentinel_path = os.environ.get("BOT_KILL_FILE", _DEFAULT_SENTINEL)
 
         self._event = threading.Event()
-        self._lock = threading.Lock()
+        # Reentrant lock (WR-01): SIGINT is delivered to the main thread between
+        # bytecodes, so _handle_signal -> _trigger can re-enter while the same
+        # thread already holds this lock (e.g. inside register_flush). A
+        # non-reentrant Lock would deadlock the shutdown path; RLock lets the
+        # same thread re-acquire it safely.
+        self._lock = threading.RLock()
         self._flush_callbacks: List[Callable] = []
         self._triggered_once = False
         self._logger = get_logger(__name__)

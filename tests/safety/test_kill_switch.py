@@ -222,6 +222,49 @@ def test_trigger_sets_event_only_once(ks):
 
 
 # ============================================================
+# WR-01: reentrant lock — SIGINT must not deadlock a lock holder
+# ============================================================
+
+def test_lock_is_reentrant():
+    """The internal lock must be a threading.RLock (WR-01)."""
+    import threading as _threading
+    from bot.safety.kill_switch import KillSwitch
+    ks = KillSwitch(sentinel_path="/tmp/does_not_matter")
+    # RLock instances are created by the factory threading.RLock(); the concrete
+    # type is _thread.RLock or _CRLock — verify re-acquisition by the same thread
+    # does not block (a non-reentrant Lock would deadlock here).
+    acquired_twice = ks._lock.acquire(blocking=False)
+    assert acquired_twice, "lock could not be acquired the first time"
+    reacquired = ks._lock.acquire(blocking=False)
+    assert reacquired, "lock is not reentrant — RLock required (WR-01)"
+    ks._lock.release()
+    ks._lock.release()
+
+
+def test_sigint_during_register_flush_does_not_deadlock(ks):
+    """
+    WR-01: if SIGINT re-enters _trigger while the same thread already holds the
+    lock (as it would mid-register_flush), the reentrant lock must let the
+    trigger complete instead of deadlocking the shutdown path.
+    """
+    completed = {"ok": False}
+
+    def run():
+        # Hold the lock (as register_flush does) and re-enter via the signal
+        # handler on the SAME thread — RLock must allow this.
+        with ks._lock:
+            ks._handle_signal(signal.SIGINT, None)
+        completed["ok"] = True
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "kill switch deadlocked when SIGINT raced a lock holder"
+    assert completed["ok"]
+    assert ks.triggered
+
+
+# ============================================================
 # Import check
 # ============================================================
 
