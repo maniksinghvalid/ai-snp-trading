@@ -71,28 +71,34 @@ def _make_daily_frame(
       - prior_close=100.0, prior_high=105.0
       - today_open=104.0 (gap = (104-100)/100*100 = 4.0% — above 3.0% threshold)
       - today_close=106.0 (above prior_high=105.0 — D1 passes)
+
+    SMA200 invariant: the first (n_days - 2) rows are set to prior_close * 0.90
+    so that the 200-day SMA of prior closes (90.0) is strictly below prior_close (100.0),
+    ensuring D2 (prior_close > SMA200) passes by default.
     """
     if scan_date is None:
         scan_date = date(2026, 6, 23)
 
     dates = pd.date_range(end=pd.Timestamp(scan_date), periods=n_days, freq="B")
 
-    # Build volume: prior 14 days have volume_prior; last row has volume_today
+    # Build volume: prior rows have volume_prior; last row has volume_today
     volumes = [volume_prior] * n_days
     volumes[-1] = volume_today
 
-    # Build OHLCV: all rows same values except last two
-    closes = [prior_close] * n_days
-    closes[-2] = prior_close   # prior day close
-    closes[-1] = today_close   # today close (above prior_high for D1)
+    # Build OHLCV: bulk rows use prior_close * 0.90 so SMA200 < prior_close (D2)
+    # Prior day (iloc[-2]) = prior_close; today (iloc[-1]) = today values
+    sma_base = prior_close * 0.90   # 90.0 when prior_close=100.0 → SMA200 ≈ 90.0
+    closes = [sma_base] * n_days
+    closes[-2] = prior_close        # prior day close (used in D2/D3)
+    closes[-1] = today_close        # today close (must be above prior_high for D1)
 
-    highs = [prior_close * 1.02] * n_days
-    highs[-2] = prior_high     # prior day high
+    highs = [sma_base * 1.02] * n_days
+    highs[-2] = prior_high          # prior day high
     highs[-1] = today_close * 1.01
 
-    lows = [prior_close * 0.98] * n_days
-    opens = [prior_close * 0.99] * n_days
-    opens[-1] = today_open     # today open (used for gap computation)
+    lows = [sma_base * 0.98] * n_days
+    opens = [sma_base * 0.99] * n_days
+    opens[-1] = today_open          # today open (used for gap computation)
 
     df = pd.DataFrame({
         "open": opens,
