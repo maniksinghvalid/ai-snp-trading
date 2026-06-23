@@ -60,15 +60,15 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [x] **SAFE-01**: Hard paper-trading guard at startup — an explicit `PAPER_TRADING=true` config flag is required AND the selected account's environment is asserted to be SIMULATE (via broker account-type check); any mismatch or REAL account hard-exits before any order path is reachable *(01-01: triple fail-closed guard implemented)*
 - [ ] **SAFE-02**: Startup reconciliation against broker truth completes before any signal processing
 - [ ] **SAFE-03**: A broker-reconciliation loop (every 60–90s) diffs in-memory state vs broker truth; broker wins
-- [ ] **SAFE-04**: Kill switch (file-touch or SIGINT) triggers graceful shutdown with a state flush
+- [x] **SAFE-04**: Kill switch (file-touch or SIGINT) triggers graceful shutdown with a state flush *(01-04: KillSwitch implemented — sentinel file + SIGINT + idempotent trigger + state-flush callback)*
 - [x] **SAFE-05**: Append-only trade/order audit log (JSONL), extending the existing `~/.futu_trade_audit.jsonl` pattern *(01-01: append_audit() implemented)*
 
 ### Service & Orchestration
 
 - [ ] **SVC-01**: Long-running supervised service with an internal scheduler (premarket scan → intraday loop → EOD flatten)
 - [ ] **SVC-02**: OpenD connectivity watchdog (poll `get_global_state` ~every 60s); pause order placement on failure
-- [ ] **SVC-03**: Structured, rotating application logging
-- [ ] **SVC-04**: All timing uses US Eastern (`zoneinfo`), correct across DST
+- [x] **SVC-03**: Structured, rotating application logging *(01-04: structlog RotatingFileHandler JSON + ConsoleRenderer stderr)*
+- [x] **SVC-04**: All timing uses US Eastern (`zoneinfo`), correct across DST *(01-04: ET = ZoneInfo("America/New_York"), now_et(), to_et(); DST-tested)*
 
 ### Alerts
 
@@ -126,10 +126,10 @@ Which phases cover which requirements.
 | SAFE-01 | Phase 1 | Implemented (01-01) |
 | SAFE-02 | Phase 1 | Skeleton (01-01); full logic Phase 4 |
 | SAFE-03 | Phase 1 | Skeleton (01-01); full logic Phase 4 |
-| SAFE-04 | Phase 1 | Pending |
+| SAFE-04 | Phase 1 | Implemented (01-04) |
 | SAFE-05 | Phase 1 | Implemented (01-01) |
-| SVC-03 | Phase 1 | Pending |
-| SVC-04 | Phase 1 | Pending |
+| SVC-03 | Phase 1 | Implemented (01-04) |
+| SVC-04 | Phase 1 | Implemented (01-04) |
 | SCAN-01 | Phase 2 | Pending |
 | SCAN-02 | Phase 2 | Pending |
 | SCAN-03 | Phase 2 | Pending |

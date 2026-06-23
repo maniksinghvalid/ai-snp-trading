@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 01-03 complete
-last_updated: "2026-06-23T18:15:00.000Z"
-last_activity: 2026-06-23 -- Plan 01-03 executed (rules.json, config loader, indicators, StrategyCore, TrendJoinLong)
+stopped_at: Plan 01-04 complete
+last_updated: "2026-06-23T18:23:00.000Z"
+last_activity: 2026-06-23 -- Plan 01-04 executed (ET helpers, structlog logger, KillSwitch — Phase 01 foundation complete)
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 3
-  percent: 12
+  completed_plans: 4
+  percent: 17
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 ## Current Position
 
-Phase: 01 (foundation) — EXECUTING
-Plan: 4 of 4 (01-01, 01-02, 01-03 complete, advancing to 01-04)
-Status: Executing Phase 01
-Last activity: 2026-06-23 -- Plan 01-03 complete (rules.json + config loader + indicators + StrategyCore + TrendJoinLong)
+Phase: 01 (foundation) — COMPLETE
+Plan: 4 of 4 (all complete: 01-01, 01-02, 01-03, 01-04)
+Status: Phase 01 complete — advancing to Phase 02
+Last activity: 2026-06-23 -- Plan 01-04 complete (ET helpers + structlog logger + KillSwitch)
 
-Progress: [███░░░░░░░] 12%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
@@ -44,12 +44,12 @@ Progress: [███░░░░░░░] 12%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 3 complete | 19 min | 6.3 min |
+| 01 | 4 complete | 22 min | 5.5 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (8 min), 01-02 (4 min), 01-03 (7 min)
-- Trend: consistent
+- Last 5 plans: 01-01 (8 min), 01-02 (4 min), 01-03 (7 min), 01-04 (3 min)
+- Trend: consistent, improving
 
 *Updated after each plan completion*
 
@@ -78,6 +78,10 @@ Recent decisions affecting current work:
 - 01-03: CFG-01: rules.json at repo root is single source of truth; StrategyConfig flattens nested JSON groups
 - 01-03: RVOL denominator uses date < signal_date strict cutoff (no look-ahead, Pitfall #4)
 - 01-03: D-12 behavioral proof via config-swap test (not AST scan); compute_initial_stop uses cfg.max_risk_per_trade_pct/100
+- 01-04: Naive datetime passed to to_et() treated as UTC (not host-local) — explicit, consistent with PITFALLS #6
+- 01-04: structlog configured with cache_logger_on_first_use=True; reset_defaults() in tests for isolation
+- 01-04: KillSwitch _trigger protected by threading.Lock; idempotency via _triggered_once flag
+- 01-04: AUDIT_LOG_PATH swapped via module attribute in tests (no monkeypatching of append_audit internals)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -104,6 +108,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T18:15:00Z
-Stopped at: Plan 01-03 complete — advancing to 01-04
-Resume file: .planning/phases/01-foundation/01-04-PLAN.md
+Last session: 2026-06-23T18:23:00Z
+Stopped at: Plan 01-04 complete — Phase 01 foundation complete
+Resume file: None (Phase 01 complete; advance to Phase 02)

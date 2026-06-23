@@ -30,7 +30,7 @@ both the live bot and the backtester.
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation** - Gateway, StateStore, StrategyCore, and safety primitives that everything else depends on
+- [x] **Phase 1: Foundation** - Gateway, StateStore, StrategyCore, and safety primitives that everything else depends on
 - [ ] **Phase 2: Premarket Scanner** - Daily watchlist generation via S&P 500 constituent fetch and D1/D2/D3 filters
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing
 - [ ] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close
@@ -63,7 +63,7 @@ Plans:
 
 - [x] 01-02-PLAN.md — StateStore: SQLite migration 0001 (full v1 schema via PRAGMA user_version) + atomic temp-file/os.replace writes with crash-injection test (STATE-01) [Wave 2] *(2026-06-23, 2 tasks, 49 tests, 4 min)*
 - [x] 01-03-PLAN.md — rules.json + jsonschema loader → StrategyConfig + StrategyCore ABC + TrendJoinLong + pure indicators (SMA200/RVOL/swing_low_2_2); config-driven, no I/O (CFG-01) [Wave 2] *(2026-06-23, 3 tasks, 64 tests, 7 min)*
-- [ ] 01-04-PLAN.md — Safety primitives: zoneinfo ET helpers (SVC-04), structlog rotating logger (SVC-03), kill switch (file-touch + SIGINT) → state flush + audit (SAFE-04/05) [Wave 2]
+- [x] 01-04-PLAN.md — Safety primitives: zoneinfo ET helpers (SVC-04), structlog rotating logger (SVC-03), kill switch (file-touch + SIGINT) → state flush + audit (SAFE-04/05) [Wave 2] *(2026-06-23, 2 tasks, 39 tests, 3 min)*
 
 ### Phase 2: Premarket Scanner
 
