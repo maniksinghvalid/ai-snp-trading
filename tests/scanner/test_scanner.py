@@ -10,9 +10,10 @@ Covers:
   Test insufficient history exclusion (< rvol_lookback_days prior sessions → excluded)
   Test upsert updates rank on re-persist
 """
+import asyncio
 import sqlite3
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -474,3 +475,248 @@ class TestIdempotency:
         assert row[0] == 5.5, f"gap_pct must be updated to 5.5, got {row[0]}"
         assert row[1] == 2, f"rank must be updated to 2, got {row[1]}"
         assert row[2] == "intraday_1", f"scan_pass must be updated, got {row[2]}"
+
+
+# ============================================================
+# SIG-01: Subscribe wiring in run_daily_scan
+# ============================================================
+
+def _make_mock_gateway():
+    """Return an async-capable mock gateway for subscribe tests."""
+    gw = MagicMock()
+    gw.subscribe = AsyncMock()
+    return gw
+
+
+class TestSubscribeWiring:
+    """SIG-01: run_daily_scan calls gateway.subscribe with exactly the top-20 codes."""
+
+    def test_subscribe_top20_only(self, tmp_state_db):
+        """run_daily_scan with 25 passing candidates → gateway.subscribe called once with len==20."""
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        n_symbols = 25
+        symbols = [f"SYM{i:02d}" for i in range(1, n_symbols + 1)]
+
+        def _make_frame_for(sym: str) -> pd.DataFrame:
+            idx = int(sym[3:])  # 1..25
+            gap_pct = float(idx)  # 1%, 2%, ... 25%
+            today_open = 100.0 * (1 + gap_pct / 100.0)
+            return _make_daily_frame(
+                n_days=220,
+                prior_close=100.0,
+                today_open=today_open,
+                today_close=today_open + 2.0,
+                prior_high=today_open - 0.5,
+                scan_date=scan_date,
+            )
+
+        store = StateStore()
+        store.open()
+        gw = _make_mock_gateway()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=symbols), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=lambda data, sym: _make_frame_for(sym)), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            result = run_daily_scan(
+                store=store, gateway=gw, cfg=_make_cfg(d3_min_gap_pct=0.5),
+                scan_date=scan_date,
+            )
+
+        store.close()
+
+        # subscribe must be called exactly once
+        gw.subscribe.assert_called_once()
+        called_codes = gw.subscribe.call_args[0][0]
+
+        assert len(result) == 20, f"run_daily_scan must return 20 codes, got {len(result)}"
+        assert len(called_codes) == 20, (
+            f"gateway.subscribe must be called with exactly 20 codes (SIG-01), got {len(called_codes)}"
+        )
+        # The subscribe codes must match the returned codes exactly
+        assert set(called_codes) == set(result), (
+            "gateway.subscribe must be called with the same codes as returned"
+        )
+
+    def test_subscribe_skipped_when_empty(self, tmp_state_db):
+        """When no candidates pass (non-trading day or empty result), subscribe must NOT be called."""
+        from bot.scanner.scanner import run_daily_scan
+
+        store = StateStore()
+        store.open()
+        gw = _make_mock_gateway()
+
+        with patch("bot.scanner.scanner.is_trading_day", return_value=False):
+            result = run_daily_scan(
+                store=store, gateway=gw, cfg=_make_cfg(),
+                scan_date=date(2024, 1, 1),  # NYSE holiday
+            )
+
+        store.close()
+
+        assert result == [], "Non-trading day must return empty list"
+        gw.subscribe.assert_not_called()
+
+
+# ============================================================
+# SCAN-07: run_intraday_rescan (D-04, D-05)
+# ============================================================
+
+class TestIntradayRescan:
+    """SCAN-07: run_intraday_rescan — idempotent merge, protect active candidates."""
+
+    def test_rescan_idempotent(self, tmp_state_db):
+        """Running run_intraday_rescan for the same scan_date with overlapping candidates
+        does not grow the row count for already-present codes (upsert, D-05).
+        """
+        from bot.scanner.scanner import run_daily_scan, run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=0.5)
+        frame = _make_daily_frame(scan_date=scan_date)
+
+        store = StateStore()
+        store.open()
+
+        # Initial daily scan
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+            run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        row_count_after_daily = store.conn.execute(
+            "SELECT COUNT(*) FROM daily_scan WHERE scan_date=?",
+            (scan_date.isoformat(),),
+        ).fetchone()[0]
+
+        # Re-scan with same symbols
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+            run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes=set(), scan_date=scan_date, scan_pass="intraday_1",
+            )
+
+        row_count_after_rescan = store.conn.execute(
+            "SELECT COUNT(*) FROM daily_scan WHERE scan_date=?",
+            (scan_date.isoformat(),),
+        ).fetchone()[0]
+        store.close()
+
+        assert row_count_after_daily == row_count_after_rescan, (
+            f"Re-scan must not grow row count: before={row_count_after_daily}, "
+            f"after={row_count_after_rescan} (D-05 idempotency failure)"
+        )
+
+    def test_active_candidate_protected(self, tmp_state_db):
+        """An active_code ranking 22nd on re-rank is STILL kept in the top-20 (D-04).
+
+        Setup: 25 new candidates rank 1..25 by gap. An active_code has lower gap
+        so it would naturally rank 22nd, but must be guaranteed in the top-20.
+        """
+        from bot.scanner.scanner import run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=0.5)
+
+        # 21 new candidates with gaps 5..25% (21 codes, ranking above protected)
+        n_new = 21
+        new_symbols = [f"NEW{i:02d}" for i in range(1, n_new + 1)]
+
+        def _frame_for(sym: str) -> pd.DataFrame:
+            if sym.startswith("NEW"):
+                idx = int(sym[3:])
+                gap_pct = 5.0 + float(idx)  # 6..26%
+            else:
+                gap_pct = 4.0  # active candidate has lower gap
+            today_open = 100.0 * (1 + gap_pct / 100.0)
+            return _make_daily_frame(
+                n_days=220,
+                prior_close=100.0,
+                today_open=today_open,
+                today_close=today_open + 2.0,
+                prior_high=today_open - 0.5,
+                scan_date=scan_date,
+            )
+
+        # The active code that would be bumped out
+        active_sym = "PROT"  # yfinance symbol
+        active_code = "US.PROT"
+        all_symbols = new_symbols + [active_sym]
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=all_symbols), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=lambda d, s: _frame_for(s)), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            result = run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes={active_code},
+                scan_date=scan_date, scan_pass="intraday_1",
+            )
+
+        persisted_codes = {
+            row[0] for row in store.conn.execute(
+                "SELECT code FROM daily_scan WHERE scan_date=?",
+                (scan_date.isoformat(),),
+            ).fetchall()
+        }
+        store.close()
+
+        assert active_code in result, (
+            f"Active candidate {active_code} must be protected in top-20 (D-04)"
+        )
+        assert active_code in persisted_codes, (
+            f"Active candidate {active_code} must be persisted (D-04)"
+        )
+        # Total persisted must be capped at 20
+        assert len(result) == 20, f"Top-20 cap enforced: expected 20, got {len(result)}"
+
+    def test_rescan_subscribes_only_new(self, tmp_state_db):
+        """run_intraday_rescan subscribes only codes NOT already in active_codes."""
+        from bot.scanner.scanner import run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=0.5)
+        frame = _make_daily_frame(scan_date=scan_date)
+
+        store = StateStore()
+        store.open()
+        gw = _make_mock_gateway()
+
+        # AAPL is already active; MSFT is new
+        active_codes = {"US.AAPL"}
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            run_intraday_rescan(
+                store=store, gateway=gw, cfg=cfg,
+                active_codes=active_codes, scan_date=scan_date, scan_pass="intraday_1",
+            )
+
+        store.close()
+
+        # subscribe must have been called only with new codes
+        gw.subscribe.assert_called_once()
+        subscribed_codes = gw.subscribe.call_args[0][0]
+
+        assert "US.AAPL" not in subscribed_codes, (
+            "Already-active US.AAPL must NOT be re-subscribed"
+        )
+        assert "US.MSFT" in subscribed_codes, (
+            "New code US.MSFT must be subscribed"
+        )

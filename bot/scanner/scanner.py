@@ -288,7 +288,12 @@ def run_daily_scan(
         scan_pass=scan_pass,
     )
 
-    # SEAM(02-03): asyncio.run(gateway.subscribe(result))
-    # NOT called here — wired in Plan 02-03 after subscribe() method is added to gateway.
+    # SIG-01: Subscribe ONLY the capped top-20 codes — never the full universe.
+    # run_daily_scan is sync; asyncio.run() bridges to the async gateway.subscribe().
+    if result and gateway is not None:
+        import asyncio as _asyncio
+        _asyncio.run(gateway.subscribe(result))
+    elif not result:
+        _logger.info("subscribe_skipped_empty_watchlist", scan_date=str(scan_date))
 
     return result
