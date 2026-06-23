@@ -5,17 +5,15 @@ bot.scanner.scanner — Premarket scan and watchlist persistence.
 Orchestrates: universe fetch → bar download → D1/D2/D3 filter → SMA200/RVOL
 baseline computation → top-20 gap-ranked cap → idempotent upsert persist.
 
-This module delivers the premarket scan path end-to-end EXCEPT the broker
-subscription (Plan 02-03) — a clearly-marked seam is left for gateway.subscribe.
-
 All filter thresholds are config-driven (cfg.d3_min_gap_pct, cfg.min_price_usd,
 cfg.rvol_lookback_days). No strategy literals are hardcoded here.
 
-Exports: run_daily_scan, _persist_watchlist, _evaluate_symbol
+Exports: run_daily_scan, run_intraday_rescan, _persist_watchlist, _evaluate_symbol
 """
+import asyncio
 import sqlite3
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import pandas as pd
 
@@ -202,12 +200,76 @@ def _persist_watchlist(
 
 
 # ============================================================
-# Main entrypoint
+# Shared candidate computation (factored for daily + intraday re-scan)
+# ============================================================
+
+def _compute_candidates(
+    cfg: StrategyConfig,
+    scan_date: date,
+) -> List[dict]:
+    """Fetch universe, download bars, and evaluate each symbol for D1/D2/D3 filters.
+
+    This is the shared compute kernel used by both run_daily_scan and
+    run_intraday_rescan. It does NOT persist or subscribe — callers handle that.
+
+    cfg:       StrategyConfig — all thresholds config-driven (D-12).
+    scan_date: Date to evaluate (no-look-ahead cutoff for RVOL/SMA).
+
+    Returns a list of candidate dicts (unsorted, unranked) for all symbols
+    that pass D1/D2/D3. Each dict contains: code, gap_pct, prior_day_high,
+    prior_close, sma200, rvol_baseline.
+
+    Raises ScanDegradationError if >= 10% of symbols fail to download (D-06).
+    """
+    # Fetch S&P 500 symbol list
+    yf_symbols = fetch_sp500_symbols()
+
+    # Download daily bars (propagates ScanDegradationError on >= 10% failure)
+    data, failed = download_daily_bars(yf_symbols)
+
+    if failed:
+        _logger.warning(
+            "scan_partial_data",
+            failed_count=len(failed),
+            total=len(yf_symbols),
+        )
+
+    # Evaluate each symbol
+    passing = []
+    for sym in yf_symbols:
+        candidate = _evaluate_symbol(sym, data, cfg, scan_date)
+        if candidate is not None:
+            passing.append(candidate)
+
+    return passing
+
+
+# ============================================================
+# Subscription helper
+# ============================================================
+
+def _subscribe_new_codes(gateway, codes: List[str], active_codes: Set[str]) -> List[str]:
+    """Subscribe codes not already in active_codes via gateway.subscribe.
+
+    gateway:      MoomooGateway instance (or None — skipped).
+    codes:        Full list of moomoo codes to potentially subscribe.
+    active_codes: Set of already-subscribed moomoo codes (D-04 protection).
+
+    Returns list of newly-subscribed codes (codes - active_codes).
+    """
+    new_codes = [c for c in codes if c not in active_codes]
+    if new_codes and gateway is not None:
+        asyncio.run(gateway.subscribe(new_codes))
+    return new_codes
+
+
+# ============================================================
+# Main entrypoints
 # ============================================================
 
 def run_daily_scan(
     store: StateStore,
-    gateway,  # MoomooGateway — accepted now; subscribe seam wired in Plan 02-03
+    gateway,  # MoomooGateway — accepts None for unit tests without broker
     cfg: StrategyConfig,
     scan_date: date = None,
     scan_pass: str = "premarket",
@@ -217,18 +279,14 @@ def run_daily_scan(
     Sequence:
       1. Resolve scan_date (ET-correct, defaults to today in ET).
       2. Guard: skip on non-trading days (NYSE holidays / weekends).
-      3. Fetch the S&P 500 symbol list via fetch_sp500_symbols.
-      4. Download 1-year daily bars via download_daily_bars (propagates ScanDegradationError).
-      5. For each symbol: evaluate via _evaluate_symbol (D1/D2/D3, SMA200, RVOL baseline).
-      6. Sort passing candidates by gap_pct DESC; cap at top-20 (SCAN-08).
-      7. Assign rank 1..N and persist via _persist_watchlist (idempotent upsert).
-      8. Return list of moomoo codes (top-20 capped watchlist).
-
-    NOTE: gateway.subscribe() is NOT called here — that seam is wired in Plan 02-03.
-    # SEAM(02-03): after persistence, call asyncio.run(gateway.subscribe(result))
+      3. Fetch the S&P 500 symbol list + download daily bars via _compute_candidates.
+      4. Sort passing candidates by gap_pct DESC; cap at top-20 (SCAN-08).
+      5. Assign rank 1..N and persist via _persist_watchlist (idempotent upsert).
+      6. Subscribe ONLY the capped top-20 codes via gateway.subscribe (SIG-01).
+      7. Return list of moomoo codes (top-20 capped watchlist).
 
     store:     Open StateStore (migrations applied).
-    gateway:   MoomooGateway instance (passed now; subscribe wired in 02-03).
+    gateway:   MoomooGateway instance; None is accepted (skips subscribe).
     cfg:       StrategyConfig — all thresholds are config-driven (D-12).
     scan_date: Optional date override (defaults to now_et().date()).
     scan_pass: Label for this scan pass (e.g. "premarket", "intraday_1").
@@ -247,37 +305,20 @@ def run_daily_scan(
         _logger.info("scan_skipped_not_trading_day", scan_date=str(scan_date))
         return []
 
-    # Step 3: fetch S&P 500 symbol list
-    yf_symbols = fetch_sp500_symbols()
+    # Step 3: compute candidates (shared with run_intraday_rescan)
+    passing = _compute_candidates(cfg, scan_date)
 
-    # Step 4: download daily bars (propagates ScanDegradationError on >= 10% failure)
-    data, failed = download_daily_bars(yf_symbols)
-
-    if failed:
-        _logger.warning(
-            "scan_partial_data",
-            failed_count=len(failed),
-            total=len(yf_symbols),
-        )
-
-    # Step 5: evaluate each symbol
-    passing = []
-    for sym in yf_symbols:
-        candidate = _evaluate_symbol(sym, data, cfg, scan_date)
-        if candidate is not None:
-            passing.append(candidate)
-
-    # Step 6: sort by gap_pct DESC, cap at top-20
+    # Step 4: sort by gap_pct DESC, cap at top-20 (SCAN-08)
     passing.sort(key=lambda c: c["gap_pct"], reverse=True)
     top20 = passing[:_WATCHLIST_CAP]
 
-    # Step 7: assign rank 1..N and persist
+    # Step 5: assign rank 1..N and persist (idempotent upsert)
     for rank_idx, candidate in enumerate(top20, start=1):
         candidate["rank"] = rank_idx
 
     _persist_watchlist(store.conn, scan_date, top20, scan_pass)
 
-    # Step 8: return moomoo codes
+    # Step 6: return moomoo codes
     result = [c["code"] for c in top20]
 
     _logger.info(
@@ -291,9 +332,102 @@ def run_daily_scan(
     # SIG-01: Subscribe ONLY the capped top-20 codes — never the full universe.
     # run_daily_scan is sync; asyncio.run() bridges to the async gateway.subscribe().
     if result and gateway is not None:
-        import asyncio as _asyncio
-        _asyncio.run(gateway.subscribe(result))
+        asyncio.run(gateway.subscribe(result))
     elif not result:
         _logger.info("subscribe_skipped_empty_watchlist", scan_date=str(scan_date))
+
+    return result
+
+
+def run_intraday_rescan(
+    store: StateStore,
+    gateway,  # MoomooGateway — accepts None for unit tests without broker
+    cfg: StrategyConfig,
+    active_codes: Set[str],
+    scan_date: date = None,
+    scan_pass: str = "intraday",
+) -> List[str]:
+    """Re-scan the universe intraday, protecting active live-feed candidates (SCAN-07).
+
+    Implements D-04 (active candidate protection) and D-05 (idempotent upsert):
+      - Re-ranks the union of newly-qualifying candidates by gap_pct DESC.
+      - Active candidates that still pass filters are guaranteed in the top-20
+        even if their gap ranks below position 20 (D-04).
+      - Calls _persist_watchlist for idempotent upsert — never DELETEs rows (D-05).
+      - Subscribes ONLY codes not already in active_codes (avoids re-subscription).
+
+    store:        Open StateStore (migrations applied).
+    gateway:      MoomooGateway instance; None is accepted (skips subscribe).
+    cfg:          StrategyConfig — all thresholds config-driven.
+    active_codes: Set of moomoo codes with active 5m feed (protected from eviction).
+    scan_date:    Optional date override (defaults to now_et().date()).
+    scan_pass:    Label for this re-scan pass (e.g. "intraday_1", "intraday_2").
+
+    Returns list of Moomoo-format codes in the protected top-20.
+
+    Raises ScanDegradationError if >= 10% of symbols fail to download (D-06).
+    """
+    # Step 1: resolve scan_date (ET-correct)
+    if scan_date is None:
+        scan_date = now_et().date()
+
+    # Step 2: non-trading-day guard
+    if not is_trading_day(scan_date):
+        _logger.info("rescan_skipped_not_trading_day", scan_date=str(scan_date))
+        return []
+
+    # Step 3: compute candidates (shared path with run_daily_scan — no filter duplication)
+    passing = _compute_candidates(cfg, scan_date)
+
+    # Step 4: sort all passing candidates by gap_pct DESC
+    passing.sort(key=lambda c: c["gap_pct"], reverse=True)
+
+    # Step 5: build protected top-20 (D-04):
+    #   a) First, add all active_codes that still qualify (they are protected).
+    #   b) Then fill remaining slots (up to _WATCHLIST_CAP) with the highest-gap
+    #      non-active candidates that haven't already been included.
+    protected: List[dict] = []
+    filled_codes: Set[str] = set()
+
+    for candidate in passing:
+        if candidate["code"] in active_codes:
+            protected.append(candidate)
+            filled_codes.add(candidate["code"])
+
+    remaining_slots = _WATCHLIST_CAP - len(protected)
+    for candidate in passing:
+        if remaining_slots <= 0:
+            break
+        if candidate["code"] not in filled_codes:
+            protected.append(candidate)
+            filled_codes.add(candidate["code"])
+            remaining_slots -= 1
+
+    # Cap total at _WATCHLIST_CAP (active codes that exceed cap are truncated last)
+    # Active codes are front-loaded, so they are preserved up to the cap.
+    if len(protected) > _WATCHLIST_CAP:
+        protected = protected[:_WATCHLIST_CAP]
+
+    # Step 6: assign rank over the final protected list (by gap_pct DESC)
+    protected.sort(key=lambda c: c["gap_pct"], reverse=True)
+    for rank_idx, candidate in enumerate(protected, start=1):
+        candidate["rank"] = rank_idx
+
+    # Step 7: upsert (idempotent — never DELETE, D-05)
+    _persist_watchlist(store.conn, scan_date, protected, scan_pass)
+
+    result = [c["code"] for c in protected]
+
+    _logger.info(
+        "rescan_complete",
+        scan_date=str(scan_date),
+        candidates_passing=len(passing),
+        protected_active=len([c for c in protected if c["code"] in active_codes]),
+        watchlist_count=len(result),
+        scan_pass=scan_pass,
+    )
+
+    # Step 8: subscribe ONLY newly-added codes (not already in active_codes)
+    _subscribe_new_codes(gateway, result, active_codes)
 
     return result
