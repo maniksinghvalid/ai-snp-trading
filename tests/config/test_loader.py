@@ -116,6 +116,11 @@ class TestLoadStrategyConfigSuccess:
         cfg = load_strategy_config(rules_file)
         assert cfg.breakeven_trigger_r == 1.0
 
+    def test_initial_stop_pct_parsed_from_rule(self, rules_file):
+        """exit.initial_stop_rule='lod_minus_1pct' must parse to initial_stop_pct=1.0 (CR-01)."""
+        cfg = load_strategy_config(rules_file)
+        assert cfg.initial_stop_pct == 1.0
+
     def test_max_risk_per_trade_pct(self, rules_file):
         cfg = load_strategy_config(rules_file)
         assert cfg.max_risk_per_trade_pct == 1.0
@@ -171,6 +176,18 @@ class TestLoadStrategyConfigFailure:
         with pytest.raises(ConfigError) as exc_info:
             load_strategy_config(str(path))
         assert "risk" in str(exc_info.value).lower() or "required" in str(exc_info.value).lower()
+
+    def test_unrecognized_initial_stop_rule_raises_config_error(self, tmp_path):
+        """An unknown exit.initial_stop_rule must raise ConfigError — never silently
+        fall back to the risk budget (CR-01)."""
+        bad_data = json.loads(json.dumps(CANONICAL_RULES))
+        bad_data["exit"]["initial_stop_rule"] = "lod_minus_5pct"  # unrecognized
+        path = tmp_path / "bad_stop_rule.json"
+        path.write_text(json.dumps(bad_data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        assert "initial_stop_rule" in str(exc_info.value)
+        assert "lod_minus_5pct" in str(exc_info.value)
 
     def test_config_error_is_exception(self):
         """ConfigError must be a proper Exception subclass."""

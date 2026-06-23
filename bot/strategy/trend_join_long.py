@@ -147,10 +147,13 @@ class TrendJoinLong(StrategyCore):
         """
         Compute the initial stop price as LOD minus the config-driven stop percentage.
 
-        initial_stop = lod * (1 - cfg.max_risk_per_trade_pct / 100)
+        initial_stop = lod * (1 - cfg.initial_stop_pct / 100)
 
-        With max_risk_per_trade_pct=1.0: stop = lod * 0.99
-        With max_risk_per_trade_pct=2.0: stop = lod * 0.98
+        The stop distance is derived from exit.initial_stop_rule (parsed into
+        cfg.initial_stop_pct at load time) — the dedicated stop parameter — and
+        is intentionally decoupled from risk.max_risk_per_trade_pct, which is the
+        position-sizing budget, not a stop rule (CR-01). With
+        initial_stop_rule="lod_minus_1pct": stop = lod * 0.99.
 
         The stop percentage is ALWAYS derived from self._cfg — never hardcoded.
 
@@ -160,7 +163,7 @@ class TrendJoinLong(StrategyCore):
         Returns:
             float — stop price below lod.
         """
-        stop_fraction = self._cfg.max_risk_per_trade_pct / 100.0
+        stop_fraction = self._cfg.initial_stop_pct / 100.0
         return float(lod * (1.0 - stop_fraction))
 
     def compute_swing_low_2_2(self, bars_5m: pd.DataFrame) -> Optional[float]:

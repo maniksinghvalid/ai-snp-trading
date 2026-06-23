@@ -26,6 +26,37 @@ class ConfigError(Exception):
 
 
 # ============================================================
+# Stop-rule parsing (CFG-01 / D-12)
+# ============================================================
+
+# Maps each recognised exit.initial_stop_rule string to the stop distance
+# below the low-of-day, expressed as a percentage. The initial stop is the
+# SOURCE OF TRUTH for stop placement and is deliberately decoupled from
+# risk.max_risk_per_trade_pct (a position-sizing budget). See CR-01.
+_STOP_RULE_PCT = {
+    "lod_minus_1pct": 1.0,
+}
+
+
+def parse_initial_stop_rule(rule: str) -> float:
+    """Parse exit.initial_stop_rule into a stop percentage below LOD.
+
+    "lod_minus_1pct" -> 1.0 (stop placed 1% below the low-of-day).
+
+    Raises:
+        ConfigError: if the rule string is not a recognised stop rule. The
+            stop must NEVER silently fall back to the risk budget (CR-01).
+    """
+    pct = _STOP_RULE_PCT.get(rule)
+    if pct is None:
+        raise ConfigError(
+            f"exit.initial_stop_rule '{rule}' is not a recognised stop rule "
+            f"(expected one of: {', '.join(sorted(_STOP_RULE_PCT))})"
+        )
+    return float(pct)
+
+
+# ============================================================
 # StrategyConfig Dataclass
 # ============================================================
 
@@ -56,6 +87,7 @@ class StrategyConfig:
     force_close_et: str            # time_filter.force_close_et
 
     # ---- exit ----
+    initial_stop_pct: float           # exit.initial_stop_rule parsed to a percentage
     partial_profit_trigger_r: float   # exit.partial_profit_trigger_R
     partial_profit_fraction: float    # exit.partial_profit_fraction (~0.3333)
     breakeven_trigger_r: float        # exit.breakeven_trigger_R
@@ -128,6 +160,7 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         latest_entry_et=str(tf["latest_entry_et"]),
         force_close_et=str(tf["force_close_et"]),
         # exit
+        initial_stop_pct=parse_initial_stop_rule(str(ex["initial_stop_rule"])),
         partial_profit_trigger_r=float(ex["partial_profit_trigger_R"]),
         partial_profit_fraction=float(ex["partial_profit_fraction"]),
         breakeven_trigger_r=float(ex["breakeven_trigger_R"]),

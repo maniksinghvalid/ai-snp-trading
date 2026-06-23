@@ -43,6 +43,7 @@ def _make_canonical_config() -> StrategyConfig:
         earliest_entry_et="10:05",
         latest_entry_et="15:30",
         force_close_et="15:51",
+        initial_stop_pct=1.0,
         partial_profit_trigger_r=0.75,
         partial_profit_fraction=0.3333,
         breakeven_trigger_r=1.0,
@@ -193,6 +194,7 @@ class TestPassesIntradayFilters:
             rvol_min=5.0,  # stricter than canonical
             rvol_lookback_days=14, earliest_entry_et="10:05",
             latest_entry_et="15:30", force_close_et="15:51",
+            initial_stop_pct=1.0,
             partial_profit_trigger_r=0.75, partial_profit_fraction=0.3333,
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
@@ -212,26 +214,27 @@ class TestPassesIntradayFilters:
 
 class TestComputeInitialStop:
     def test_stop_is_lod_minus_1pct(self):
-        """With max_risk_per_trade_pct=1.0, stop = lod * 0.99 derived from config."""
-        cfg = _make_canonical_config()  # max_risk_per_trade_pct=1.0
+        """With initial_stop_pct=1.0, stop = lod * 0.99 derived from config."""
+        cfg = _make_canonical_config()  # initial_stop_pct=1.0
         strat = TrendJoinLong(cfg)
         lod = 100.0
         result = strat.compute_initial_stop(lod)
         expected = lod * 0.99
         assert abs(result - expected) < 1e-9, f"Expected {expected}, got {result}"
 
-    def test_stop_uses_config_stop_pct_not_hardcoded(self):
+    def test_stop_uses_initial_stop_pct_not_hardcoded(self):
         """
-        Changing max_risk_per_trade_pct from 1.0 to 2.0 must change compute_initial_stop.
+        Changing initial_stop_pct from 1.0 to 2.0 must change compute_initial_stop.
         If the value is hardcoded 0.99, this test will fail (proving config-drivenness).
         """
-        cfg_1pct = _make_canonical_config()  # max_risk_per_trade_pct=1.0
+        cfg_1pct = _make_canonical_config()  # initial_stop_pct=1.0
         cfg_2pct = StrategyConfig(
             min_price_usd=3.0, d3_min_gap_pct=3.0, rvol_min=2.0,
             rvol_lookback_days=14, earliest_entry_et="10:05",
             latest_entry_et="15:30", force_close_et="15:51",
+            initial_stop_pct=2.0,  # changed — stop rule, not risk budget
             partial_profit_trigger_r=0.75, partial_profit_fraction=0.3333,
-            breakeven_trigger_r=1.0, max_risk_per_trade_pct=2.0,  # changed
+            breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
             max_trades_per_day=5,
         )
@@ -240,11 +243,37 @@ class TestComputeInitialStop:
         result_2pct = TrendJoinLong(cfg_2pct).compute_initial_stop(lod)
         # 1% → lod*0.99=99.0; 2% → lod*0.98=98.0 — must differ
         assert result_1pct != result_2pct, (
-            f"compute_initial_stop must use cfg.max_risk_per_trade_pct, not a hardcoded value. "
+            f"compute_initial_stop must use cfg.initial_stop_pct, not a hardcoded value. "
             f"Got {result_1pct} for both 1% and 2% configs."
         )
         assert abs(result_1pct - 99.0) < 1e-9
         assert abs(result_2pct - 98.0) < 1e-9
+
+    def test_stop_decoupled_from_max_risk_per_trade_pct(self):
+        """
+        CR-01: the stop is derived from exit.initial_stop_rule (initial_stop_pct),
+        NOT from risk.max_risk_per_trade_pct. Changing the risk budget alone must
+        NOT move the stop price.
+        """
+        cfg_risk_1 = _make_canonical_config()  # max_risk_per_trade_pct=1.0, initial_stop_pct=1.0
+        cfg_risk_2 = StrategyConfig(
+            min_price_usd=3.0, d3_min_gap_pct=3.0, rvol_min=2.0,
+            rvol_lookback_days=14, earliest_entry_et="10:05",
+            latest_entry_et="15:30", force_close_et="15:51",
+            initial_stop_pct=1.0,  # unchanged stop rule
+            partial_profit_trigger_r=0.75, partial_profit_fraction=0.3333,
+            breakeven_trigger_r=1.0, max_risk_per_trade_pct=2.0,  # only risk budget changed
+            max_position_size_pct=10, max_concurrent_positions=5,
+            max_trades_per_day=5,
+        )
+        lod = 100.0
+        result_risk_1 = TrendJoinLong(cfg_risk_1).compute_initial_stop(lod)
+        result_risk_2 = TrendJoinLong(cfg_risk_2).compute_initial_stop(lod)
+        assert result_risk_1 == result_risk_2, (
+            "Stop must NOT change when only max_risk_per_trade_pct changes — "
+            "the stop is driven by exit.initial_stop_rule, not the risk budget (CR-01)."
+        )
+        assert abs(result_risk_1 - 99.0) < 1e-9
 
 
 # ============================================================
@@ -269,6 +298,7 @@ class TestConfigDrivenness:
             rvol_min=5.0,         # tightened — rvol=3.0 now fails I3
             rvol_lookback_days=14, earliest_entry_et="10:05",
             latest_entry_et="15:30", force_close_et="15:51",
+            initial_stop_pct=1.0,
             partial_profit_trigger_r=0.75, partial_profit_fraction=0.3333,
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
@@ -299,6 +329,7 @@ class TestConfigDrivenness:
             rvol_min=5.0,  # borderline rvol of 3.0 now fails
             rvol_lookback_days=14, earliest_entry_et="10:05",
             latest_entry_et="15:30", force_close_et="15:51",
+            initial_stop_pct=1.0,
             partial_profit_trigger_r=0.75, partial_profit_fraction=0.3333,
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
