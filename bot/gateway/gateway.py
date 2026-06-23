@@ -298,6 +298,44 @@ class MoomooGateway:
             lambda: self._trade_ctx.position_list_query(),
         )
 
+    async def subscribe(self, codes: list, subtypes: list = None) -> None:
+        """Subscribe to real-time K_5M candlestick pushes for the given codes.
+
+        Only the capped top-20 watchlist should be passed (SIG-01) — never the
+        full ~500-symbol universe. Each code+subtype pair consumes 1 quota slot;
+        top-20 cap keeps usage at 20 of the 100-slot minimum tier.
+
+        Parameters:
+            codes: List of Moomoo-format codes (e.g. ["US.AAPL", "US.BRK-B"]).
+                   Must be <= 20 items (SIG-01).
+            subtypes: List of SubType values. Defaults to [SubType.K_5M].
+
+        Raises:
+            GatewayError: if subscribe() returns non-RET_OK.
+        """
+        # Deferred import — avoids top-level import failure when moomoo-api
+        # is not installed in the test environment (matches gateway SDK import pattern).
+        from moomoo import SubType, Session
+
+        if subtypes is None:
+            subtypes = [SubType.K_5M]
+
+        loop = asyncio.get_event_loop()
+
+        def _subscribe_blocking():
+            ret, msg = self._quote_ctx.subscribe(
+                codes,
+                subtypes,
+                is_first_push=True,
+                subscribe_push=True,
+                extended_time=False,
+                session=Session.NONE,
+            )
+            _check_ret(ret, msg, "subscribe")
+
+        await loop.run_in_executor(None, _subscribe_blocking)
+        _logger.info("subscribed_k5m", codes=codes, count=len(codes))
+
     # --------------------------------------------------------
     # Reconciliation Skeletons (SAFE-02 / SAFE-03)
     # --------------------------------------------------------

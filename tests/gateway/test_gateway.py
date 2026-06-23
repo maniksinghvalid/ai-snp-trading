@@ -401,3 +401,52 @@ class TestClose:
         gw.close()
         assert gw._quote_ctx is None
         assert gw._trade_ctx is None
+
+
+# ============================================================
+# MoomooGateway.subscribe() — K_5M run_in_executor wrapper (SIG-01)
+# ============================================================
+
+class TestSubscribe:
+    """SIG-01: subscribe() wraps quote_ctx.subscribe for K_5M in run_in_executor."""
+
+    def test_subscribe_wraps_executor(self):
+        """gateway.subscribe(['US.AAPL']) calls quote_ctx.subscribe once with K_5M args."""
+        from moomoo import SubType, Session
+        gw = _make_gateway_with_mocks()
+        # Wire mock quote_ctx.subscribe to return (RET_OK, "")
+        gw._quote_ctx.subscribe.return_value = (0, "")
+
+        asyncio.run(gw.subscribe(["US.AAPL"]))
+
+        gw._quote_ctx.subscribe.assert_called_once_with(
+            ["US.AAPL"],
+            [SubType.K_5M],
+            is_first_push=True,
+            subscribe_push=True,
+            extended_time=False,
+            session=Session.NONE,
+        )
+
+    def test_subscribe_defaults_to_k5m(self):
+        """Calling subscribe without subtypes defaults to [SubType.K_5M]."""
+        from moomoo import SubType
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.subscribe.return_value = (0, "")
+
+        asyncio.run(gw.subscribe(["US.MSFT"]))
+
+        call_args = gw._quote_ctx.subscribe.call_args
+        # Second positional arg is the subtypes list
+        subtypes_used = call_args[0][1]
+        assert subtypes_used == [SubType.K_5M], (
+            f"Default subtypes must be [SubType.K_5M], got {subtypes_used}"
+        )
+
+    def test_subscribe_raises_on_non_ret_ok(self):
+        """quote_ctx.subscribe returning non-zero must raise GatewayError."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.subscribe.return_value = (1, "quota exceeded")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(gw.subscribe(["US.AAPL"]))
