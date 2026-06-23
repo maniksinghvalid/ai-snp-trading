@@ -33,7 +33,15 @@ except ImportError as exc:  # pragma: no cover — only when moomoo-api not inst
         "moomoo-api is not installed. Run: pip install 'moomoo-api>=10.4.6408,<11.0'"
     ) from exc
 
+from bot.safety.logger import get_logger
 from bot.safety.paper_guard import assert_paper_account
+
+
+# ============================================================
+# Module Logger
+# ============================================================
+
+_logger = get_logger(__name__)
 
 
 # ============================================================
@@ -331,7 +339,19 @@ class MoomooGateway:
         Note:
             # Phase 4: full reconciliation logic
             The loop itself is wired; the reconcile_once() payload grows in Phase 4.
+
+        A single reconcile_once() failure (network blip, SDK error) is logged
+        and the loop continues — one broker error must never permanently kill
+        the SAFE-03 reconciliation loop (WR-03). asyncio.CancelledError is
+        re-raised so the loop still shuts down cleanly on cancellation.
         """
         while True:
             await asyncio.sleep(interval_s)
-            await self.reconcile_once()
+            try:
+                await self.reconcile_once()
+            except asyncio.CancelledError:
+                raise  # propagate cancellation for clean shutdown
+            except Exception:
+                # Keep looping — a transient broker error must not silently
+                # disable the SAFE-03 reconciliation loop (WR-03).
+                _logger.error("reconcile_failed", exc_info=True)

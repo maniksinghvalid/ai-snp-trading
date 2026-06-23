@@ -269,6 +269,59 @@ class TestReconciliation:
             f"reconciliation_loop default interval {default_interval}s is outside 60-90s range (SAFE-03)"
         )
 
+    def test_loop_continues_after_reconcile_exception(self):
+        """
+        WR-03: a single reconcile_once() exception must be logged and the loop
+        must keep running — one broker error must not permanently kill the
+        SAFE-03 reconciliation loop.
+        """
+        gw = _make_gateway_with_mocks()
+        calls = {"n": 0}
+
+        async def flaky_reconcile():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated broker blip")
+            return {"positions": None, "accounts": None, "drift": {}}
+
+        gw.reconcile_once = flaky_reconcile
+
+        async def _run():
+            # Tiny interval so the loop iterates quickly; cancel once it has
+            # survived the first (raising) iteration and done a second one.
+            task = asyncio.ensure_future(gw.reconciliation_loop(interval_s=0.001))
+            # Wait until at least 2 calls (1 failure + 1 success) happened
+            for _ in range(1000):
+                await asyncio.sleep(0.001)
+                if calls["n"] >= 2:
+                    break
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+        assert calls["n"] >= 2, (
+            "loop did not continue after a reconcile_once exception (WR-03)"
+        )
+
+    def test_loop_reraises_cancelled_error(self):
+        """
+        WR-03: asyncio.CancelledError raised inside reconcile_once must propagate
+        so the loop shuts down cleanly (not swallowed as a transient error).
+        """
+        gw = _make_gateway_with_mocks()
+
+        async def cancelling_reconcile():
+            raise asyncio.CancelledError()
+
+        gw.reconcile_once = cancelling_reconcile
+
+        async def _run():
+            with pytest.raises(asyncio.CancelledError):
+                await gw.reconciliation_loop(interval_s=0.001)
+
+        asyncio.run(_run())
+
 
 # ============================================================
 # D-02 Compliance: no import from skills/
