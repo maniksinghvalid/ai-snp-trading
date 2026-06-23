@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 02-00: dependency foundation and Wave 0 stubs"
-last_updated: "2026-06-23T22:27:54.859Z"
-last_activity: 2026-06-23 -- Phase 02 execution started
+stopped_at: "Completed 02-01: scanner data acquisition modules (universe, fetcher, calendar)"
+last_updated: "2026-06-23T22:40:00.000Z"
+last_activity: 2026-06-23 -- Phase 02 plan 01 completed
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 8
-  completed_plans: 5
-  percent: 17
+  completed_plans: 6
+  percent: 75
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 02 (premarket-scanner) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-06-23 -- Phase 02 execution started
 
-Progress: [██░░░░░░░░] 17%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -52,6 +52,7 @@ Progress: [██░░░░░░░░] 17%
 - Trend: consistent, improving
 
 *Updated after each plan completion*
+| Phase 02-premarket-scanner P01 | 8 minutes | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,9 @@ Recent decisions affecting current work:
 - 01-04: AUDIT_LOG_PATH swapped via module attribute in tests (no monkeypatching of append_audit internals)
 - [Phase ?]: 02-00: lxml added to requirements.txt explicitly — not pulled transitively by yfinance 1.4.1 on Python 3.14/Homebrew; pd.read_html requires HTML parser
 - [Phase ?]: 02-00: T-02-SC package gate satisfied — yfinance -> github.com/ranaroussi/yfinance; pandas-market-calendars -> github.com/rsheftel/pandas_market_calendars; operator pre-approved before install
+- 02-01: shared._ERRORS testing uses real yfinance.shared._ERRORS dict with side_effect mock to avoid patch-then-clear race (patch replaces object, code clears it, mock values lost)
+- 02-01: wiki_to_yfinance uses str.replace('.', '-') — sufficient for all current S&P 500 tickers (BRK.B, BF.B); no regex needed
+- 02-01: calendar.py reads market_close UTC from schedule() and tz_converts to ET; handles both half-day (13:00) and normal day (16:00) via same code path
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -110,6 +114,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T22:27:54.853Z
-Stopped at: Completed 02-00: dependency foundation and Wave 0 stubs
-Resume file: .planning/phases/02-premarket-scanner/02-01-PLAN.md
+Last session: 2026-06-23T22:40:00.000Z
+Stopped at: Completed 02-01: scanner data acquisition modules (universe, fetcher, calendar)
+Resume file: .planning/phases/02-premarket-scanner/02-02-PLAN.md

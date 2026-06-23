@@ -90,7 +90,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 02-01-PLAN.md — universe.py (Wikipedia scrape + dated cache/fallback), fetcher.py (yfinance batch, threads=5, 10% degradation gate + audit), calendar.py (NYSE holiday/half-day gate) [Wave 2]
+- [x] 02-01-PLAN.md — universe.py (Wikipedia scrape + dated cache/fallback), fetcher.py (yfinance batch, threads=5, 10% degradation gate + audit), calendar.py (NYSE holiday/half-day gate) [Wave 2]
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/4 | In progress | - |
-| 2. Premarket Scanner | 1/4 | In Progress|  |
+| 2. Premarket Scanner | 2/4 | In Progress|  |
 | 3. Intraday Signal and Risk Engine | 0/3 | Not started | - |
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
