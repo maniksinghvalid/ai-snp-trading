@@ -938,22 +938,25 @@ async def subscribe(self, codes: list, subtypes: list = None) -> None:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **yfinance column name casing in 1.4.1**
    - What we know: historical docs show `Open, High, Low, Close, Volume` (capitalized)
    - What's unclear: whether 1.4.1 changed to lowercase (some issues report case changes)
    - Recommendation: In `fetcher.py`, normalize column names to lowercase on read: `ticker_df.columns = ticker_df.columns.str.lower()`
+   - **RESOLVED:** Plan 02-01 T2 normalizes columns to lowercase on read (defensive; works for either casing).
 
 2. **In-memory active-code set survives restart?**
    - What we know: Phase 2 stores subscribed codes in memory; Phase 5 adds the long-running service
    - What's unclear: If the bot restarts mid-session (between premarket scan and intraday re-scan), the active-code set is lost
    - Recommendation: Planner should add a `subscribed_codes` column to `daily_scan` (boolean, default False) or a separate table — so on restart the scanner can query `WHERE subscribed_codes = 1` to rebuild the set. Alternatively, defer this edge case to Phase 5 (service restart is a Phase 5 concern).
+   - **RESOLVED:** Deferred to Phase 5 (service restart-recovery is a Phase 5 concern per CONTEXT `<deferred>`). Phase 2 passes `active_codes` as an in-memory set parameter to the re-scan entrypoint (02-03 T3).
 
 3. **Does yfinance 1.4.1 include today's partial bar in `period="1y"`?**
    - What we know: Documented behavior is that `period="1y"` fetches to the current date
    - What's unclear: Whether today's partial bar (during market hours) is included or if the API returns only completed bars
    - Recommendation: Always apply the `date < scan_date` filter regardless; this is defensive and costs nothing.
+   - **RESOLVED:** Plan 02-02 T2 applies the strict `date < scan_date` filter unconditionally — correct whether or not the partial bar is present.
 
 ---
 
