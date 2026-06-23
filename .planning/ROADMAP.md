@@ -57,7 +57,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Scaffolding + MoomooGateway (persistent contexts, run_in_executor, pre-flight) + hard paper guard (SAFE-01) + reconciliation skeletons (SAFE-02/03) + JSONL audit log (SAFE-05) [Wave 1]
+- [x] 01-01-PLAN.md — Scaffolding + MoomooGateway (persistent contexts, run_in_executor, pre-flight) + hard paper guard (SAFE-01) + reconciliation skeletons (SAFE-02/03) + JSONL audit log (SAFE-05) [Wave 1] *(2026-06-23, 3 tasks, 54 tests, 8 min)*
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -188,7 +188,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/4 | Not started | - |
+| 1. Foundation | 1/4 | In progress | - |
 | 2. Premarket Scanner | 0/3 | Not started | - |
 | 3. Intraday Signal and Risk Engine | 0/3 | Not started | - |
 | 4. Order and Position Management | 0/4 | Not started | - |

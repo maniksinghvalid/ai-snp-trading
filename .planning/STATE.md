@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-06-23T17:39:23.510Z"
-last_activity: 2026-06-23 — Roadmap refined with humbledtrader.com build-guide inputs (Steps 4–13, IBKR→Moomoo); 6 phases, 22 plans, 47 requirements mapped
+stopped_at: Plan 01-01 complete
+last_updated: "2026-06-23T17:54:00.000Z"
+last_activity: 2026-06-23 -- Plan 01-01 executed (scaffolding + paper guard + gateway)
 progress:
   total_phases: 6
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 4
+  completed_plans: 1
+  percent: 4
 ---
 
 # Project State
@@ -21,34 +21,34 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 1 — Foundation
+**Current focus:** Phase 01 — foundation
 
 ## Current Position
 
-Phase: 1 of 6 (Foundation)
-Plan: 0 of 4 in current phase
-Status: Ready to execute
-Last activity: 2026-06-23 — Roadmap refined with humbledtrader.com build-guide inputs (Steps 4–13, IBKR→Moomoo); 6 phases, 22 plans, 47 requirements mapped
+Phase: 01 (foundation) — EXECUTING
+Plan: 2 of 4 (01-01 complete, advancing to 01-02)
+Status: Executing Phase 01
+Last activity: 2026-06-23 -- Plan 01-01 complete (scaffolding + paper guard + gateway)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 4%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: —
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 8 minutes
+- Total execution time: ~0.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01 | 1 complete | 8 min | 8 min |
 
 **Recent Trend:**
 
-- Last 5 plans: —
+- Last 5 plans: 01-01 (8 min)
 - Trend: —
 
 *Updated after each plan completion*
@@ -65,6 +65,9 @@ Recent decisions affecting current work:
 - Roadmap: SVC-03 (structlog) and SVC-04 (zoneinfo ET) placed in Phase 1 as foundational infrastructure
 - Roadmap: SIG-01 (watchlist-scoped subscriptions) placed in Phase 2 where subscriptions first occur
 - Roadmap: Backtester is Phase 6 (last) to ensure bot/strategy/ and bot/position/ are stable before depending on them
+- 01-01: D-02 upheld — gateway imports moomoo SDK directly, never from skills/; skills/ remains an untouched CLI reference
+- 01-01: Paper guard raises PaperGuardError (never terminates process) — only bot/main.py handles process exit
+- 01-01: UTC timestamps in audit log via datetime.now(timezone.utc) — utcnow() is deprecated in Python 3.12+
 - Refine (2026-06-23, humbledtrader inputs): yfinance for scan + backtest data, Moomoo for execution + live 5m only
 - Refine: `rules.json` externalized config (CFG-01) as single source of truth for live + backtest
 - Refine: intraday re-scan every ~30 min (SCAN-07); top-20 gap-ranked watchlist cap (SCAN-08)
@@ -95,6 +98,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T17:22:41.517Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-foundation/01-CONTEXT.md
+Last session: 2026-06-23T17:54:00Z
+Stopped at: Plan 01-01 complete — advancing to 01-02
+Resume file: .planning/phases/01-foundation/01-02-PLAN.md
