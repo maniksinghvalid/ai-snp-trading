@@ -52,7 +52,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### Strategy Configuration
 
-- [ ] **CFG-01**: All strategy parameters (universe/daily/intraday filters, time gates, exit rules, risk + `max_trades_per_day`) are externalized to a `rules.json` config loaded at startup as the single source of truth — no strategy constants hardcoded in Python; live bot and backtester read the same file
+- [x] **CFG-01**: All strategy parameters (universe/daily/intraday filters, time gates, exit rules, risk + `max_trades_per_day`) are externalized to a `rules.json` config loaded at startup as the single source of truth — no strategy constants hardcoded in Python; live bot and backtester read the same file *(01-03: rules.json + jsonschema loader + StrategyConfig + TrendJoinLong config-driven)*
 
 ### State & Safety
 
@@ -121,7 +121,7 @@ Which phases cover which requirements.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CFG-01 | Phase 1 | Pending |
+| CFG-01 | Phase 1 | Implemented (01-03) |
 | STATE-01 | Phase 1 | Implemented (01-02) |
 | SAFE-01 | Phase 1 | Implemented (01-01) |
 | SAFE-02 | Phase 1 | Skeleton (01-01); full logic Phase 4 |

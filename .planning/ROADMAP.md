@@ -62,7 +62,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 01-02-PLAN.md — StateStore: SQLite migration 0001 (full v1 schema via PRAGMA user_version) + atomic temp-file/os.replace writes with crash-injection test (STATE-01) [Wave 2] *(2026-06-23, 2 tasks, 49 tests, 4 min)*
-- [ ] 01-03-PLAN.md — rules.json + jsonschema loader → StrategyConfig + StrategyCore ABC + TrendJoinLong + pure indicators (SMA200/RVOL/swing_low_2_2); config-driven, no I/O (CFG-01) [Wave 2]
+- [x] 01-03-PLAN.md — rules.json + jsonschema loader → StrategyConfig + StrategyCore ABC + TrendJoinLong + pure indicators (SMA200/RVOL/swing_low_2_2); config-driven, no I/O (CFG-01) [Wave 2] *(2026-06-23, 3 tasks, 64 tests, 7 min)*
 - [ ] 01-04-PLAN.md — Safety primitives: zoneinfo ET helpers (SVC-04), structlog rotating logger (SVC-03), kill switch (file-touch + SIGINT) → state flush + audit (SAFE-04/05) [Wave 2]
 
 ### Phase 2: Premarket Scanner

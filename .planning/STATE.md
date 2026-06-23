@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 01-02 complete
-last_updated: "2026-06-23T18:03:00.000Z"
-last_activity: 2026-06-23 -- Plan 01-02 executed (StateStore, migrations, atomic write)
+stopped_at: Plan 01-03 complete
+last_updated: "2026-06-23T18:15:00.000Z"
+last_activity: 2026-06-23 -- Plan 01-03 executed (rules.json, config loader, indicators, StrategyCore, TrendJoinLong)
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 4
-  completed_plans: 2
-  percent: 8
+  completed_plans: 3
+  percent: 12
 ---
 
 # Project State
@@ -26,30 +26,30 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 01 (foundation) — EXECUTING
-Plan: 3 of 4 (01-01 and 01-02 complete, advancing to 01-03)
+Plan: 4 of 4 (01-01, 01-02, 01-03 complete, advancing to 01-04)
 Status: Executing Phase 01
-Last activity: 2026-06-23 -- Plan 01-02 complete (StateStore + migration runner + atomic write)
+Last activity: 2026-06-23 -- Plan 01-03 complete (rules.json + config loader + indicators + StrategyCore + TrendJoinLong)
 
-Progress: [██░░░░░░░░] 8%
+Progress: [███░░░░░░░] 12%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 2
+- Total plans completed: 3
 - Average duration: 6 minutes
-- Total execution time: ~0.2 hours
+- Total execution time: ~0.3 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 2 complete | 12 min | 6 min |
+| 01 | 3 complete | 19 min | 6.3 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (8 min), 01-02 (4 min)
-- Trend: improving
+- Last 5 plans: 01-01 (8 min), 01-02 (4 min), 01-03 (7 min)
+- Trend: consistent
 
 *Updated after each plan completion*
 
@@ -75,6 +75,9 @@ Recent decisions affecting current work:
 - 01-02: bot/state/__init__.py started minimal and gained re-exports after store.py was created (avoids circular import during incremental task execution)
 - 01-02: StateStore.open() enables WAL journal mode for better concurrency
 - 01-02: atomic_write_json: temp in same dir as target guarantees same-filesystem atomic rename; chmod(0600) after os.replace
+- 01-03: CFG-01: rules.json at repo root is single source of truth; StrategyConfig flattens nested JSON groups
+- 01-03: RVOL denominator uses date < signal_date strict cutoff (no look-ahead, Pitfall #4)
+- 01-03: D-12 behavioral proof via config-swap test (not AST scan); compute_initial_stop uses cfg.max_risk_per_trade_pct/100
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -101,6 +104,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T18:03:00Z
-Stopped at: Plan 01-02 complete — advancing to 01-03
-Resume file: .planning/phases/01-foundation/01-03-PLAN.md
+Last session: 2026-06-23T18:15:00Z
+Stopped at: Plan 01-03 complete — advancing to 01-04
+Resume file: .planning/phases/01-foundation/01-04-PLAN.md
