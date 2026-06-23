@@ -103,17 +103,55 @@ Explicitly excluded. Documented to prevent scope creep.
 
 ## Traceability
 
-Which phases cover which requirements. Populated during roadmap creation.
+Which phases cover which requirements.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (to be filled by roadmapper) | — | Pending |
+| STATE-01 | Phase 1 | Pending |
+| SAFE-01 | Phase 1 | Pending |
+| SAFE-02 | Phase 1 | Pending |
+| SAFE-03 | Phase 1 | Pending |
+| SAFE-04 | Phase 1 | Pending |
+| SAFE-05 | Phase 1 | Pending |
+| SVC-03 | Phase 1 | Pending |
+| SVC-04 | Phase 1 | Pending |
+| SCAN-01 | Phase 2 | Pending |
+| SCAN-02 | Phase 2 | Pending |
+| SCAN-03 | Phase 2 | Pending |
+| SCAN-04 | Phase 2 | Pending |
+| SCAN-05 | Phase 2 | Pending |
+| SIG-01 | Phase 2 | Pending |
+| SIG-02 | Phase 3 | Pending |
+| SIG-03 | Phase 3 | Pending |
+| SIG-04 | Phase 3 | Pending |
+| RISK-01 | Phase 3 | Pending |
+| RISK-02 | Phase 3 | Pending |
+| RISK-03 | Phase 3 | Pending |
+| RISK-04 | Phase 3 | Pending |
+| EXEC-01 | Phase 4 | Pending |
+| EXEC-02 | Phase 4 | Pending |
+| EXEC-03 | Phase 4 | Pending |
+| EXEC-04 | Phase 4 | Pending |
+| POS-01 | Phase 4 | Pending |
+| POS-02 | Phase 4 | Pending |
+| POS-03 | Phase 4 | Pending |
+| POS-04 | Phase 4 | Pending |
+| POS-05 | Phase 4 | Pending |
+| SVC-01 | Phase 5 | Pending |
+| SVC-02 | Phase 5 | Pending |
+| ALERT-01 | Phase 5 | Pending |
+| ALERT-02 | Phase 5 | Pending |
+| ALERT-03 | Phase 5 | Pending |
+| ALERT-04 | Phase 5 | Pending |
+| BT-01 | Phase 6 | Pending |
+| BT-02 | Phase 6 | Pending |
+| BT-03 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 35 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 35 ⚠️
+- v1 requirements: 39 total (5 SCAN + 4 SIG + 4 RISK + 4 EXEC + 5 POS + 1 STATE + 5 SAFE + 4 SVC + 4 ALERT + 3 BT)
+- Mapped to phases: 39 ✓
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-06-23*
-*Last updated: 2026-06-23 after initial definition*
+*Last updated: 2026-06-23 after roadmap creation — traceability populated*
