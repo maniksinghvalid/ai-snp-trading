@@ -5,3 +5,8 @@ pandas>=2.0,<4.0
 numpy==2.5.0
 jsonschema>=4.0,<5.0
 structlog==26.1.0
+
+# Phase 2: Premarket Scanner
+yfinance==1.4.1
+pandas-market-calendars==5.4.0
+lxml
