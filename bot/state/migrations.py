@@ -13,13 +13,6 @@ import sqlite3
 
 
 # ============================================================
-# Migration Version
-# ============================================================
-
-CURRENT_VERSION = 1
-
-
-# ============================================================
 # Migration 0001 — Full v1 Schema
 # ============================================================
 #
@@ -90,12 +83,36 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 # ============================================================
+# Migration 0002 — Extend daily_scan with Phase 2 rich context
+# ============================================================
+#
+# Adds per-candidate context columns that Phase 3 reads from StateStore
+# rather than recomputing (D-08). All new columns are nullable (no NOT NULL)
+# because SQLite ALTER TABLE ADD COLUMN does not allow non-null defaults
+# without a DEFAULT expression. gap_pct is NOT re-added (already in 0001).
+#
+# scan_pass examples: "premarket" | "intraday_1" | "intraday_2"
+
+_MIGRATION_0002 = """
+ALTER TABLE daily_scan ADD COLUMN prior_day_high   REAL;
+ALTER TABLE daily_scan ADD COLUMN prior_close      REAL;
+ALTER TABLE daily_scan ADD COLUMN sma200           REAL;
+ALTER TABLE daily_scan ADD COLUMN rvol_baseline    REAL;
+ALTER TABLE daily_scan ADD COLUMN scan_pass        TEXT;
+"""
+
+
+# ============================================================
 # Migration List (index N corresponds to migration step N+1)
 # ============================================================
 
 MIGRATIONS = [
     _MIGRATION_0001,
+    _MIGRATION_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
 ]
+
+
+CURRENT_VERSION = 2
 
 
 # ============================================================

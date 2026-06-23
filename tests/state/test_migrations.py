@@ -49,10 +49,10 @@ class TestMigrationFreshDb:
         )
 
     def test_user_version_equals_current_version(self, in_memory_conn):
-        """PRAGMA user_version must equal CURRENT_VERSION (1) after migration."""
+        """PRAGMA user_version must equal CURRENT_VERSION after all migrations."""
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == CURRENT_VERSION == 1
+        assert version == CURRENT_VERSION
 
     def test_positions_columns_present(self, in_memory_conn):
         """positions table must have all required columns."""
@@ -122,7 +122,7 @@ class TestMigrationIdempotency:
         run_migrations(in_memory_conn)  # second call — must be silent
 
     def test_user_version_stable_after_second_run(self, in_memory_conn):
-        """user_version must remain 1 after the second run_migrations call."""
+        """user_version must remain at CURRENT_VERSION after the second run_migrations call."""
         run_migrations(in_memory_conn)
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
@@ -232,7 +232,80 @@ class TestMigrationModuleConstants:
             assert table in sql, f"Migration 0001 SQL missing table: {table}"
 
     def test_migration_sql_contains_pragma_user_version_in_runner(self, in_memory_conn):
-        """After run_migrations, PRAGMA user_version reflects version (1)."""
+        """After run_migrations, PRAGMA user_version reflects CURRENT_VERSION."""
         run_migrations(in_memory_conn)
         v = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert v == 1
+        assert v == CURRENT_VERSION
+
+
+# ============================================================
+# Migration 0002 tests (D-08 rich-context columns)
+# ============================================================
+
+class TestMigration0002FreshDb:
+    """Migration 0002 columns added to daily_scan on a fresh DB."""
+
+    def test_migration_0002_adds_columns(self, in_memory_conn):
+        """After run_migrations, daily_scan has all five new Phase 2 columns."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
+        col_names = {row[1] for row in info}
+        expected_new = {"prior_day_high", "prior_close", "sma200", "rvol_baseline", "scan_pass"}
+        assert expected_new.issubset(col_names), (
+            f"Missing new columns: {expected_new - col_names}"
+        )
+
+    def test_user_version_is_2_after_migration(self, in_memory_conn):
+        """PRAGMA user_version must equal 2 after applying both migrations."""
+        run_migrations(in_memory_conn)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 2
+
+
+class TestMigration0002Idempotency:
+    """Running run_migrations twice on a v2 DB must be a no-op."""
+
+    def test_migration_idempotent_v2(self, in_memory_conn):
+        """Calling run_migrations twice on a v2 DB raises no error and stays at v2."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)  # second call — must be a no-op
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 2
+
+    def test_v2_tables_intact_after_second_run(self, in_memory_conn):
+        """After second run_migrations call, all new columns still present."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
+        col_names = {row[1] for row in info}
+        assert "scan_pass" in col_names
+
+
+class TestUpgradeFromV1Db:
+    """A DB already at user_version=1 gains the 0002 columns on next run_migrations."""
+
+    def test_upgrade_from_v1_db(self, in_memory_conn):
+        """A DB at v1 (0001 only) must gain the five new columns when run_migrations runs."""
+        # Simulate a v1 database by only applying migration 0001 directly
+        in_memory_conn.executescript(MIGRATIONS[0])
+        in_memory_conn.execute("PRAGMA user_version = 1")
+        in_memory_conn.commit()
+
+        # Verify v1 columns are present and new ones absent
+        info_before = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
+        col_names_before = {row[1] for row in info_before}
+        assert "scan_pass" not in col_names_before, "scan_pass should not exist in v1 schema"
+
+        # Apply outstanding migrations (should apply 0002 only)
+        run_migrations(in_memory_conn)
+
+        info_after = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
+        col_names_after = {row[1] for row in info_after}
+        expected_new = {"prior_day_high", "prior_close", "sma200", "rvol_baseline", "scan_pass"}
+        assert expected_new.issubset(col_names_after), (
+            f"Missing columns after v1→v2 upgrade: {expected_new - col_names_after}"
+        )
+
+        # user_version must now be 2
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 2
