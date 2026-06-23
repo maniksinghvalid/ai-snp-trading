@@ -94,7 +94,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 02-02-PLAN.md — migration 0002 (daily_scan rich columns, D-08), run_daily_scan (config-driven D1/D2/D3 + no-look-ahead SMA200/RVOL), idempotent upsert, top-20 gap cap [Wave 3]
+- [x] 02-02-PLAN.md — migration 0002 (daily_scan rich columns, D-08), run_daily_scan (config-driven D1/D2/D3 + no-look-ahead SMA200/RVOL), idempotent upsert, top-20 gap cap [Wave 3]
 
 **Wave 4** *(blocked on Wave 3)*
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/4 | In progress | - |
-| 2. Premarket Scanner | 2/4 | In Progress|  |
+| 2. Premarket Scanner | 3/4 | In Progress|  |
 | 3. Intraday Signal and Risk Engine | 0/3 | Not started | - |
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
