@@ -931,3 +931,52 @@ class TestIntradayRescan:
         unsubscribed_codes = gw.unsubscribe.call_args[0][0]
         assert "US.DROP" in unsubscribed_codes, "Evicted US.DROP must be unsubscribed (WR-01)"
         assert "US.KEEP" not in unsubscribed_codes, "Protected US.KEEP must NOT be unsubscribed"
+
+    def test_rescan_logs_active_code_eviction(self, tmp_state_db):
+        """WR-02 regression: evicting an active code that no longer passes must emit
+        an explicit, auditable `active_code_evicted` warning rather than dropping it
+        silently.
+        """
+        import bot.scanner.scanner as scanner_mod
+        from bot.scanner.scanner import run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        passing_frame = _make_daily_frame(
+            prior_close=100.0, today_open=104.0, today_close=106.0,
+            prior_high=105.0, scan_date=scan_date,
+        )
+        collapsing_frame = _make_daily_frame(
+            prior_close=100.0, today_open=101.0, today_close=106.0,
+            prior_high=105.0, scan_date=scan_date,
+        )
+
+        store = StateStore()
+        store.open()
+        active_codes = {"US.KEEP", "US.DROP"}
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["KEEP", "DROP"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=lambda d, s: passing_frame if s == "KEEP" else collapsing_frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
+
+            run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes=active_codes, scan_date=scan_date, scan_pass="intraday_1",
+            )
+
+        store.close()
+
+        evicted_events = [
+            call for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "active_code_evicted"
+        ]
+        assert len(evicted_events) == 1, (
+            f"Exactly one active_code_evicted event expected, got {len(evicted_events)}"
+        )
+        assert evicted_events[0].kwargs.get("code") == "US.DROP", (
+            "active_code_evicted must name the evicted code US.DROP"
+        )

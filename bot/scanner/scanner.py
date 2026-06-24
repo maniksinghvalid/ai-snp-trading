@@ -476,11 +476,27 @@ def run_intraday_rescan(
 
     result = [c["code"] for c in protected]
 
+    # WR-02: D-04 protection only re-includes active codes that still pass the
+    # re-filter. An active code whose gap collapses intraday is simply absent from
+    # `passing` and silently drops out. Make that eviction explicit and auditable —
+    # log each evicted active code rather than leaving the drop as an emergent
+    # side effect of "active code happens to still pass".
+    result_set = set(result)
+    evicted_active = sorted(c for c in active_codes if c not in result_set)
+    for evicted_code in evicted_active:
+        _logger.warning(
+            "active_code_evicted",
+            code=evicted_code,
+            scan_date=str(scan_date),
+            scan_pass=scan_pass,
+        )
+
     _logger.info(
         "rescan_complete",
         scan_date=str(scan_date),
         candidates_passing=len(passing),
         protected_active=len([c for c in protected if c["code"] in active_codes]),
+        evicted_active=len(evicted_active),
         watchlist_count=len(result),
         scan_pass=scan_pass,
     )
