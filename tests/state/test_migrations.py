@@ -256,21 +256,30 @@ class TestMigration0002FreshDb:
         )
 
     def test_user_version_is_2_after_migration(self, in_memory_conn):
-        """PRAGMA user_version must equal 2 after applying both migrations."""
+        """PRAGMA user_version must equal CURRENT_VERSION (3) after all migrations.
+
+        Note: originally tested for version==2; updated to CURRENT_VERSION after
+        migration 0003 was added in Phase 3. The test name is preserved for git
+        history continuity; CURRENT_VERSION now equals 3.
+        """
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == CURRENT_VERSION
 
 
 class TestMigration0002Idempotency:
     """Running run_migrations twice on a v2 DB must be a no-op."""
 
     def test_migration_idempotent_v2(self, in_memory_conn):
-        """Calling run_migrations twice on a v2 DB raises no error and stays at v2."""
+        """Calling run_migrations twice raises no error and stays at CURRENT_VERSION.
+
+        Note: class name retained for history; now CURRENT_VERSION == 3 after
+        migration 0003 was added in Phase 3.
+        """
         run_migrations(in_memory_conn)
         run_migrations(in_memory_conn)  # second call — must be a no-op
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == CURRENT_VERSION
 
     def test_v2_tables_intact_after_second_run(self, in_memory_conn):
         """After second run_migrations call, all new columns still present."""
@@ -306,9 +315,9 @@ class TestUpgradeFromV1Db:
             f"Missing columns after v1→v2 upgrade: {expected_new - col_names_after}"
         )
 
-        # user_version must now be 2
+        # user_version must now be CURRENT_VERSION (3 after Phase 3 migration 0003)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == CURRENT_VERSION
 
 
 class TestMigration0002PartialApplication:
@@ -339,7 +348,7 @@ class TestMigration0002PartialApplication:
             f"Missing columns after partial-then-full apply: {expected_new - col_names}"
         )
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == CURRENT_VERSION  # 3 after Phase 3 migration 0003 added
 
     def test_no_duplicate_columns_after_reapply(self, in_memory_conn):
         """Each 0002 column must appear exactly once after a partial-then-full apply."""
@@ -353,3 +362,76 @@ class TestMigration0002PartialApplication:
         info = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
         col_list = [row[1] for row in info]
         assert col_list.count("sma200") == 1, "sma200 must not be duplicated on re-apply"
+
+
+# ============================================================
+# Migration 0003 tests (D-08/D-12 daily counter + pending intents)
+# ============================================================
+
+class TestMigration0003FreshDb:
+    """Migration 0003 adds daily_trade_count and pending_intents tables."""
+
+    def test_migration_0003_creates_both_tables(self, in_memory_conn):
+        """After run_migrations, daily_trade_count and pending_intents tables exist."""
+        run_migrations(in_memory_conn)
+        rows = in_memory_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        actual_names = {r[0] for r in rows}
+        assert "daily_trade_count" in actual_names, (
+            "daily_trade_count table missing after migration 0003"
+        )
+        assert "pending_intents" in actual_names, (
+            "pending_intents table missing after migration 0003"
+        )
+
+    def test_migration_0003_user_version_is_3(self, in_memory_conn):
+        """PRAGMA user_version must equal 3 after all three migrations."""
+        run_migrations(in_memory_conn)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+
+    def test_migration_0003_daily_trade_count_columns(self, in_memory_conn):
+        """daily_trade_count must have session_date, filled_count, updated_at columns."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(daily_trade_count)").fetchall()
+        col_names = {row[1] for row in info}
+        required_dtc = {"session_date", "filled_count", "updated_at"}
+        assert required_dtc.issubset(col_names), (
+            f"Missing daily_trade_count columns: {required_dtc - col_names}"
+        )
+
+    def test_migration_0003_pending_intents_columns(self, in_memory_conn):
+        """pending_intents must have all required columns."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(pending_intents)").fetchall()
+        col_names = {row[1] for row in info}
+        required = {
+            "intent_id", "code", "status", "entry_price",
+            "stop_price", "quantity", "emitted_at", "resolved_at",
+        }
+        assert required.issubset(col_names), (
+            f"Missing pending_intents columns: {required - col_names}"
+        )
+
+
+class TestMigration0003Idempotency:
+    """Running run_migrations twice on a v3 DB must be a no-op."""
+
+    def test_migration_0003_idempotent(self, in_memory_conn):
+        """Calling run_migrations twice on a v3 DB raises no error and stays at v3."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)  # second call — must be a no-op
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+
+    def test_v3_tables_intact_after_second_run(self, in_memory_conn):
+        """After second run_migrations call, both new tables still present."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)
+        rows = in_memory_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        names = {r[0] for r in rows}
+        assert "daily_trade_count" in names
+        assert "pending_intents" in names

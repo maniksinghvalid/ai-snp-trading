@@ -487,3 +487,67 @@ class TestUnsubscribe:
 
         with pytest.raises(GatewayError):
             asyncio.run(gw.unsubscribe(["US.AAPL"]))
+
+
+# ============================================================
+# MoomooGateway.get_equity() — live equity read (RISK-01, D-04/D-05)
+# Wave 0 stubs — implemented in 03-03
+# ============================================================
+
+class TestGetEquity:
+    """get_equity() reads total_assets from accinfo_query (D-04/D-05)."""
+
+    def test_get_equity_reads_total_assets(self):
+        """get_equity returns total_assets float from accinfo_query response."""
+        pytest.skip("Wave 0 stub — implemented in 03-03")
+
+    def test_get_equity_calls_refresh_cache(self):
+        """get_equity passes refresh_cache=True to accinfo_query (D-05)."""
+        pytest.skip("Wave 0 stub — implemented in 03-03")
+
+    def test_equity_fallback_on_ret_error(self):
+        """get_equity returns _EQUITY_FALLBACK when accinfo_query ret != RET_OK."""
+        pytest.skip("Wave 0 stub — implemented in 03-03")
+
+    def test_equity_fallback_on_implausible_low(self):
+        """get_equity returns _EQUITY_FALLBACK when total_assets < implausible threshold."""
+        pytest.skip("Wave 0 stub — implemented in 03-03")
+
+    def test_equity_fallback_on_implausible_high(self):
+        """get_equity returns _EQUITY_FALLBACK when total_assets > upper implausible bound."""
+        pytest.skip("Wave 0 stub — implemented in 03-03")
+
+    def test_equity_fallback_on_exception(self):
+        """get_equity returns _EQUITY_FALLBACK on any unexpected exception."""
+        pytest.skip("Wave 0 stub — implemented in 03-03")
+
+
+# ============================================================
+# MoomooGateway.get_market_snapshot() — raw broker snapshot (D-01)
+# Wave 0 stubs — implemented in 03-01 Task 3
+# ============================================================
+
+class TestGetMarketSnapshot:
+    """get_market_snapshot() returns raw (ret, data) tuple unchanged (D-01)."""
+
+    def test_get_market_snapshot_returns_tuple(self):
+        """
+        A mocked _quote_ctx.get_market_snapshot returning (RET_OK, df) makes
+        get_market_snapshot return that exact (ret, data) tuple unchanged
+        (thin broker read — no interpretation).
+        """
+        pytest.skip("Wave 0 stub — implemented in Task 3")
+
+    def test_get_market_snapshot_ret_error_returned_as_is(self):
+        """
+        A non-RET_OK ret is returned as-is (the caller — 03-02 fetch helper —
+        treats it as an empty result; the gateway never raises here).
+        """
+        pytest.skip("Wave 0 stub — implemented in Task 3")
+
+    def test_get_market_snapshot_passes_codes(self):
+        """
+        get_market_snapshot forwards the exact `codes` list to
+        _quote_ctx.get_market_snapshot(codes) (<=20 watchlist codes).
+        """
+        pytest.skip("Wave 0 stub — implemented in Task 3")

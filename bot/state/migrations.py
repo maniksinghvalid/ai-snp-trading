@@ -126,13 +126,57 @@ def _migration_0002(conn: sqlite3.Connection) -> None:
 # Migration List (index N corresponds to migration step N+1)
 # ============================================================
 
+# ============================================================
+# Migration 0003 — Daily Trade Counter + Pending Intents (Phase 3)
+# ============================================================
+#
+# Tables:
+#   daily_trade_count — authoritative filled-entry counter per session date.
+#                       Incremented at fill time (Phase 4, D-08).
+#                       Phase 3 reads filled_count for the D-09 daily-cap gate.
+#   pending_intents   — one row per emitted OrderIntent (D-12).
+#                       Lifecycle: PENDING → RESOLVED | EXPIRED (Phase 4 closes).
+#
+# WR-03: callable (not SQL string) so executescript's implicit COMMIT does not
+# race with the user_version bump. CREATE TABLE IF NOT EXISTS is already
+# idempotent without column-level guards.
+
+
+def _migration_0003(conn: sqlite3.Connection) -> None:
+    """Add Phase 3 daily-trade counter and pending-intent tables (D-08, D-12).
+
+    Idempotent: each CREATE TABLE uses IF NOT EXISTS so re-running after a
+    partial failure does not raise 'table already exists'. Called as a callable
+    so the user_version PRAGMA bump commits atomically with the DDL (WR-03).
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS daily_trade_count (
+            session_date    TEXT PRIMARY KEY,
+            filled_count    INTEGER NOT NULL DEFAULT 0,
+            updated_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pending_intents (
+            intent_id       TEXT PRIMARY KEY,
+            code            TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'PENDING',
+            entry_price     REAL NOT NULL,
+            stop_price      REAL NOT NULL,
+            quantity        INTEGER NOT NULL,
+            emitted_at      TEXT NOT NULL,
+            resolved_at     TEXT
+        );
+    """)
+
+
 MIGRATIONS = [
     _MIGRATION_0001,
     _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
+    _migration_0003,   # adds daily_trade_count + pending_intents (Phase 3, D-08/D-12)
 ]
 
 
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 
 # ============================================================
