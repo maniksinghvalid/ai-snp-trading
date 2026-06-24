@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation** - Gateway, StateStore, StrategyCore, and safety primitives that everything else depends on
 - [x] **Phase 2: Premarket Scanner** - Daily watchlist generation via S&P 500 constituent fetch and D1/D2/D3 filters (completed 2026-06-23)
-- [x] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (completed 2026-06-24)
+- [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [ ] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close
 - [ ] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging
 - [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code
