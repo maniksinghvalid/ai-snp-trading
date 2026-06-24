@@ -1,8 +1,9 @@
 ---
 phase: 02-premarket-scanner
 verified: 2026-06-23T00:00:00Z
-status: human_needed
+status: passed
 score: 7/7 must-haves verified
+human_verification_status: all 3 items confirmed live via 02-UAT.md (2026-06-23); 2 gaps found+fixed (3810e60 SCAN-01 UA header, 0ee8bcc SCAN-06 degradation gate) and re-verified
 overrides_applied: 0
 human_verification:
   - test: "Live Wikipedia scrape — run scanner with network on; confirm ~500 symbols returned and a dated cache file written under data/"
