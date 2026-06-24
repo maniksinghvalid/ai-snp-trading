@@ -16,7 +16,6 @@ No numeric or time literals appear in this module — every boundary is config-d
 Exports: SignalEngine
 """
 
-import sqlite3
 from datetime import datetime, time
 from typing import Dict, List, Optional
 
@@ -51,8 +50,11 @@ class SignalEngine:
            result via set_premarket_highs().
         2. On every closed bar, the subscriber calls on_bar(event). Each gate
            evaluates independently and short-circuits with a logged reason on failure.
-        3. When a SignalEvent is emitted, _pending_count is incremented so
-           subsequent on_bar() calls see the correct D-09 tally (burst guard).
+        3. When a SignalEvent is emitted, RiskEngine calls note_intent_emitted()
+           which increments _pending_count exactly once (D-09/D-11 burst guard).
+           on_bar() itself does NOT increment _pending_count — only the
+           downstream note_intent_emitted() hook does so, ensuring the tally
+           advances by exactly 1 per emitted OrderIntent, not per SignalEvent.
     """
 
     def __init__(
@@ -105,11 +107,13 @@ class SignalEngine:
         )
 
     def note_intent_emitted(self) -> None:
-        """Increment the session pending tally (D-09 burst guard).
+        """Increment the session pending tally by exactly 1 (D-09 burst guard).
 
-        Called externally by the downstream pipeline (e.g. RiskEngine) when it
-        converts a SignalEvent into an emitted OrderIntent. Exposed so the tally
-        is adjustable without direct attribute access.
+        Called by the downstream pipeline (RiskEngine) when it successfully
+        converts a SignalEvent into an emitted OrderIntent (D-11: only emitted
+        intents consume a slot). This is the SOLE place _pending_count is
+        incremented — SignalEngine.on_bar() does NOT increment it directly, so
+        each intent advances the tally exactly once.
         """
         self._pending_count += 1
 
@@ -166,9 +170,25 @@ class SignalEngine:
             self.set_premarket_highs({})
             return {}
 
+        # WR-05: validate expected columns are present before iterating.
+        # Series.get() silently returns None for missing index labels, turning a
+        # schema mismatch (e.g. SDK field rename) into a silent all-zero day.
+        # Fail fast here so the operator sees a clear warning instead.
+        if hasattr(data, "columns"):
+            for required_col in ("code", "pre_high_price"):
+                if required_col not in data.columns:
+                    _logger.warning(
+                        "fetch_premarket_highs_missing_column",
+                        missing_column=required_col,
+                        available_columns=list(data.columns),
+                        reason="snapshot DataFrame is missing expected column — no premarket highs this session",
+                    )
+                    self.set_premarket_highs({})
+                    return {}
+
         for _, row in data.iterrows():
-            code = row.get("code") if hasattr(row, "get") else row["code"]
-            raw_price = row.get("pre_high_price") if hasattr(row, "get") else row["pre_high_price"]
+            code = row["code"]
+            raw_price = row["pre_high_price"]
 
             # D-03: include only when pre_high_price is a real positive number
             try:
@@ -284,8 +304,10 @@ class SignalEngine:
           5. Re-entry: code broker-flat AND no live PENDING intent (D-10)
           6. Daily cap: filled_count + pending_count < max_trades_per_day (RISK-05/D-09)
 
-        Only emitted SignalEvents increment _pending_count; blocked signals do not
-        consume any entry slot (D-11).
+        Blocked signals do not consume any entry slot (D-11). Emitted
+        SignalEvents cause _pending_count to increment via the downstream
+        RiskEngine calling note_intent_emitted() — on_bar() itself does not
+        touch _pending_count.
 
         Args:
             event: Closed BarEvent from BarAggregator.
@@ -385,7 +407,7 @@ class SignalEngine:
         # Count distinct open codes from broker truth (any non-empty DataFrame row = open)
         open_position_count = len(positions_data) if hasattr(positions_data, "__len__") else 0
 
-        # Also check if US.AAPL itself is already in open positions (re-entry blocking)
+        # Also check if this code is already in an open position (re-entry blocking)
         open_codes: set = set()
         if hasattr(positions_data, "iterrows"):
             for _, row in positions_data.iterrows():
@@ -457,10 +479,11 @@ class SignalEngine:
             emitted_at=now_et(),
         )
 
-        # Increment the in-memory pending tally (D-09 burst guard).
-        # This ensures a burst of bars in the same session cannot exceed the cap
-        # before any fill registers. Only emitted signals consume a slot (D-11).
-        self._pending_count += 1
+        # D-09 / D-11: do NOT increment _pending_count here. The downstream
+        # RiskEngine calls note_intent_emitted() exactly once per emitted
+        # OrderIntent. Incrementing here as well would advance the tally by 2
+        # per intent, causing the daily-cap gate to block after ~half the
+        # configured max_trades_per_day. Only emitted intents consume a slot.
 
         _logger.info(
             "signal_emitted",

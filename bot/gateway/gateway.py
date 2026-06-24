@@ -16,7 +16,7 @@ Exports: MoomooGateway, GatewayConfig, GatewayError, get_gateway_config
 import asyncio
 import os
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # moomoo SDK imported directly (D-02 wrap-not-import)
@@ -293,7 +293,7 @@ class MoomooGateway:
 
         Returns (ret, data) tuple from trade_ctx.get_acc_list().
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._trade_ctx.get_acc_list)
 
     async def get_positions(self) -> tuple:
@@ -301,7 +301,7 @@ class MoomooGateway:
 
         Returns (ret, data) from trade_ctx.position_list_query().
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             lambda: self._trade_ctx.position_list_query(),
@@ -325,7 +325,7 @@ class MoomooGateway:
                     _EQUITY_FALLBACK (100,000) on any failure or implausible value.
         """
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             ret, data = await loop.run_in_executor(
                 None,
                 lambda: self._trade_ctx.accinfo_query(
@@ -394,7 +394,7 @@ class MoomooGateway:
             ret == RET_OK (0) on success; data is a DataFrame or similar.
             Non-RET_OK ret is returned as-is without raising.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             lambda: self._quote_ctx.get_market_snapshot(codes),
@@ -422,7 +422,7 @@ class MoomooGateway:
         if subtypes is None:
             subtypes = [SubType.K_5M]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _subscribe_blocking():
             ret, msg = self._quote_ctx.subscribe(
@@ -463,7 +463,7 @@ class MoomooGateway:
         if subtypes is None:
             subtypes = [SubType.K_5M]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _unsubscribe_blocking():
             ret, msg = self._quote_ctx.unsubscribe(codes, subtypes)

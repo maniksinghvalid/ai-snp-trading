@@ -557,8 +557,17 @@ class TestSignalEngineDailyCap:
 
     def test_session_pending_tally_increments_on_emit(self):
         """
-        Each emitted SignalEvent increments the in-memory pending_count so
-        that subsequent signals see the correct D-09 tally (burst guard).
+        note_intent_emitted() increments _pending_count; on_bar() does NOT.
+
+        The D-09 burst guard tally is managed solely by RiskEngine calling
+        note_intent_emitted() after successfully emitting an OrderIntent (D-11).
+        on_bar() must NOT increment _pending_count — doing so double-counts
+        (CR-02 fix) and would cap the bot at ~half the configured max_trades_per_day.
+
+        Verify:
+          - on_bar() emitting a SignalEvent does NOT touch _pending_count.
+          - note_intent_emitted() increments by exactly 1.
+          - The D-09 gate correctly uses _pending_count set via note_intent_emitted().
         """
         cfg = make_cfg(max_concurrent_positions=5, max_trades_per_day=2)
         premarket_highs = {"US.AAPL": 150.0}
@@ -590,27 +599,35 @@ class TestSignalEngineDailyCap:
             bar1 = make_bar(code="US.AAPL", close=155.0, hod=154.0)
             result1 = run(engine.on_bar(bar1))
             assert result1 is not None, "First signal should emit (0+0 < 2)"
-            assert engine._pending_count == 1, "Pending count should increment to 1 after emit"
+            # on_bar() must NOT increment _pending_count (CR-02 fix)
+            assert engine._pending_count == 0, (
+                "on_bar() must NOT increment _pending_count — only "
+                "RiskEngine.note_intent_emitted() advances the tally (CR-02)"
+            )
+            # Simulate RiskEngine calling note_intent_emitted() for the emitted intent
+            engine.note_intent_emitted()
+            assert engine._pending_count == 1, "note_intent_emitted() must increment by 1"
 
-            # Second call with same code is blocked by re-entry gate
-            # We need a fresh engine that can emit for a DIFFERENT scenario
-            # Let's manually manipulate: set _pending_count to 1 on a fresh engine
+            # With pending=1, total=1 < 2: a new engine should still emit
             engine2 = SignalEngine(cfg=cfg, gateway=gateway, store=make_store_with_scan())
             engine2.set_premarket_highs(premarket_highs)
-            engine2._pending_count = 1  # Simulate one pending from earlier
+            engine2._pending_count = 1  # Simulate one prior intent via note_intent_emitted
 
-            # filled=0, pending=1 → total=1 < 2 → should still emit
             result2 = run(engine2.on_bar(bar1))
-            assert result2 is not None, "Second signal can emit when total=1 < 2"
+            assert result2 is not None, "Signal can emit when pending=1 < max=2"
+            # on_bar still must not increment
+            assert engine2._pending_count == 1, "on_bar() still must not touch _pending_count"
+            # Simulate RiskEngine incrementing
+            engine2.note_intent_emitted()
             assert engine2._pending_count == 2
 
-            # Now pending=2, max=2 → blocked
+            # Now pending=2, max=2 → daily cap blocks
             engine3 = SignalEngine(cfg=cfg, gateway=gateway, store=make_store_with_scan())
             engine3.set_premarket_highs(premarket_highs)
-            engine3._pending_count = 2  # Simulate 2 pending
+            engine3._pending_count = 2  # Simulate 2 prior intents
 
             result3 = run(engine3.on_bar(bar1))
-            assert result3 is None, "Signal blocked when total pending == max_trades_per_day"
+            assert result3 is None, "Signal blocked when pending_count == max_trades_per_day"
             assert engine3._pending_count == 2, "Blocked signal must not increment tally"
 
     def test_reentry_blocked_by_pending_intent(self):
