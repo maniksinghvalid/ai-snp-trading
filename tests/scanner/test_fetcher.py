@@ -23,9 +23,30 @@ def _make_ticker_df(symbol: str) -> pd.DataFrame:
     })
 
 
+def _make_nan_ticker_df() -> pd.DataFrame:
+    """Return an all-NaN OHLCV frame — how yfinance 1.4.1 surfaces a failed ticker
+    (present in the result but with no usable data, shared._ERRORS left empty)."""
+    return pd.DataFrame({
+        "Open": [float("nan"), float("nan")],
+        "High": [float("nan"), float("nan")],
+        "Low": [float("nan"), float("nan")],
+        "Close": [float("nan"), float("nan")],
+        "Volume": [float("nan"), float("nan")],
+    })
+
+
 def _make_multi_ticker_data(symbols: list) -> dict:
     """Return a dict-like object keyed by ticker symbol."""
     return {sym: _make_ticker_df(sym) for sym in symbols}
+
+
+def _make_data_with_nan_failures(ok: list, failed: list) -> dict:
+    """Build a result where failed tickers are PRESENT but all-NaN (yfinance 1.4.1
+    real failure shape), not absent — exercises data-derived failure detection."""
+    data = {sym: _make_ticker_df(sym) for sym in ok}
+    for sym in failed:
+        data[sym] = _make_nan_ticker_df()
+    return data
 
 
 class TestDownloadDailyBars:
@@ -104,6 +125,55 @@ class TestTickerNormalization:
 
 class TestDegradationGate:
     """SCAN-06: Data-degradation policy at >= 10% and < 10% failure rates."""
+
+    def test_all_nan_tickers_detected_without_shared_errors(self, monkeypatch):
+        """UAT Test 2 regression: failures present as all-NaN frames with an EMPTY
+        shared._ERRORS must still be counted (yfinance 1.4.1 behaviour).
+
+        The pre-fix code read only shared._ERRORS, so this case reported 0
+        failures and the degradation gate never tripped.
+        """
+        import yfinance.shared as yf_shared
+
+        total = 100
+        symbols = [f"SYM{i:03d}" for i in range(total)]
+        fail_keys = {f"SYM{i:03d}" for i in range(15)}  # 15% — all-NaN, not absent
+        ok = [s for s in symbols if s not in fail_keys]
+        mock_data = _make_data_with_nan_failures(ok, sorted(fail_keys))
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()  # stays empty — the real 1.4.1 case
+            with patch("yfinance.download", return_value=mock_data), \
+                 patch("bot.scanner.fetcher.append_audit"):
+                from bot.scanner.fetcher import download_daily_bars, ScanDegradationError
+                with pytest.raises(ScanDegradationError):
+                    download_daily_bars(symbols)
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+    def test_under_10pct_all_nan_warns_and_proceeds(self, monkeypatch):
+        """< 10% all-NaN failures (empty shared._ERRORS) are counted but do not raise."""
+        import yfinance.shared as yf_shared
+
+        total = 100
+        symbols = [f"SYM{i:03d}" for i in range(total)]
+        fail_keys = {f"SYM{i:03d}" for i in range(7)}  # 7% all-NaN
+        ok = [s for s in symbols if s not in fail_keys]
+        mock_data = _make_data_with_nan_failures(ok, sorted(fail_keys))
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()
+            with patch("yfinance.download", return_value=mock_data):
+                from bot.scanner.fetcher import download_daily_bars
+                data, failed = download_daily_bars(symbols)
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+        assert failed == fail_keys, "all-NaN tickers must be detected from data, not shared._ERRORS"
 
     def test_partial_failure_detected_via_shared_errors(self, monkeypatch):
         """Failed tickers are detected by inspecting yfinance.shared._ERRORS after download."""

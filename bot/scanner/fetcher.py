@@ -59,11 +59,19 @@ def download_daily_bars(
     On failure >= degradation_threshold: logs "scan_aborted_data_degradation",
     surfaces a durable audit entry (D-07), raises ScanDegradationError.
 
+    Failure detection is data-derived (UAT Test 2 / SCAN-06): yfinance 1.4.1 no
+    longer populates ``shared._ERRORS`` reliably — a failed ticker is returned
+    PRESENT but all-NaN while ``shared._ERRORS`` stays empty — so reading that
+    dict silently under-counts failures and the D-06 gate would never trip. We
+    instead treat a ticker as failed when ``get_ticker_frame`` yields None
+    (missing or all-NaN), unioned with any ``shared._ERRORS`` keys older
+    yfinance versions still record.
+
     yf_symbols: list of str — yfinance-format symbols (e.g. ["AAPL", "BRK-B"]).
     threads: int — number of download threads (default 5, bounded concurrency).
     degradation_threshold: float — fraction of failures that triggers abort.
     Returns (data, failed_set): data is the yf.download result; failed_set is the
-        set of ticker strings that failed (from shared._ERRORS).
+        set of ticker strings with no usable data.
     Raises ScanDegradationError when failure_rate >= degradation_threshold.
     """
     if not yf_symbols:
@@ -82,7 +90,7 @@ def download_daily_bars(
         progress=False,
     )
 
-    failed = set(shared._ERRORS.keys())
+    failed = _detect_failed(data, yf_symbols)
     failure_rate = len(failed) / len(yf_symbols) if yf_symbols else 0.0
 
     if failure_rate >= degradation_threshold:
@@ -112,6 +120,20 @@ def download_daily_bars(
         )
 
     return data, failed
+
+
+def _detect_failed(data: object, yf_symbols: list) -> Set[str]:
+    """Return the set of symbols with no usable data after a yf.download (SCAN-06).
+
+    A symbol counts as failed when get_ticker_frame returns None — i.e. it is
+    missing from the result or its frame is entirely NaN (the way yfinance 1.4.1
+    surfaces a delisted/failed ticker). Unioned with any shared._ERRORS keys that
+    older yfinance versions still populate, so detection is version-robust.
+    """
+    failed = {sym for sym in yf_symbols if get_ticker_frame(data, sym) is None}
+    requested = set(yf_symbols)
+    failed |= {sym for sym in shared._ERRORS.keys() if sym in requested}
+    return failed
 
 
 def get_ticker_frame(data: object, symbol: str) -> Optional[pd.DataFrame]:
