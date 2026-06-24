@@ -69,17 +69,23 @@ def _run(coro):
 
 
 # ============================================================
-# test_entry_placed_simulate — still a stub (manual live test)
+# test_entry_placed_simulate — manual-only live test (pytest.skip)
 # ============================================================
 
+@pytest.mark.skip(
+    reason="Manual-only live SIMULATE verification — requires running OpenD + "
+    "logged-in paper account. Automated coverage: test_entry_placed_simulate_unit. "
+    "See 04-VALIDATION.md Manual-Only Verifications."
+)
 def test_entry_placed_simulate():
     """EXEC-01 (live SIMULATE): Entry order placed in SIMULATE env; FillEvent emitted.
 
-    This is the MANUAL verification stub per 04-VALIDATION Manual-Only Verifications.
-    The automated sampling path is test_entry_placed_simulate_unit below.
-    Implemented in 04-03 (live integration test — requires running OpenD paper account).
+    Manual-only — see 04-VALIDATION Manual-Only Verifications. The automated
+    sampling path is test_entry_placed_simulate_unit below. This live integration
+    test requires a running OpenD GUI + a logged-in paper (SIMULATE) account; it is
+    skipped in the automated suite and run manually per 04-VALIDATION.md.
     """
-    assert False, "TODO: manual live SIMULATE test — see 04-VALIDATION Manual-Only Verifications"
+    ...  # manual procedure documented in 04-VALIDATION.md Manual-Only Verifications
 
 
 # ============================================================
