@@ -33,6 +33,24 @@ _logger = get_logger(__name__)
 _BAR_BUFFER_MAX = 50
 
 
+def _log_future_exception(fut) -> None:
+    """Done-callback: log any exception captured in an asyncio Future.
+
+    Attached to every run_coroutine_threadsafe future so exceptions in
+    on_bar_closed (e.g. StateStore write error, gateway exception, sizing bug)
+    surface in the structured log rather than being swallowed silently (WR-02).
+    The SDK thread remains non-blocking — this callback executes on the
+    concurrent.futures machinery, not the SDK thread itself.
+    """
+    exc = fut.exception()
+    if exc is not None:
+        _logger.error(
+            "bar_aggregator_callback_error",
+            exc_info=exc,
+            reason="exception in on_bar_closed coroutine (async pipeline)",
+        )
+
+
 class BarAggregator(CurKlineHandlerBase):
     """Bar-close detection via timestamp advance with session dedup (SIG-02).
 
@@ -42,7 +60,14 @@ class BarAggregator(CurKlineHandlerBase):
     never twice for a reconnect re-push.
 
     Design decisions (RESEARCH.md):
-      - SIG-02: strategy evaluation fires only on time_key advance (bar close).
+      - SIG-02 no-repaint: the emitted closed BarEvent carries the OHLCV of
+        the bar that just CLOSED (bar A's FINAL values), NOT the new bar's
+        (bar B's) first push. _cur_bar[code] buffers the in-progress bar's
+        latest OHLCV per code; on time_key advance it provides the snapshot
+        for the closing bar.
+      - HOD/LOD snapshot: HOD/LOD are captured BEFORE updating with the new
+        bar B's first tick, so the closed bar's session stats exclude bar B.
+        HOD/LOD are then updated with bar B's values for the next advance.
       - Pitfall 1: _seen_time_keys persists across SDK reconnects for the
         session lifetime; reset ONLY at reset_session() (start of day).
       - Pitfall 3: _lod tracks the session running-min of all pushed bar lows
@@ -54,12 +79,21 @@ class BarAggregator(CurKlineHandlerBase):
         asyncio.run_coroutine_threadsafe (non-blocking fire-and-forget).
       - T-03-01: malformed rows are swallowed by try/except; no crash, no fire.
       - T-03-03: SDK thread is never blocked — bridge call is non-blocking.
+      - WR-02: the Future returned by run_coroutine_threadsafe has a
+        done-callback (_log_future_exception) so on_bar_closed exceptions are
+        logged rather than silently dropped.
 
-    Per-code state dicts (written only from the SDK push thread, single-writer):
+    Per-code state dicts (written ONLY from the SDK push thread; single-writer
+    so no locking is needed for writes. Thread-safety note: the snapshot dict
+    passed to run_coroutine_threadsafe is a freshly constructed plain dict —
+    immutable after construction — so the asyncio loop thread sees a consistent
+    view. Never expose the mutable _hod/_lod/_cur_bar dicts to off-thread
+    readers; always pass snapshots):
       _last_time_key: last seen time_key per code
       _seen_time_keys: all time_keys that have fired evaluation (dedup set)
       _hod: running max of all pushed bar highs per code (D-02)
       _lod: running min of all pushed bar lows per code from first bar (Pitfall 3)
+      _cur_bar: in-progress bar's latest OHLCV per code (open/high/low/close/volume)
       _bar_buffer: rolling deque of closed-bar dicts per code (maxlen=50)
     """
 
@@ -73,7 +107,7 @@ class BarAggregator(CurKlineHandlerBase):
         Args:
             loop: The asyncio event loop owned by the main bot thread.
                   Must be obtained BEFORE creating BarAggregator (e.g. via
-                  asyncio.get_event_loop() in the main asyncio context).
+                  asyncio.get_running_loop() in the main asyncio context).
                   Never call asyncio.get_event_loop() inside on_recv_rsp.
             on_bar_closed: Async coroutine to invoke with bar_data dict on
                   each bar close. Signature: async def f(bar_data: dict) -> None.
@@ -86,6 +120,7 @@ class BarAggregator(CurKlineHandlerBase):
         self._seen_time_keys: Dict[str, Set[str]] = {}
         self._hod: Dict[str, float] = {}
         self._lod: Dict[str, float] = {}
+        self._cur_bar: Dict[str, dict] = {}  # in-progress bar snapshot (SIG-02 no-repaint)
         self._bar_buffer: Dict[str, deque] = {}
 
     def reset_session(self) -> None:
@@ -99,6 +134,7 @@ class BarAggregator(CurKlineHandlerBase):
         self._seen_time_keys.clear()
         self._hod.clear()
         self._lod.clear()
+        self._cur_bar.clear()
         self._bar_buffer.clear()
         _logger.info("bar_aggregator_session_reset")
 
@@ -135,9 +171,27 @@ class BarAggregator(CurKlineHandlerBase):
     def _handle_row(self, row) -> None:
         """Parse one push row and fire on_bar_closed if a bar just closed.
 
-        All OHLCV parsing and state mutation happens here, isolated from
-        on_recv_rsp so that a single try/except in the caller catches all
-        errors without duplicating exception handling.
+        SIG-02 no-repaint invariant: the BarEvent emitted for closed bar A
+        carries bar A's FINAL OHLCV (the last mid-bar push for bar A) and the
+        session HOD/LOD up to and including bar A — NOT bar B's first tick values.
+
+        Algorithm:
+          1. Parse code, time_key, OHLCV from current row (may be bar A mid-bar
+             or bar B's first push).
+          2. Update _cur_bar[code] with the new OHLCV (always; this is bar A's
+             evolving snapshot, or bar B's initial state after the advance).
+          3. If this is the FIRST push for the code: initialise state and return.
+          4. If same time_key (mid-bar update for bar A): also update HOD/LOD
+             eagerly and return without firing.
+          5. If time_key advanced (bar B's first push):
+             a. Snapshot HOD/LOD BEFORE updating with bar B's values (so the
+                closed bar A's session stats exclude bar B's first tick).
+             b. Retrieve bar A's FINAL OHLCV from _cur_bar[code] (set in step 2,
+                which captured the PREVIOUS row — bar A's last push — because
+                _cur_bar is updated BEFORE the advance check).
+             c. Update HOD/LOD with bar B's values (for the next advance).
+             d. Emit the closed-bar event for bar A using the OHLCV and HOD/LOD
+                snapshots captured in steps 5a–5b.
         """
         code = str(row.get("code", "") or "")
         time_key = str(row.get("time_key", "") or "")
@@ -151,39 +205,47 @@ class BarAggregator(CurKlineHandlerBase):
         close = float(row.get("close", 0) or 0)
         volume = int(float(row.get("volume", 0) or 0))
 
-        # Update HOD (running max of all pushed highs) on EVERY push.
-        # The current bar's high grows mid-bar; update eagerly so the
-        # last-seen HOD is the most accurate at bar close (D-02).
-        self._hod[code] = max(self._hod.get(code, 0.0), high)
-
-        # Update LOD (session running-min of all pushed lows) on EVERY push.
-        # From the very first K_5M bar of the session — NOT a single bar low.
-        # This is the session LOD that flows into compute_initial_stop(lod)
-        # (RESEARCH Pitfall 3 / Open-Q3 RESOLVED).
-        if code in self._lod:
-            self._lod[code] = min(self._lod[code], low)
-        else:
-            # First push for this code — seed LOD from this bar's low.
-            self._lod[code] = low
-
         prev_time_key = self._last_time_key.get(code)
 
         if prev_time_key is None:
-            # First push for this code — record the time_key.
+            # First push for this code — initialise per-code state.
             # No bar has closed yet; we need two distinct time_keys to confirm.
             self._last_time_key[code] = time_key
+            self._cur_bar[code] = {
+                "open": open_, "high": high, "low": low,
+                "close": close, "volume": volume,
+            }
             if code not in self._seen_time_keys:
                 self._seen_time_keys[code] = set()
             if code not in self._bar_buffer:
                 self._bar_buffer[code] = deque(maxlen=_BAR_BUFFER_MAX)
+            # Seed HOD/LOD from this bar's first push.
+            self._hod[code] = high
+            self._lod[code] = low
             return
 
         if time_key == prev_time_key:
             # Same bar — mid-bar update. Never fire strategy evaluation.
             # SIG-02: evaluation fires ONLY on time_key advance.
+            # Update _cur_bar with the latest OHLCV so when bar A closes,
+            # _cur_bar[code] holds bar A's FINAL values (not an earlier mid-bar).
+            self._cur_bar[code] = {
+                "open": open_, "high": high, "low": low,
+                "close": close, "volume": volume,
+            }
+            # Update HOD/LOD eagerly on every mid-bar push so the running
+            # stats are up-to-date at bar close.
+            self._hod[code] = max(self._hod.get(code, 0.0), high)
+            if code in self._lod:
+                self._lod[code] = min(self._lod[code], low)
+            else:
+                self._lod[code] = low
             return
 
-        # time_key advanced → the PREVIOUS bar (prev_time_key) is now closed.
+        # ----------------------------------------------------------------
+        # time_key advanced → bar at prev_time_key (bar A) has just closed.
+        # Current row is bar B's first push — do NOT use its OHLCV for bar A.
+        # ----------------------------------------------------------------
         closed_time_key = prev_time_key
 
         if code not in self._seen_time_keys:
@@ -195,23 +257,45 @@ class BarAggregator(CurKlineHandlerBase):
             # reconnect re-push of an already-seen bar is silently ignored.
             self._seen_time_keys[code].add(closed_time_key)
 
-            # Build the closed-bar event dict.
-            # Note: OHLCV values below come from the CURRENT row (new bar's
-            # first push) because we don't buffer mid-bar state. For the
-            # closed bar, we use what we have. The HOD/LOD are the session
-            # running stats which are correct at this point.
-            # IMPORTANT: BarEvent.hod and .lod are session running stats;
-            # BarEvent.high and .low are the just-closed bar's values.
+            # SIG-02 no-repaint: retrieve bar A's FINAL OHLCV from _cur_bar.
+            # _cur_bar[code] was last written during bar A's last mid-bar push,
+            # so it holds bar A's final open/high/low/close/volume.
+            closed_ohlcv = self._cur_bar.get(code, {
+                "open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 0,
+            })
+
+            # Snapshot HOD/LOD BEFORE updating with bar B's first tick.
+            # BarEvent.hod = session running max of all ticks UP TO AND INCLUDING
+            # bar A's last push (excludes bar B's first tick).
+            # BarEvent.lod = session running min of all pushed lows from the first
+            # K_5M bar up to and including bar A (RESEARCH Pitfall 3).
+            snap_hod = self._hod.get(code, 0.0)
+            snap_lod = self._lod.get(code, 0.0)
+
+            # Now update HOD/LOD with bar B's first tick (for the next advance).
+            self._hod[code] = max(snap_hod, high)
+            if code in self._lod:
+                self._lod[code] = min(self._lod[code], low)
+            else:
+                self._lod[code] = low
+
+            # Store bar B's initial OHLCV as the new in-progress bar state.
+            self._cur_bar[code] = {
+                "open": open_, "high": high, "low": low,
+                "close": close, "volume": volume,
+            }
+
+            # Build the closed-bar event dict using bar A's FINAL values.
             bar_data = {
                 "code": code,
                 "time_key": closed_time_key,
-                "open": open_,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume,
-                "hod": self._hod.get(code, 0.0),
-                "lod": self._lod.get(code, 0.0),
+                "open": closed_ohlcv["open"],
+                "high": closed_ohlcv["high"],
+                "low": closed_ohlcv["low"],
+                "close": closed_ohlcv["close"],
+                "volume": closed_ohlcv["volume"],
+                "hod": snap_hod,  # session max EXCLUDING bar B's first tick
+                "lod": snap_lod,  # session min EXCLUDING bar B's first tick
             }
 
             # Add to per-code rolling bar buffer (consumed by SignalEngine).
@@ -220,20 +304,36 @@ class BarAggregator(CurKlineHandlerBase):
             self._bar_buffer[code].append(bar_data)
 
             # Bridge SDK push thread → asyncio event loop (non-blocking).
-            # asyncio.run_coroutine_threadsafe returns a concurrent.futures.Future;
-            # we fire-and-forget here since the signal pipeline is asynchronous.
+            # run_coroutine_threadsafe returns a concurrent.futures.Future.
+            # Attach a done-callback so exceptions in on_bar_closed surface in
+            # the structured log rather than being silently dropped (WR-02).
             # T-03-03: this call is non-blocking — never stalls the SDK thread.
-            asyncio.run_coroutine_threadsafe(
+            fut = asyncio.run_coroutine_threadsafe(
                 self._on_bar_closed(bar_data), self._loop
             )
+            fut.add_done_callback(_log_future_exception)
 
             _logger.debug(
                 "bar_closed",
                 code=code,
                 time_key=closed_time_key,
-                hod=bar_data["hod"],
-                lod=bar_data["lod"],
+                close=closed_ohlcv["close"],
+                hod=snap_hod,
+                lod=snap_lod,
             )
+
+        else:
+            # Already seen (reconnect re-push): still need to update state for
+            # the new bar B so subsequent ticks are tracked correctly.
+            self._hod[code] = max(self._hod.get(code, 0.0), high)
+            if code in self._lod:
+                self._lod[code] = min(self._lod[code], low)
+            else:
+                self._lod[code] = low
+            self._cur_bar[code] = {
+                "open": open_, "high": high, "low": low,
+                "close": close, "volume": volume,
+            }
 
         # Update last_time_key to the new (current) bar's time_key.
         self._last_time_key[code] = time_key

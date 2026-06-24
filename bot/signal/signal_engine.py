@@ -335,6 +335,13 @@ class SignalEngine:
         # --------------------------------------------------------
         # Fetch rvol from the daily_scan table (RESEARCH Pitfall 2: never recompute RVOL).
         # rvol = current_volume / rvol_baseline. If rvol_baseline is missing/zero → no signal.
+        #
+        # WR-06 date convention: ALL *_date keys in this module use the US ET calendar
+        # date (now_et().date()). The Phase 2 scan writer MUST use the same ET-date key
+        # when inserting daily_scan rows (scan_date = now_et().date().isoformat()) so that
+        # the key written at scan time and the key read here match for every trading day.
+        # Do NOT use UTC dates for *_date keys (migration 0001's "UTC" note applies to
+        # *_time / *_at timestamp fields, not to session-scoped date keys).
         session_date_str = now_et().date().isoformat()
         rvol_baseline_row = self._store.conn.execute(
             "SELECT rvol_baseline FROM daily_scan WHERE scan_date = ? AND code = ?",

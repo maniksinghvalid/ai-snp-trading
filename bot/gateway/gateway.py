@@ -50,7 +50,20 @@ _logger = get_logger(__name__)
 
 _EQUITY_FALLBACK: float = 100_000.0   # fallback when query fails or value is implausible (D-05)
 _IMPLAUSIBLE_LOW: float = 1_000.0     # < $1,000 indicates a failed/uninitialized query (D-05)
-_IMPLAUSIBLE_HIGH: float = 10_000_000.0  # > $10M indicates a corrupt read (T-03-07 upper bound)
+
+# WR-04: Upper bound is deliberately large (100× the $100k SIMULATE starting equity)
+# to guard against corrupt reads that would produce an outsized position if used
+# for sizing. The chosen ceiling is 100× (not 10× or 1000×) because it leaves
+# headroom for a SIMULATE account that has compounded well above the initial $100k,
+# while still catching values that are obviously corrupt (e.g. an uninitialised
+# field parsed as a very large integer). On a PAPER_TRADING account (SIMULATE) this
+# threshold is unlikely to trigger; on a real account it would guard against a
+# mis-read total_assets. The fallback is $100k (the documented sizing basis) rather
+# than refusing to size, so the bot degrades gracefully rather than failing hard on
+# one implausible read. An operator monitoring the logs will see equity_implausible
+# warnings and can investigate. Changing the ceiling for a different starting equity
+# requires updating this constant (future work: source from StrategyConfig/env).
+_IMPLAUSIBLE_HIGH: float = 10_000_000.0  # > 100× $100k starting equity → suspect corrupt read
 
 
 # ============================================================

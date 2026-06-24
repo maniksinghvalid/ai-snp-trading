@@ -24,7 +24,11 @@ import sqlite3
 #   meta        — key/value store for bot-level persistent flags
 #
 # Design notes:
-#   • All TEXT date/time fields use ISO-8601 strings (UTC).
+#   • All TEXT timestamp fields (*_at, *_time) use ISO-8601 strings in UTC.
+#   • Session-scoped date keys (*_date, e.g. scan_date, session_date) use the
+#     US Eastern Time (ET) calendar date (now_et().date().isoformat()), NOT UTC.
+#     The strategy is ET-anchored so ET dates are the natural session boundary.
+#     Using UTC dates would miskey late-afternoon scans relative to Phase 3 reads.
 #   • UNIQUE constraints on daily_scan(scan_date, code) and
 #     bar_cache(code, time_key) prevent duplicate inserts and support
 #     Phase 2 idempotent-scan and Phase 4 bar-cache upserts.

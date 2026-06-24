@@ -314,6 +314,121 @@ class TestBarAggregatorHodLod:
 
 
 # ============================================================
+# CR-01 regression: closed BarEvent must carry the CLOSING bar's OHLCV
+# ============================================================
+
+class TestBarAggregatorNoRepaint:
+    """SIG-02 no-repaint: emitted closed BarEvent must carry bar A's FINAL OHLCV,
+    not bar B's first push values (CR-01 regression guard).
+
+    Scenario: bar A goes through multiple mid-bar updates (close evolves),
+    then bar B arrives with a DIFFERENT close. The BarEvent emitted for bar A
+    must reflect bar A's FINAL close/open/high/low/volume — not bar B's values.
+    HOD/LOD on the emitted event must also exclude bar B's first tick.
+    """
+
+    def test_closed_bar_carries_closing_bar_ohlcv_not_new_bars_first_tick(
+        self, event_loop_and_counter
+    ):
+        """
+        Push bar A three times (mid-bar updates with evolving close/high),
+        then push bar B with distinct different values.
+
+        The emitted BarEvent for bar A must carry bar A's FINAL values
+        (from bar A's last push), NOT bar B's first-push values.
+
+        Also: hod on the emitted event must equal bar A's running max (not
+        bar B's high), and lod must equal the session min through bar A (not
+        bar B's low).
+
+        This is the core CR-01 regression test — if BarAggregator reverts to
+        using the current row's OHLCV on advance, this test fails.
+        """
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+
+        # Bar A — three mid-bar pushes with an evolving close/high.
+        # T1, first push: close=150, high=152
+        bar_a_push1 = _make_row(
+            time_key="2026-06-24 10:05:00",
+            open_=148.0, high=152.0, low=147.5, close=150.0, volume=100_000,
+        )
+        # T1, second push: close rises to 153, high to 154
+        bar_a_push2 = _make_row(
+            time_key="2026-06-24 10:05:00",
+            open_=148.0, high=154.0, low=147.5, close=153.0, volume=200_000,
+        )
+        # T1, third (FINAL) push for bar A: close settles at 155, high=156
+        bar_a_push3 = _make_row(
+            time_key="2026-06-24 10:05:00",
+            open_=148.0, high=156.0, low=147.0, close=155.0, volume=300_000,
+        )
+
+        # Bar B — first push arrives with a DISTINCT close (bar B's new bar open).
+        # Use values clearly different from bar A's final values to make any
+        # repaint immediately visible.
+        bar_b_push1 = _make_row(
+            time_key="2026-06-24 10:10:00",
+            open_=157.0, high=159.0, low=156.5, close=158.0, volume=50_000,
+        )
+
+        # Feed bar A mid-bar updates (all same T1 → no emit).
+        agg.on_recv_rsp(bar_a_push1)  # seeds T1
+        agg.on_recv_rsp(bar_a_push2)  # mid-bar update
+        agg.on_recv_rsp(bar_a_push3)  # mid-bar update (bar A final state)
+
+        # Bar B's first push advances time_key → bar A closes.
+        agg.on_recv_rsp(bar_b_push1)
+
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+
+        assert len(calls) == 1, (
+            f"Exactly one BarEvent should fire (for bar A); got {len(calls)}"
+        )
+
+        ev = calls[0]
+
+        # time_key must be bar A's (not bar B's)
+        assert ev["time_key"] == "2026-06-24 10:05:00", (
+            f"BarEvent time_key must be bar A's T1, got {ev['time_key']!r}"
+        )
+
+        # OHLCV must match bar A's FINAL push values (bar_a_push3), NOT bar B's.
+        assert ev["close"] == 155.0, (
+            f"CR-01: close must be bar A's final close=155 (got {ev['close']}); "
+            f"bar B's close=158 means repaint is occurring"
+        )
+        assert ev["open"] == 148.0, (
+            f"CR-01: open must be bar A's open=148, got {ev['open']}"
+        )
+        assert ev["high"] == 156.0, (
+            f"CR-01: high must be bar A's final high=156, got {ev['high']}; "
+            f"bar B's high=159 means repaint is occurring"
+        )
+        assert ev["low"] == 147.0, (
+            f"CR-01: low must be bar A's final low=147, got {ev['low']}; "
+            f"bar B's low=156.5 means repaint is occurring"
+        )
+        assert ev["volume"] == 300_000, (
+            f"CR-01: volume must be bar A's final volume=300000, got {ev['volume']}; "
+            f"bar B's volume=50000 means repaint is occurring"
+        )
+
+        # HOD must equal bar A's running max (156 from bar_a_push3), NOT bar B's high (159).
+        assert ev["hod"] == 156.0, (
+            f"CR-01: hod must be bar A's session max=156 (excluding bar B); "
+            f"got {ev['hod']}. bar B's high=159 means HOD includes bar B's tick."
+        )
+
+        # LOD must equal bar A's session min (147 from bar_a_push3), NOT bar B's low (156.5).
+        assert ev["lod"] == 147.0, (
+            f"CR-01: lod must be session min through bar A=147 (excluding bar B); "
+            f"got {ev['lod']}. bar B's low=156.5 would give lod=147 anyway, but "
+            f"a seed-only scenario would show the bug if bar B had a lower low."
+        )
+
+
+# ============================================================
 # T-03-01: malformed push row
 # ============================================================
 
