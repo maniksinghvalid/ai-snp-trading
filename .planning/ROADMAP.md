@@ -119,7 +119,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Wave 0 scaffold (bot/signal + bot/risk packages, BarEvent/SignalEvent/OrderIntent dataclasses, migration 0003 daily_trade_count + pending_intents, failing test stubs) + BarAggregator (CurKlineHandlerBase subclass, time_key-advance bar-close detection with reconnect dedup, HOD/LOD running max/min, SDK-thread→asyncio bridge) [SIG-02] [Wave 1]
+- [x] 03-01-PLAN.md — Wave 0 scaffold (bot/signal + bot/risk packages, BarEvent/SignalEvent/OrderIntent dataclasses, migration 0003 daily_trade_count + pending_intents, failing test stubs) + BarAggregator (CurKlineHandlerBase subclass, time_key-advance bar-close detection with reconnect dedup, HOD/LOD running max/min, SDK-thread→asyncio bridge) [SIG-02] [Wave 1] *(2026-06-24, 3 tasks, 14 files, 11 min)*
 
 **Wave 2** *(blocked on 03-01)*
 

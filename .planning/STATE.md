@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-06-24T15:18:18.592Z"
-last_activity: 2026-06-23 -- Phase 02 execution started
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-06-24T15:33:47Z"
+last_activity: 2026-06-24 -- Completed Phase 03 Plan 01 (BarAggregator, migration 0003, events, get_market_snapshot)
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 8
-  completed_plans: 8
-  percent: 33
+  total_plans: 11
+  completed_plans: 9
+  percent: 36
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 02 — premarket-scanner
+**Current focus:** Phase 03 — intraday-signal-and-risk-engine
 
 ## Current Position
 
-Phase: 02 (premarket-scanner) — EXECUTING
-Plan: 4 of 4
-Status: Ready to execute
-Last activity: 2026-06-23 -- Phase 02 execution started
+Phase: 03 (intraday-signal-and-risk-engine) — EXECUTING
+Plan: 2 of 3
+Status: Executing Phase 03 (03-01 complete)
+Last activity: 2026-06-24 -- Completed Phase 03 Plan 01 (BarAggregator, migration 0003, events, get_market_snapshot)
 
 Progress: [████████░░] 75%
 
@@ -55,6 +55,7 @@ Progress: [████████░░] 75%
 | Phase 02-premarket-scanner P01 | 8 minutes | 3 tasks | 6 files |
 | Phase 02-premarket-scanner P02 | 12 minutes | 3 tasks | 4 files |
 | Phase 02-premarket-scanner P03 | 18 | 3 tasks | 4 files |
+| Phase 03-intraday-signal-and-risk-engine P01 | 11 minutes | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -90,11 +91,15 @@ Recent decisions affecting current work:
 - 02-01: shared._ERRORS testing uses real yfinance.shared._ERRORS dict with side_effect mock to avoid patch-then-clear race (patch replaces object, code clears it, mock values lost)
 - 02-01: wiki_to_yfinance uses str.replace('.', '-') — sufficient for all current S&P 500 tickers (BRK.B, BF.B); no regex needed
 - 02-01: calendar.py reads market_close UTC from schedule() and tz_converts to ET; handles both half-day (13:00) and normal day (16:00) via same code path
+- 03-01: SIG-02 — BarAggregator fires on_bar_closed exclusively on time_key advance; _seen_time_keys dedup survives SDK reconnects (Pitfall 1)
+- 03-01: LOD = session running-min from first K_5M bar (not single bar low) — Pitfall 3 / Open-Q3 RESOLVED
+- 03-01: get_market_snapshot is interpretation-free thin broker read; D-01/D-03 logic lives in 03-02 fetch_premarket_highs
+- 03-01: Migration 0003 uses callable with executescript for idempotent CREATE TABLE IF NOT EXISTS (WR-03)
 
 ### Research Flags (must resolve before planning those phases)
 
 - Phase 2: ~~snapshot batch quota~~ RESOLVED via yfinance (SCAN-06). Remaining (light): S&P 500 constituent source + yfinance batch reliability/rate behavior
-- Phase 3: Bar-close detection during subscription reconnect mid-bar; HOD/premarket-high field availability at scale
+- Phase 3: ~~Bar-close detection during subscription reconnect mid-bar~~ RESOLVED via _seen_time_keys dedup + is_first_push mid-bar guard. ~~HOD/premarket-high field~~ RESOLVED — pre_high_price confirmed; LOD = session running-min (Pitfall 3)
 - Phase 4: Paper account order flow behavior (push reliability, fill model) — empirical SIMULATE validation needed
 - Phase 6: ~~Moomoo historical 5m quota~~ RESOLVED via yfinance/flat-file (BT-04). Remaining (light): yfinance 5m history window (~60d) + whether a Parquet cache is needed
 
@@ -116,6 +121,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-24T07:20:05.669Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-intraday-signal-and-risk-engine/03-CONTEXT.md
+Last session: 2026-06-24T15:33:47Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: .planning/phases/03-intraday-signal-and-risk-engine/03-02-PLAN.md

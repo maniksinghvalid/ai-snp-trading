@@ -22,7 +22,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 ### Signals
 
 - [x] **SIG-01**: Bot subscribes to live 5m bars only for the (capped, top-20) watchlist candidates — never the full universe — to respect Moomoo subscription quota
-- [ ] **SIG-02**: Entry signals are evaluated only on closed 5m bars — never mid-bar (no repainting)
+- [x] **SIG-02**: Entry signals are evaluated only on closed 5m bars — never mid-bar (no repainting)
 - [ ] **SIG-03**: An entry triggers when price is above the premarket high, above today's HOD, and intraday RVOL ≥ 2.0, within 10:05–15:30 ET
 - [ ] **SIG-04**: No new entries when 5 concurrent positions are open or after the 15:30 ET cutoff
 
@@ -139,7 +139,7 @@ Which phases cover which requirements.
 | SCAN-07 | Phase 2 + Phase 5 (scheduler) | Complete |
 | SCAN-08 | Phase 2 | Complete |
 | SIG-01 | Phase 2 | Complete |
-| SIG-02 | Phase 3 | Pending |
+| SIG-02 | Phase 3 | Complete |
 | SIG-03 | Phase 3 | Pending |
 | SIG-04 | Phase 3 | Pending |
 | RISK-01 | Phase 3 | Pending |
