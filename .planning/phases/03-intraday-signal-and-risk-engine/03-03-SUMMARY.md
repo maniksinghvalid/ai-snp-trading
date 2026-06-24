@@ -125,9 +125,13 @@ Files exist:
 - bot/risk/risk_engine.py — class RiskEngine, 194 lines ✓
 - tests/gateway/test_gateway.py — TestGetEquity with 6 tests ✓
 - tests/risk/test_risk_engine.py — 10 tests all passing ✓
+- .planning/phases/03-intraday-signal-and-risk-engine/03-03-SUMMARY.md ✓
 
 Commits exist:
 - acf91e9 (Task 1 RED) ✓
 - 4c9929c (Task 1 GREEN) ✓
 - 3e696ce (Task 2 RED) ✓
 - a4beeb4 (Task 2 GREEN) ✓
+- d16d878 (metadata — SUMMARY, STATE, ROADMAP, REQUIREMENTS) ✓
+
+Full suite: 317 tests pass, 0 failures, 0 regressions.
