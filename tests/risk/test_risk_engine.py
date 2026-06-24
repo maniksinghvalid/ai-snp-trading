@@ -474,3 +474,105 @@ class TestRiskEngineDailyCap:
         )
 
         store.close()
+
+
+# ============================================================
+# CR-02 regression: _pending_count advances by EXACTLY 1 per emitted intent
+# ============================================================
+
+class TestPendingCountWiredPipeline:
+    """CR-02 regression: wired SignalEngine + RiskEngine pipeline must advance
+    _pending_count by exactly 1 per emitted intent — not 2.
+
+    The bug (CR-02): SignalEngine.on_bar() incremented _pending_count directly
+    AND RiskEngine called note_intent_emitted() which incremented it again,
+    advancing the tally by 2 per intent. The fix removes the direct increment
+    from on_bar(); note_intent_emitted() is the sole owner of the tally.
+
+    This test wires a REAL SignalEngine to a REAL RiskEngine (not fully mocked)
+    and drives a SignalEvent through the pipeline, then asserts _pending_count
+    incremented by exactly 1.
+    """
+
+    def test_pending_count_increments_by_exactly_one_per_intent(self):
+        """
+        Drive a SignalEvent through a real (wired) SignalEngine + RiskEngine.
+
+        After one successful OrderIntent emission, _pending_count on the
+        SignalEngine must be exactly 1 — not 2 (the CR-02 double-count bug).
+
+        Uses a pre-built SignalEvent (bypasses on_bar() gates) to focus solely
+        on the tally increment path: SignalEngine.note_intent_emitted() called
+        by RiskEngine after building the intent.
+        """
+        from bot.risk.risk_engine import RiskEngine
+        from bot.signal.signal_engine import SignalEngine
+
+        cfg = _make_cfg(max_risk_per_trade_pct=1.0, max_position_size_pct=10,
+                        max_trades_per_day=5)
+
+        gw = _make_mock_gateway(equity=100_000.0)
+        store = _make_store_in_memory()
+
+        signal_engine = SignalEngine(cfg=cfg, gateway=gw, store=store)
+        risk_engine = RiskEngine(
+            cfg=cfg, gateway=gw, store=store, signal_engine=signal_engine
+        )
+
+        # Verify starting state
+        assert signal_engine._pending_count == 0, "Should start at 0"
+
+        # Create a valid SignalEvent (gates already passed — we call on_signal directly)
+        signal = _make_signal(close=50.0, lod=48.0)
+
+        intent = asyncio.run(risk_engine.on_signal(signal))
+
+        assert intent is not None, "Expected a valid OrderIntent for this signal"
+
+        # CR-02 regression: _pending_count must be exactly 1, not 2.
+        assert signal_engine._pending_count == 1, (
+            f"CR-02 regression: _pending_count must be exactly 1 per emitted intent "
+            f"(RiskEngine calls note_intent_emitted() exactly once). "
+            f"Got {signal_engine._pending_count}. If it is 2, the double-count bug "
+            "has been reintroduced (on_bar() also incremented _pending_count)."
+        )
+
+        store.close()
+
+    def test_note_intent_resolved_correctly_unwinds(self):
+        """
+        note_intent_resolved() decrements _pending_count by 1 — correctly
+        unwinding a single note_intent_emitted() call.
+
+        After emit (count=1) and resolve (count=0), the count is back to 0.
+        This ensures the CR-02 fix is compatible with the unwind path: if the
+        tally advanced by 2 but unwinds by 1, the count would never reach 0.
+        """
+        from bot.risk.risk_engine import RiskEngine
+        from bot.signal.signal_engine import SignalEngine
+
+        cfg = _make_cfg(max_risk_per_trade_pct=1.0, max_position_size_pct=10,
+                        max_trades_per_day=5)
+
+        gw = _make_mock_gateway(equity=100_000.0)
+        store = _make_store_in_memory()
+
+        signal_engine = SignalEngine(cfg=cfg, gateway=gw, store=store)
+        risk_engine = RiskEngine(
+            cfg=cfg, gateway=gw, store=store, signal_engine=signal_engine
+        )
+
+        signal = _make_signal(close=50.0, lod=48.0)
+        asyncio.run(risk_engine.on_signal(signal))
+
+        # One intent emitted → pending_count should be 1
+        assert signal_engine._pending_count == 1, "Expected 1 after one emit"
+
+        # Resolve the intent → should unwind to 0
+        signal_engine.note_intent_resolved()
+        assert signal_engine._pending_count == 0, (
+            "note_intent_resolved() must unwind _pending_count to 0 "
+            "(CR-02: if tally was 2 after emit, single unwind would leave 1)"
+        )
+
+        store.close()
