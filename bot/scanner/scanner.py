@@ -116,9 +116,28 @@ def _evaluate_symbol(
         return None
     rvol_baseline_val = float(prior_sorted["volume"].mean())
 
-    # Convenience references
-    prior_row = frame.iloc[-2]
-    today_row = frame.iloc[-1]
+    # CR-02: "today" must be the row whose date equals scan_date — NOT the positional
+    # frame.iloc[-1]. During a real premarket scan (before ~09:30 ET, the actual use
+    # case) yfinance has not yet produced today's daily bar, so frame.index[-1] is the
+    # PRIOR trading day. Relying on iloc[-1]/iloc[-2] would then silently evaluate
+    # yesterday-vs-day-before for gap/D1/D3 and fold "today" into the SMA/RVOL baseline.
+    # Locate today's row explicitly by date and skip the symbol if it is absent, so the
+    # scanner never ranks the wrong session.
+    today_rows = frame.index[frame.index.normalize() == scan_ts.normalize()]
+    if len(today_rows) == 0:
+        _logger.warning(
+            "symbol_skipped_no_today_bar",
+            symbol=symbol,
+            scan_date=str(scan_date),
+        )
+        return None
+    today_row = frame.loc[today_rows[-1]]
+
+    # prior_row = the most-recent session strictly before scan_date. prior_frame is the
+    # date-ascending set of rows with date < scan_date (same mask used for SMA/RVOL),
+    # so its last row is the immediately-prior trading day.
+    prior_row = prior_frame.iloc[-1]
+
     prior_close_val = float(prior_row["close"])
     prior_high_val = float(prior_row["high"])
     today_open_val = float(today_row["open"])
@@ -130,8 +149,13 @@ def _evaluate_symbol(
 
     # Apply D1/D2/D3 + universe price filter via TrendJoinLong.
     # sma200_val is guaranteed non-None here (excluded above if unavailable, CR-01).
+    #
+    # CR-02: pass an explicit 2-row (prior, today) frame so passes_daily_filters'
+    # iloc[-2]/iloc[-1] align with the date-resolved prior/today rows above, rather
+    # than the full frame whose last positional row may be the prior day in premarket.
+    daily_2row = pd.DataFrame([prior_row, today_row])
     strategy = TrendJoinLong(cfg)
-    if not strategy.passes_daily_filters(symbol, frame, sma200_val):
+    if not strategy.passes_daily_filters(symbol, daily_2row, sma200_val):
         return None
 
     moomoo_code = yfinance_to_moomoo(symbol)

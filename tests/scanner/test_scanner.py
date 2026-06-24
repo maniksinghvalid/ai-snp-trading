@@ -340,6 +340,129 @@ class TestInsufficientHistory:
 
 
 # ============================================================
+# CR-02: today-row alignment with scan_date (no-look-ahead)
+# ============================================================
+
+class TestTodayRowAlignment:
+    """CR-02 regression: gap/D1/D3 must use the row dated scan_date, never iloc[-1]."""
+
+    def test_premarket_no_today_bar_excluded(self, tmp_state_db):
+        """When yfinance has not yet produced today's daily bar (the normal premarket
+        case), frame.index[-1] is the PRIOR session. The scanner must NOT silently
+        evaluate yesterday-vs-day-before; it must skip the symbol (no today bar).
+
+        Build a frame whose last row is the day BEFORE scan_date. Previously the
+        positional iloc[-1]/iloc[-2] path would happily rank the wrong session.
+        """
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        # Frame ending the prior business day — no row dated 2026-06-23.
+        prior_day = pd.Timestamp(scan_date) - pd.tseries.offsets.BDay(1)
+        n_days = 220
+        dates = pd.date_range(end=prior_day, periods=n_days, freq="B")
+        sma_base = 90.0
+        closes = [sma_base] * n_days
+        closes[-1] = 100.0
+        highs = [sma_base * 1.02] * n_days
+        highs[-1] = 105.0
+        lows = [sma_base * 0.98] * n_days
+        opens = [sma_base * 0.99] * n_days
+        opens[-1] = 104.0
+        volumes = [1_000_000.0] * n_days
+        no_today_frame = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=dates,
+        )
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["PREMKT"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", return_value=no_today_frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+
+        assert result == [], (
+            "A symbol whose latest bar predates scan_date must be skipped — the "
+            "scanner must not rank the wrong session (CR-02 no-look-ahead)"
+        )
+
+    def test_gap_uses_scan_date_row_not_last_positional(self, tmp_state_db):
+        """When the frame contains BOTH the scan_date row and one extra later row,
+        gap/D1/D3 must be computed against the scan_date row, not the positional last.
+
+        Frame layout: ... prior(2026-06-22), today(2026-06-23, gap 4%),
+        future(2026-06-24, gap 0%). The positional iloc[-1] is the 0%-gap future row,
+        which would fail D3. The scan_date row has a 4% gap and must pass. A correct
+        implementation persists gap_pct ~4.0 from the 2026-06-23 row.
+        """
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        n_days = 220
+        dates = pd.date_range(end=pd.Timestamp("2026-06-24"), periods=n_days, freq="B")
+        sma_base = 90.0
+        closes = [sma_base] * n_days
+        highs = [sma_base * 1.02] * n_days
+        lows = [sma_base * 0.98] * n_days
+        opens = [sma_base * 0.99] * n_days
+        volumes = [1_000_000.0] * n_days
+
+        # index positions: -3 = 2026-06-22 (prior), -2 = 2026-06-23 (today), -1 = 2026-06-24 (future)
+        closes[-3] = 100.0       # prior close (D2/D3 baseline)
+        highs[-3] = 105.0        # prior high (D1 baseline)
+        opens[-2] = 104.0        # today open → gap (104-100)/100 = 4% (passes D3)
+        closes[-2] = 106.0       # today close (above prior high 105 → D1 passes)
+        highs[-2] = 107.0
+        # future row (positional last) has a 0% gap and would FAIL D3 if used as "today"
+        opens[-1] = 106.0
+        closes[-1] = 106.0
+        highs[-1] = 107.0
+
+        frame = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=dates,
+        )
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["ALIGN"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        gap_row = store.conn.execute(
+            "SELECT gap_pct, prior_close, prior_day_high FROM daily_scan WHERE scan_date=? AND code=?",
+            (scan_date.isoformat(), "US.ALIGN"),
+        ).fetchone()
+        store.close()
+
+        assert "US.ALIGN" in result, (
+            "Symbol passing on the scan_date row must be included (gap evaluated on "
+            "the correct session, not the positional last row)"
+        )
+        assert gap_row is not None
+        assert abs(gap_row[0] - 4.0) < 1e-6, (
+            f"gap_pct must be 4.0 from the 2026-06-23 row, got {gap_row[0]} "
+            "(would be 0.0 if iloc[-1] future row were used)"
+        )
+        assert abs(gap_row[1] - 100.0) < 1e-6, "prior_close must be the 2026-06-22 close"
+        assert abs(gap_row[2] - 105.0) < 1e-6, "prior_day_high must be the 2026-06-22 high"
+
+
+# ============================================================
 # SCAN-08: Top-20 Cap
 # ============================================================
 
