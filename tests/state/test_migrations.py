@@ -309,3 +309,47 @@ class TestUpgradeFromV1Db:
         # user_version must now be 2
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
         assert version == 2
+
+
+class TestMigration0002PartialApplication:
+    """WR-03: migration 0002 must be idempotent at the column level so a partial
+    application (some columns committed, user_version still 1) does not wedge
+    future runs with a 'duplicate column name' error."""
+
+    def test_reapply_after_partial_columns_does_not_raise(self, in_memory_conn):
+        """Simulate a crash mid-0002: 0001 applied, user_version=1, and SOME of the
+        0002 columns already added. run_migrations must complete without error and
+        end at v2 with all columns present.
+        """
+        # Apply 0001 and mark v1.
+        in_memory_conn.executescript(MIGRATIONS[0])
+        in_memory_conn.execute("PRAGMA user_version = 1")
+        # Pre-add two of the five 0002 columns (a partially-applied 0002 script).
+        in_memory_conn.execute("ALTER TABLE daily_scan ADD COLUMN prior_day_high REAL")
+        in_memory_conn.execute("ALTER TABLE daily_scan ADD COLUMN prior_close REAL")
+        in_memory_conn.commit()
+
+        # Re-running migrations must NOT raise duplicate-column on the pre-added cols.
+        run_migrations(in_memory_conn)
+
+        info = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
+        col_names = {row[1] for row in info}
+        expected_new = {"prior_day_high", "prior_close", "sma200", "rvol_baseline", "scan_pass"}
+        assert expected_new.issubset(col_names), (
+            f"Missing columns after partial-then-full apply: {expected_new - col_names}"
+        )
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 2
+
+    def test_no_duplicate_columns_after_reapply(self, in_memory_conn):
+        """Each 0002 column must appear exactly once after a partial-then-full apply."""
+        in_memory_conn.executescript(MIGRATIONS[0])
+        in_memory_conn.execute("PRAGMA user_version = 1")
+        in_memory_conn.execute("ALTER TABLE daily_scan ADD COLUMN sma200 REAL")
+        in_memory_conn.commit()
+
+        run_migrations(in_memory_conn)
+
+        info = in_memory_conn.execute("PRAGMA table_info(daily_scan)").fetchall()
+        col_list = [row[1] for row in info]
+        assert col_list.count("sma200") == 1, "sma200 must not be duplicated on re-apply"

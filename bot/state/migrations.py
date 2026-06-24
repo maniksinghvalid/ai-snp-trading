@@ -92,14 +92,34 @@ CREATE TABLE IF NOT EXISTS meta (
 # without a DEFAULT expression. gap_pct is NOT re-added (already in 0001).
 #
 # scan_pass examples: "premarket" | "intraday_1" | "intraday_2"
+#
+# WR-03: implemented as an idempotent callable (not a multi-statement SQL string).
+# `executescript` issues an implicit COMMIT and runs each ALTER outside a single
+# transaction, so a mid-script crash could commit some columns while user_version
+# stays at 1 — re-running the script then fails with "duplicate column name" and
+# permanently wedges startup. Guarding each ALTER with a PRAGMA table_info check
+# makes partial re-application a no-op for already-added columns.
 
-_MIGRATION_0002 = """
-ALTER TABLE daily_scan ADD COLUMN prior_day_high   REAL;
-ALTER TABLE daily_scan ADD COLUMN prior_close      REAL;
-ALTER TABLE daily_scan ADD COLUMN sma200           REAL;
-ALTER TABLE daily_scan ADD COLUMN rvol_baseline    REAL;
-ALTER TABLE daily_scan ADD COLUMN scan_pass        TEXT;
-"""
+_DAILY_SCAN_0002_COLUMNS = (
+    ("prior_day_high", "REAL"),
+    ("prior_close", "REAL"),
+    ("sma200", "REAL"),
+    ("rvol_baseline", "REAL"),
+    ("scan_pass", "TEXT"),
+)
+
+
+def _migration_0002(conn: sqlite3.Connection) -> None:
+    """Add Phase 2 rich-context columns to daily_scan, idempotently (D-08, WR-03).
+
+    Each ALTER is guarded by a column-existence check so re-running after a
+    partial failure (some columns committed, user_version not yet bumped) is a
+    no-op rather than a fatal "duplicate column name" error.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_scan)")}
+    for col, decl in _DAILY_SCAN_0002_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE daily_scan ADD COLUMN {col} {decl}")
 
 
 # ============================================================
@@ -108,7 +128,7 @@ ALTER TABLE daily_scan ADD COLUMN scan_pass        TEXT;
 
 MIGRATIONS = [
     _MIGRATION_0001,
-    _MIGRATION_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
+    _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
 ]
 
 
@@ -126,6 +146,12 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     Applies only migrations from MIGRATIONS[user_version:] in order.
     After each migration, updates PRAGMA user_version and commits.
 
+    Each migration step is either a SQL string (applied via executescript) or a
+    callable taking the connection (applied directly). Callable migrations may
+    guard their DDL for idempotency (WR-03) so re-running after a partial failure
+    does not raise "duplicate column name". The user_version bump is committed in
+    the same transaction as the migration body so the two never diverge.
+
     Calling run_migrations on an already-migrated DB is a no-op:
     if user_version >= CURRENT_VERSION, nothing is applied.
 
@@ -135,7 +161,15 @@ def run_migrations(conn: sqlite3.Connection) -> None:
               transactions, which is correct here).
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    for i, sql in enumerate(MIGRATIONS[version:], start=version + 1):
-        conn.executescript(sql)
+    for i, migration in enumerate(MIGRATIONS[version:], start=version + 1):
+        if callable(migration):
+            # Callable migrations execute statements on the open transaction
+            # (no implicit COMMIT) so the PRAGMA bump below commits atomically
+            # with the DDL.
+            migration(conn)
+        else:
+            # SQL-string migrations: executescript issues an implicit COMMIT of
+            # any pending work, then runs the script.
+            conn.executescript(migration)
         conn.execute(f"PRAGMA user_version = {i}")
         conn.commit()
