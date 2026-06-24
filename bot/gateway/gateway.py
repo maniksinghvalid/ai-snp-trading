@@ -45,6 +45,15 @@ _logger = get_logger(__name__)
 
 
 # ============================================================
+# Equity Query Constants (RISK-01, D-05, T-03-07)
+# ============================================================
+
+_EQUITY_FALLBACK: float = 100_000.0   # fallback when query fails or value is implausible (D-05)
+_IMPLAUSIBLE_LOW: float = 1_000.0     # < $1,000 indicates a failed/uninitialized query (D-05)
+_IMPLAUSIBLE_HIGH: float = 10_000_000.0  # > $10M indicates a corrupt read (T-03-07 upper bound)
+
+
+# ============================================================
 # Configuration
 # ============================================================
 
@@ -297,6 +306,65 @@ class MoomooGateway:
             None,
             lambda: self._trade_ctx.position_list_query(),
         )
+
+    async def get_equity(self) -> float:
+        """Read live total net assets from the SIMULATE account (RISK-01, D-04/D-05).
+
+        Calls accinfo_query(refresh_cache=True) to bypass the OpenD cache and
+        reads the `total_assets` field, which equals cash + securities market
+        value (net liquidation value per FIELD_MAPPING.md). Falls back to
+        _EQUITY_FALLBACK if the query fails, returns implausible data, or raises.
+
+        Implausible bounds (T-03-07):
+          - Low: < _IMPLAUSIBLE_LOW ($1,000) — likely a failed/uninitialized query
+          - High: > _IMPLAUSIBLE_HIGH ($10,000,000) — likely corrupt data that
+            would produce an outsized position if used for sizing
+
+        Returns:
+            float — account equity in USD >= 1.0 (1.0 guards against zero-divide).
+                    _EQUITY_FALLBACK (100,000) on any failure or implausible value.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            ret, data = await loop.run_in_executor(
+                None,
+                lambda: self._trade_ctx.accinfo_query(
+                    trd_env=_parse_trd_env(self.cfg.trd_env),
+                    acc_id=self.cfg.acc_id,
+                    refresh_cache=True,
+                ),
+            )
+
+            if ret != RET_OK or data is None or len(data) == 0:
+                _logger.warning(
+                    "equity_query_failed",
+                    ret=ret,
+                    fallback=_EQUITY_FALLBACK,
+                )
+                return _EQUITY_FALLBACK
+
+            row = data.iloc[0] if hasattr(data, "iloc") else data[0]
+            total_assets = float(row.get("total_assets", 0) or 0)
+
+            if total_assets < _IMPLAUSIBLE_LOW or total_assets > _IMPLAUSIBLE_HIGH:
+                _logger.warning(
+                    "equity_implausible",
+                    total_assets=total_assets,
+                    implausible_low=_IMPLAUSIBLE_LOW,
+                    implausible_high=_IMPLAUSIBLE_HIGH,
+                    fallback=_EQUITY_FALLBACK,
+                )
+                return _EQUITY_FALLBACK
+
+            return max(total_assets, 1.0)  # guard zero-divide in sizing math
+
+        except Exception:
+            _logger.warning(
+                "equity_query_exception",
+                exc_info=True,
+                fallback=_EQUITY_FALLBACK,
+            )
+            return _EQUITY_FALLBACK
 
     async def get_market_snapshot(self, codes: list) -> tuple:
         """Raw broker snapshot read for the watchlist (D-01 premarket-high source).
