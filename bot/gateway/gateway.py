@@ -336,6 +336,40 @@ class MoomooGateway:
         await loop.run_in_executor(None, _subscribe_blocking)
         _logger.info("subscribed_k5m", codes=codes, count=len(codes))
 
+    async def unsubscribe(self, codes: list, subtypes: list = None) -> None:
+        """Unsubscribe K_5M pushes for codes evicted from the watchlist (SIG-01).
+
+        Releases the quota slots held by codes that fall out of the protected
+        top-20 across intraday re-scans. Without this, dropped codes keep their
+        live K_5M feeds and the cumulative subscribed set grows unbounded,
+        eventually exceeding the 20-slot cap the subscribe path is built around.
+
+        Parameters:
+            codes: List of Moomoo-format codes to release (e.g. ["US.AAPL"]).
+            subtypes: List of SubType values. Defaults to [SubType.K_5M].
+
+        Raises:
+            GatewayError: if unsubscribe() returns non-RET_OK.
+        """
+        # Deferred import — mirrors subscribe() (avoids top-level moomoo import
+        # failure when moomoo-api is not installed in the test environment).
+        from moomoo import SubType
+
+        if not codes:
+            return
+
+        if subtypes is None:
+            subtypes = [SubType.K_5M]
+
+        loop = asyncio.get_event_loop()
+
+        def _unsubscribe_blocking():
+            ret, msg = self._quote_ctx.unsubscribe(codes, subtypes)
+            _check_ret(ret, msg, "unsubscribe")
+
+        await loop.run_in_executor(None, _unsubscribe_blocking)
+        _logger.info("unsubscribed_k5m", codes=codes, count=len(codes))
+
     # --------------------------------------------------------
     # Reconciliation Skeletons (SAFE-02 / SAFE-03)
     # --------------------------------------------------------

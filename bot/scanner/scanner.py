@@ -301,6 +301,26 @@ def _subscribe_new_codes(gateway, codes: List[str], active_codes: Set[str]) -> L
     return new_codes
 
 
+def _unsubscribe_evicted_codes(gateway, result: List[str], active_codes: Set[str]) -> List[str]:
+    """Unsubscribe active codes that fell out of the protected watchlist (WR-01 / SIG-01).
+
+    Without this, a code dropped from the top-20 keeps its live K_5M feed and the
+    cumulative subscribed set grows across rescans, eventually exceeding the 20-slot
+    cap the subscribe path is built around. The eviction set is the active codes that
+    are no longer present in result.
+
+    gateway:      MoomooGateway instance (or None — skipped).
+    result:       Final protected watchlist (moomoo codes) after the rescan.
+    active_codes: Set of currently-subscribed moomoo codes.
+
+    Returns the list of evicted (unsubscribed) codes.
+    """
+    evicted = [c for c in active_codes if c not in set(result)]
+    if evicted and gateway is not None:
+        asyncio.run(gateway.unsubscribe(evicted))
+    return evicted
+
+
 # ============================================================
 # Main entrypoints
 # ============================================================
@@ -467,5 +487,9 @@ def run_intraday_rescan(
 
     # Step 8: subscribe ONLY newly-added codes (not already in active_codes)
     _subscribe_new_codes(gateway, result, active_codes)
+
+    # Step 9 (WR-01): unsubscribe active codes evicted from the protected watchlist,
+    # so the cumulative subscribed set never exceeds the top-20 cap across rescans.
+    _unsubscribe_evicted_codes(gateway, result, active_codes)
 
     return result

@@ -881,3 +881,53 @@ class TestIntradayRescan:
         assert "US.MSFT" in subscribed_codes, (
             "New code US.MSFT must be subscribed"
         )
+
+    def test_rescan_unsubscribes_evicted_active_code(self, tmp_state_db):
+        """WR-01 regression: an active code evicted from the watchlist (its gap
+        collapses and it no longer passes the re-filter) must be UNSUBSCRIBED, so
+        the cumulative subscribed set never exceeds the top-20 cap across rescans.
+        """
+        from bot.scanner.scanner import run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        # KEEP passes (gap 4%); DROP fails D3 (gap 1% < 3%) so it is evicted.
+        passing_frame = _make_daily_frame(
+            prior_close=100.0, today_open=104.0, today_close=106.0,
+            prior_high=105.0, scan_date=scan_date,
+        )
+        collapsing_frame = _make_daily_frame(
+            prior_close=100.0, today_open=101.0, today_close=106.0,
+            prior_high=105.0, scan_date=scan_date,
+        )
+
+        store = StateStore()
+        store.open()
+        gw = _make_mock_gateway()
+        gw.unsubscribe = AsyncMock()
+
+        # Both KEEP and DROP are currently active (subscribed).
+        active_codes = {"US.KEEP", "US.DROP"}
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["KEEP", "DROP"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=lambda d, s: passing_frame if s == "KEEP" else collapsing_frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            result = run_intraday_rescan(
+                store=store, gateway=gw, cfg=cfg,
+                active_codes=active_codes, scan_date=scan_date, scan_pass="intraday_1",
+            )
+
+        store.close()
+
+        assert "US.KEEP" in result, "Still-passing active code must remain in watchlist"
+        assert "US.DROP" not in result, "Collapsed active code must be evicted from watchlist"
+
+        # The evicted active code must be unsubscribed to free its quota slot.
+        gw.unsubscribe.assert_called_once()
+        unsubscribed_codes = gw.unsubscribe.call_args[0][0]
+        assert "US.DROP" in unsubscribed_codes, "Evicted US.DROP must be unsubscribed (WR-01)"
+        assert "US.KEEP" not in unsubscribed_codes, "Protected US.KEEP must NOT be unsubscribed"

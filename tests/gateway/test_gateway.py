@@ -450,3 +450,40 @@ class TestSubscribe:
 
         with pytest.raises(GatewayError):
             asyncio.run(gw.subscribe(["US.AAPL"]))
+
+
+# ============================================================
+# MoomooGateway.unsubscribe() — release evicted feeds (WR-01 / SIG-01)
+# ============================================================
+
+class TestUnsubscribe:
+    """WR-01: unsubscribe() releases quota slots for evicted codes."""
+
+    def test_unsubscribe_wraps_executor(self):
+        """gateway.unsubscribe(['US.AAPL']) calls quote_ctx.unsubscribe once with K_5M."""
+        from moomoo import SubType
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.unsubscribe.return_value = (0, "")
+
+        asyncio.run(gw.unsubscribe(["US.AAPL"]))
+
+        gw._quote_ctx.unsubscribe.assert_called_once_with(
+            ["US.AAPL"],
+            [SubType.K_5M],
+        )
+
+    def test_unsubscribe_empty_is_noop(self):
+        """unsubscribe([]) must not touch the broker (no quota call for an empty set)."""
+        gw = _make_gateway_with_mocks()
+
+        asyncio.run(gw.unsubscribe([]))
+
+        gw._quote_ctx.unsubscribe.assert_not_called()
+
+    def test_unsubscribe_raises_on_non_ret_ok(self):
+        """quote_ctx.unsubscribe returning non-zero must raise GatewayError."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.unsubscribe.return_value = (1, "unsub failed")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(gw.unsubscribe(["US.AAPL"]))
