@@ -491,35 +491,102 @@ class TestUnsubscribe:
 
 # ============================================================
 # MoomooGateway.get_equity() — live equity read (RISK-01, D-04/D-05)
-# Wave 0 stubs — implemented in 03-03
+# Implemented in 03-03
 # ============================================================
 
 class TestGetEquity:
     """get_equity() reads total_assets from accinfo_query (D-04/D-05)."""
 
+    def _make_accinfo_df(self, total_assets: float) -> "pd.DataFrame":
+        """Return a fake accinfo DataFrame with the given total_assets."""
+        return pd.DataFrame([{"total_assets": total_assets}])
+
     def test_get_equity_reads_total_assets(self):
-        """get_equity returns total_assets float from accinfo_query response."""
-        pytest.skip("Wave 0 stub — implemented in 03-03")
+        """get_equity returns total_assets float from accinfo_query response (D-04)."""
+        gw = _make_gateway_with_mocks()
+        gw._trade_ctx.accinfo_query.return_value = (0, self._make_accinfo_df(250_000.0))
+
+        async def _run():
+            return await gw.get_equity()
+
+        result = asyncio.run(_run())
+        assert result == 250_000.0, (
+            f"Expected 250000.0 (read total_assets), got {result}"
+        )
 
     def test_get_equity_calls_refresh_cache(self):
-        """get_equity passes refresh_cache=True to accinfo_query (D-05)."""
-        pytest.skip("Wave 0 stub — implemented in 03-03")
+        """get_equity passes refresh_cache=True to accinfo_query (RISK-01 live-not-cached, D-05)."""
+        gw = _make_gateway_with_mocks()
+        gw._trade_ctx.accinfo_query.return_value = (0, self._make_accinfo_df(100_500.0))
+
+        async def _run():
+            await gw.get_equity()
+
+        asyncio.run(_run())
+
+        call_kwargs = gw._trade_ctx.accinfo_query.call_args
+        # refresh_cache=True must be present in keyword or positional args
+        assert call_kwargs is not None, "accinfo_query was not called"
+        all_kwargs = call_kwargs[1] if call_kwargs[1] else {}
+        # Also check positional args for refresh_cache being True
+        positional = call_kwargs[0] if call_kwargs[0] else ()
+        assert all_kwargs.get("refresh_cache") is True or True in positional, (
+            f"refresh_cache=True must be passed to accinfo_query; got kwargs={all_kwargs}, args={positional}"
+        )
 
     def test_equity_fallback_on_ret_error(self):
-        """get_equity returns _EQUITY_FALLBACK when accinfo_query ret != RET_OK."""
-        pytest.skip("Wave 0 stub — implemented in 03-03")
+        """get_equity returns 100000.0 when accinfo_query ret != RET_OK (D-05)."""
+        gw = _make_gateway_with_mocks()
+        # Non-zero ret indicates failure
+        gw._trade_ctx.accinfo_query.return_value = (1, "error detail")
+
+        async def _run():
+            return await gw.get_equity()
+
+        result = asyncio.run(_run())
+        assert result == 100_000.0, (
+            f"Expected fallback 100000.0 on ret error, got {result}"
+        )
 
     def test_equity_fallback_on_implausible_low(self):
-        """get_equity returns _EQUITY_FALLBACK when total_assets < implausible threshold."""
-        pytest.skip("Wave 0 stub — implemented in 03-03")
+        """get_equity returns 100000.0 when total_assets < $1,000 (D-05, implausible-low guard)."""
+        gw = _make_gateway_with_mocks()
+        gw._trade_ctx.accinfo_query.return_value = (0, self._make_accinfo_df(500.0))
+
+        async def _run():
+            return await gw.get_equity()
+
+        result = asyncio.run(_run())
+        assert result == 100_000.0, (
+            f"Expected fallback 100000.0 for implausible-low total_assets=500, got {result}"
+        )
 
     def test_equity_fallback_on_implausible_high(self):
-        """get_equity returns _EQUITY_FALLBACK when total_assets > upper implausible bound."""
-        pytest.skip("Wave 0 stub — implemented in 03-03")
+        """get_equity returns 100000.0 when total_assets > $10,000,000 (Security — corrupt read guard)."""
+        gw = _make_gateway_with_mocks()
+        gw._trade_ctx.accinfo_query.return_value = (0, self._make_accinfo_df(15_000_000.0))
+
+        async def _run():
+            return await gw.get_equity()
+
+        result = asyncio.run(_run())
+        assert result == 100_000.0, (
+            f"Expected fallback 100000.0 for implausible-high total_assets=15000000, got {result}"
+        )
 
     def test_equity_fallback_on_exception(self):
-        """get_equity returns _EQUITY_FALLBACK on any unexpected exception."""
-        pytest.skip("Wave 0 stub — implemented in 03-03")
+        """get_equity returns 100000.0 without raising when accinfo_query throws (D-05 degrade)."""
+        gw = _make_gateway_with_mocks()
+        gw._trade_ctx.accinfo_query.side_effect = RuntimeError("broker unavailable")
+
+        async def _run():
+            return await gw.get_equity()
+
+        # Must not raise — must degrade gracefully
+        result = asyncio.run(_run())
+        assert result == 100_000.0, (
+            f"Expected fallback 100000.0 on exception, got {result}"
+        )
 
 
 # ============================================================
