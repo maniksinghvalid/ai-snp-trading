@@ -263,14 +263,11 @@ def _compute_candidates(
     yf_symbols = fetch_sp500_symbols()
 
     # Download daily bars (propagates ScanDegradationError on >= 10% failure)
+    # WR-04: download_daily_bars (fetcher) is the single source of truth for the
+    # scan_partial_data event — it already logs it when `failed` is non-empty. Do
+    # NOT re-log it here, which previously produced two identical warnings per
+    # degraded scan (audit noise / double-counting risk downstream).
     data, failed = download_daily_bars(yf_symbols)
-
-    if failed:
-        _logger.warning(
-            "scan_partial_data",
-            failed_count=len(failed),
-            total=len(yf_symbols),
-        )
 
     # Evaluate each symbol
     passing = []

@@ -980,3 +980,39 @@ class TestIntradayRescan:
         assert evicted_events[0].kwargs.get("code") == "US.DROP", (
             "active_code_evicted must name the evicted code US.DROP"
         )
+
+
+# ============================================================
+# WR-04: scan_partial_data must be logged exactly once (by the fetcher)
+# ============================================================
+
+class TestPartialDataLoggedOnce:
+    """WR-04: the scanner must NOT re-emit scan_partial_data — the fetcher is the
+    single source of truth for that event."""
+
+    def test_scanner_does_not_relog_scan_partial_data(self, tmp_state_db):
+        """With a non-empty failed set, _compute_candidates must not emit a second
+        scan_partial_data warning (the fetcher already logged it)."""
+        import bot.scanner.scanner as scanner_mod
+        from bot.scanner.scanner import _compute_candidates
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+        frame = _make_daily_frame(scan_date=scan_date)
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+             patch("bot.scanner.scanner.download_daily_bars",
+                   return_value=({}, {"BADSYM"})), \
+             patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
+             patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
+
+            _compute_candidates(cfg, scan_date)
+
+        partial_events = [
+            call for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "scan_partial_data"
+        ]
+        assert partial_events == [], (
+            "scanner must not re-log scan_partial_data — the fetcher is the single "
+            "source of truth (WR-04)"
+        )
