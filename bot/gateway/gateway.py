@@ -546,7 +546,7 @@ class MoomooGateway:
 
         Cancellation is implemented as a modify_order call with
         ModifyOrderOp.CANCEL, qty=0, price=0 — per the moomoo SDK cancel
-        semantics (skills/moomooapi/scripts/trade/cancel_order.py lines 56-63).
+        semantics (the SDK requires qty/price even for a cancel operation).
         Deferred import of ModifyOrderOp for test-env compatibility.
 
         Parameters:
@@ -564,7 +564,7 @@ class MoomooGateway:
             ret, data = self._trade_ctx.modify_order(
                 modify_order_op=ModifyOrderOp.CANCEL,
                 order_id=order_id,
-                qty=0,     # SDK requires qty/price even for cancel (cancel_order.py lines 56-63)
+                qty=0,     # SDK requires qty/price parameters even for a cancel operation
                 price=0,
                 trd_env=_parse_trd_env(self.cfg.trd_env),
                 acc_id=self.cfg.acc_id,
@@ -654,11 +654,10 @@ class MoomooGateway:
     async def get_ask_price(self, code: str) -> float:
         """Read the current ask price for a single code from a snapshot.
 
-        Reads the `ask_price` column from get_market_snapshot (confirmed column
-        name per skills/moomooapi/scripts/quote/get_snapshot.py _parse_snapshot_row
-        lines 57-58 via safe_get(row, "ask_price")). If ask_price is null or 0
-        (illiquid/halted), falls back to `last_price` (line 50). The engine
-        applies the +buffer; this method returns the raw market price.
+        Reads the `ask_price` column from get_market_snapshot. The column name
+        `ask_price` is confirmed by the moomoo SDK snapshot response schema.
+        If ask_price is null or 0 (illiquid/halted), falls back to `last_price`.
+        The engine applies the +buffer; this method returns the raw market price.
         Deferred SDK import via the existing get_market_snapshot path.
 
         Returns:
@@ -676,11 +675,10 @@ class MoomooGateway:
     async def get_bid_price(self, code: str) -> float:
         """Read the current bid price for a single code from a snapshot.
 
-        Reads the `bid_price` column from get_market_snapshot (confirmed column
-        name per skills/moomooapi/scripts/quote/get_snapshot.py _parse_snapshot_row
-        lines 57-58 via safe_get(row, "bid_price")). If bid_price is null or 0
-        (illiquid/halted), falls back to `last_price` (line 50). The engine
-        applies the -buffer; this method returns the raw market price.
+        Reads the `bid_price` column from get_market_snapshot. The column name
+        `bid_price` is confirmed by the moomoo SDK snapshot response schema.
+        If bid_price is null or 0 (illiquid/halted), falls back to `last_price`.
+        The engine applies the -buffer; this method returns the raw market price.
         Deferred SDK import via the existing get_market_snapshot path.
 
         Returns:
