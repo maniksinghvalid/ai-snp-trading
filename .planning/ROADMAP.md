@@ -113,14 +113,21 @@ Plans:
   4. Position sizing reads live account equity from MoomooGateway (not a cached value), risks exactly 1% of equity per trade, and caps notional at 10% of portfolio value; a worked example with known equity produces the expected share count
   5. `RISK-03` initial stop is computed as LOD − 1%; the OrderIntent logged to structlog contains the correct stop price and quantity for each synthetic signal
 
-**Research flag**: Needs research-phase. Bar-close detection during subscription reconnect mid-bar, and snapshot field availability for HOD/premarket-high at candidate list scale, must be confirmed before task planning.
-**Plans**: TBD
+**Resolved (was research flag):** bar-close detection during subscription reconnect is handled by a `time_key`-advance + session-level `_seen_time_keys` dual-guard in `BarAggregator` (never double-fires / replays a partial bar); snapshot field availability confirmed — premarket high = `pre_high_price`, equity = `accinfo_query.total_assets` (03-RESEARCH.md, HIGH confidence).
+**Plans**: 3 plans (3 waves)
 
 Plans:
+**Wave 1**
 
-- [ ] 03-01: BarAggregator — CurKlineHandlerBase subclass, timestamp-advance bar-close detection, SDK-thread to asyncio bridge
-- [ ] 03-02: SignalEngine — I1/I2/I3 intraday filters, entry window gate, max-positions gate, daily-entry-cap gate (RISK-05), SignalEvent emission
-- [ ] 03-03: RiskEngine — live equity read, 1% risk sizing, 10% notional cap, 5-position concurrent gate, daily new-entry counter persisted in StateStore, OrderIntent emission
+- [ ] 03-01-PLAN.md — Wave 0 scaffold (bot/signal + bot/risk packages, BarEvent/SignalEvent/OrderIntent dataclasses, migration 0003 daily_trade_count + pending_intents, failing test stubs) + BarAggregator (CurKlineHandlerBase subclass, time_key-advance bar-close detection with reconnect dedup, HOD/LOD running max/min, SDK-thread→asyncio bridge) [SIG-02] [Wave 1]
+
+**Wave 2** *(blocked on 03-01)*
+
+- [ ] 03-02-PLAN.md — SignalEngine: I1/I2/I3 feed of passes_intraday_filters() + 10:05–15:30 ET entry-window gate (inclusive/exclusive boundaries) + 5-concurrent-position cap (broker-truth get_positions) + daily new-entry cap (filled+pending gating, D-08/D-09); emits SignalEvent [SIG-03, SIG-04, RISK-04, RISK-05] [Wave 2]
+
+**Wave 3** *(blocked on 03-01, 03-02)*
+
+- [ ] 03-03-PLAN.md — MoomooGateway.get_equity() (live accinfo_query total_assets, $100k fallback) + RiskEngine: live-equity 1%-risk sizing, 10%-notional cap (take smaller), LOD−1% stop via compute_initial_stop(), round shares DOWN / <1-share→no-intent, emit OrderIntent logged to structlog AND persisted to pending_intents [RISK-01, RISK-02, RISK-03] [Wave 3]
 
 ### Phase 4: Order and Position Management
 
