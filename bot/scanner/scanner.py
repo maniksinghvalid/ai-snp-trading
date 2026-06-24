@@ -11,6 +11,7 @@ cfg.rvol_lookback_days). No strategy literals are hardcoded here.
 Exports: run_daily_scan, run_intraday_rescan, _persist_watchlist, _evaluate_symbol
 """
 import asyncio
+import concurrent.futures
 import sqlite3
 from datetime import date
 from typing import List, Optional, Set
@@ -280,6 +281,36 @@ def _compute_candidates(
 
 
 # ============================================================
+# Async bridge (WR-06)
+# ============================================================
+
+def _run_coro(coro):
+    """Run an async coroutine from synchronous scan code, safely (WR-06).
+
+    The scan entrypoints are synchronous but the gateway subscribe/unsubscribe
+    methods are async. `asyncio.run` raises RuntimeError if called from within an
+    already-running event loop (e.g. a future async scheduler in Phase 4/5), which
+    would abort the scan AFTER persistence has happened — leaving a persisted
+    watchlist with no subscriptions.
+
+    This helper detects whether an event loop is already running on the current
+    thread. If not, it uses asyncio.run as before. If one is running, it executes
+    the coroutine to completion on a separate thread with its own loop, so the
+    bridge never raises the "cannot be called from a running event loop" error.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop on this thread — the normal synchronous-scan path.
+        return asyncio.run(coro)
+
+    # A loop is already running on this thread: run the coroutine on a worker
+    # thread with its own event loop to avoid the RuntimeError.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(coro)).result()
+
+
+# ============================================================
 # Subscription helper
 # ============================================================
 
@@ -294,7 +325,7 @@ def _subscribe_new_codes(gateway, codes: List[str], active_codes: Set[str]) -> L
     """
     new_codes = [c for c in codes if c not in active_codes]
     if new_codes and gateway is not None:
-        asyncio.run(gateway.subscribe(new_codes))
+        _run_coro(gateway.subscribe(new_codes))
     return new_codes
 
 
@@ -314,7 +345,7 @@ def _unsubscribe_evicted_codes(gateway, result: List[str], active_codes: Set[str
     """
     evicted = [c for c in active_codes if c not in set(result)]
     if evicted and gateway is not None:
-        asyncio.run(gateway.unsubscribe(evicted))
+        _run_coro(gateway.unsubscribe(evicted))
     return evicted
 
 
@@ -385,9 +416,10 @@ def run_daily_scan(
     )
 
     # SIG-01: Subscribe ONLY the capped top-20 codes — never the full universe.
-    # run_daily_scan is sync; asyncio.run() bridges to the async gateway.subscribe().
+    # run_daily_scan is sync; _run_coro bridges to the async gateway.subscribe()
+    # without raising even if invoked from within a running event loop (WR-06).
     if result and gateway is not None:
-        asyncio.run(gateway.subscribe(result))
+        _run_coro(gateway.subscribe(result))
     elif not result:
         _logger.info("subscribe_skipped_empty_watchlist", scan_date=str(scan_date))
 

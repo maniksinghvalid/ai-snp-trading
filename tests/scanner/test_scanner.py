@@ -1016,3 +1016,41 @@ class TestPartialDataLoggedOnce:
             "scanner must not re-log scan_partial_data — the fetcher is the single "
             "source of truth (WR-04)"
         )
+
+
+# ============================================================
+# WR-06: scan entrypoints must not raise when called from a running loop
+# ============================================================
+
+class TestRunFromRunningEventLoop:
+    """WR-06: the sync scan entrypoints must bridge to async gateway methods even
+    when invoked from within an already-running event loop (Phase 4/5 schedulers)."""
+
+    def test_run_daily_scan_inside_running_loop_subscribes(self, tmp_state_db):
+        """run_daily_scan called from inside a running event loop must complete and
+        still subscribe (no 'asyncio.run() cannot be called from a running event
+        loop' RuntimeError)."""
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        frame = _make_daily_frame(scan_date=scan_date)
+        store = StateStore()
+        store.open()
+        gw = _make_mock_gateway()
+
+        async def _driver():
+            # We are now inside a running event loop.
+            with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+                 patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+                 patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+                 patch("bot.scanner.scanner.is_trading_day", return_value=True):
+                return run_daily_scan(store=store, gateway=gw, cfg=_make_cfg(), scan_date=scan_date)
+
+        result = asyncio.run(_driver())
+        store.close()
+
+        assert "US.AAPL" in result, "Scan must complete from within a running loop"
+        gw.subscribe.assert_called_once()
+        assert set(gw.subscribe.call_args[0][0]) == set(result), (
+            "subscribe must still receive the watchlist when bridged from a running loop"
+        )
