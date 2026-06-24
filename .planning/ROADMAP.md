@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation** - Gateway, StateStore, StrategyCore, and safety primitives that everything else depends on
 - [x] **Phase 2: Premarket Scanner** - Daily watchlist generation via S&P 500 constituent fetch and D1/D2/D3 filters (completed 2026-06-23)
-- [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing
+- [x] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (completed 2026-06-24)
 - [ ] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close
 - [ ] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging
 - [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code
@@ -127,7 +127,7 @@ Plans:
 
 **Wave 3** *(blocked on 03-01, 03-02)*
 
-- [ ] 03-03-PLAN.md — MoomooGateway.get_equity() (live accinfo_query total_assets, $100k fallback) + RiskEngine: live-equity 1%-risk sizing, 10%-notional cap (take smaller), LOD−1% stop via compute_initial_stop(), round shares DOWN / <1-share→no-intent, emit OrderIntent logged to structlog AND persisted to pending_intents [RISK-01, RISK-02, RISK-03] [Wave 3]
+- [x] 03-03-PLAN.md — MoomooGateway.get_equity() (live accinfo_query total_assets, $100k fallback) + RiskEngine: live-equity 1%-risk sizing, 10%-notional cap (take smaller), LOD−1% stop via compute_initial_stop(), round shares DOWN / <1-share→no-intent, emit OrderIntent logged to structlog AND persisted to pending_intents [RISK-01, RISK-02, RISK-03] [Wave 3]
 
 ### Phase 4: Order and Position Management
 
@@ -208,7 +208,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/4 | In progress | - |
 | 2. Premarket Scanner | 4/4 | Complete   | 2026-06-23 |
-| 3. Intraday Signal and Risk Engine | 2/3 | In Progress|  |
+| 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |

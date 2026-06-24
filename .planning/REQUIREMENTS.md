@@ -28,9 +28,9 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### Risk & Sizing
 
-- [ ] **RISK-01**: Each position is sized to risk 1% of current account equity (read live, not cached)
-- [ ] **RISK-02**: Position notional is capped at 10% of portfolio value
-- [ ] **RISK-03**: Initial stop is computed as low-of-day − 1%
+- [x] **RISK-01**: Each position is sized to risk 1% of current account equity (read live, not cached)
+- [x] **RISK-02**: Position notional is capped at 10% of portfolio value
+- [x] **RISK-03**: Initial stop is computed as low-of-day − 1%
 - [x] **RISK-04**: Maximum 5 concurrent positions is enforced at order-submission time
 - [x] **RISK-05**: A daily new-entry cap (`max_trades_per_day`, default 5) is enforced separately from the concurrent cap — bounds total daily entries even as positions close and free slots
 
@@ -142,9 +142,9 @@ Which phases cover which requirements.
 | SIG-02 | Phase 3 | Complete |
 | SIG-03 | Phase 3 | Complete |
 | SIG-04 | Phase 3 | Complete |
-| RISK-01 | Phase 3 | Pending |
-| RISK-02 | Phase 3 | Pending |
-| RISK-03 | Phase 3 | Pending |
+| RISK-01 | Phase 3 | Complete |
+| RISK-02 | Phase 3 | Complete |
+| RISK-03 | Phase 3 | Complete |
 | RISK-04 | Phase 3 | Complete |
 | RISK-05 | Phase 3 | Complete |
 | EXEC-01 | Phase 4 | Pending |
