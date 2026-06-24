@@ -123,7 +123,7 @@ Plans:
 
 **Wave 2** *(blocked on 03-01)*
 
-- [ ] 03-02-PLAN.md — SignalEngine: I1/I2/I3 feed of passes_intraday_filters() + 10:05–15:30 ET entry-window gate (inclusive/exclusive boundaries) + 5-concurrent-position cap (broker-truth get_positions) + daily new-entry cap (filled+pending gating, D-08/D-09); emits SignalEvent [SIG-03, SIG-04, RISK-04, RISK-05] [Wave 2]
+- [x] 03-02-PLAN.md — SignalEngine: I1/I2/I3 feed of passes_intraday_filters() + 10:05–15:30 ET entry-window gate (inclusive/exclusive boundaries) + 5-concurrent-position cap (broker-truth get_positions) + daily new-entry cap (filled+pending gating, D-08/D-09); emits SignalEvent [SIG-03, SIG-04, RISK-04, RISK-05] [Wave 2]
 
 **Wave 3** *(blocked on 03-01, 03-02)*
 
@@ -208,7 +208,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/4 | In progress | - |
 | 2. Premarket Scanner | 4/4 | Complete   | 2026-06-23 |
-| 3. Intraday Signal and Risk Engine | 0/3 | Not started | - |
+| 3. Intraday Signal and Risk Engine | 2/3 | In Progress|  |
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |

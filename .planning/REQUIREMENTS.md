@@ -23,16 +23,16 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 - [x] **SIG-01**: Bot subscribes to live 5m bars only for the (capped, top-20) watchlist candidates — never the full universe — to respect Moomoo subscription quota
 - [x] **SIG-02**: Entry signals are evaluated only on closed 5m bars — never mid-bar (no repainting)
-- [ ] **SIG-03**: An entry triggers when price is above the premarket high, above today's HOD, and intraday RVOL ≥ 2.0, within 10:05–15:30 ET
-- [ ] **SIG-04**: No new entries when 5 concurrent positions are open or after the 15:30 ET cutoff
+- [x] **SIG-03**: An entry triggers when price is above the premarket high, above today's HOD, and intraday RVOL ≥ 2.0, within 10:05–15:30 ET
+- [x] **SIG-04**: No new entries when 5 concurrent positions are open or after the 15:30 ET cutoff
 
 ### Risk & Sizing
 
 - [ ] **RISK-01**: Each position is sized to risk 1% of current account equity (read live, not cached)
 - [ ] **RISK-02**: Position notional is capped at 10% of portfolio value
 - [ ] **RISK-03**: Initial stop is computed as low-of-day − 1%
-- [ ] **RISK-04**: Maximum 5 concurrent positions is enforced at order-submission time
-- [ ] **RISK-05**: A daily new-entry cap (`max_trades_per_day`, default 5) is enforced separately from the concurrent cap — bounds total daily entries even as positions close and free slots
+- [x] **RISK-04**: Maximum 5 concurrent positions is enforced at order-submission time
+- [x] **RISK-05**: A daily new-entry cap (`max_trades_per_day`, default 5) is enforced separately from the concurrent cap — bounds total daily entries even as positions close and free slots
 
 ### Execution
 
@@ -140,13 +140,13 @@ Which phases cover which requirements.
 | SCAN-08 | Phase 2 | Complete |
 | SIG-01 | Phase 2 | Complete |
 | SIG-02 | Phase 3 | Complete |
-| SIG-03 | Phase 3 | Pending |
-| SIG-04 | Phase 3 | Pending |
+| SIG-03 | Phase 3 | Complete |
+| SIG-04 | Phase 3 | Complete |
 | RISK-01 | Phase 3 | Pending |
 | RISK-02 | Phase 3 | Pending |
 | RISK-03 | Phase 3 | Pending |
-| RISK-04 | Phase 3 | Pending |
-| RISK-05 | Phase 3 | Pending |
+| RISK-04 | Phase 3 | Complete |
+| RISK-05 | Phase 3 | Complete |
 | EXEC-01 | Phase 4 | Pending |
 | EXEC-02 | Phase 4 | Pending |
 | EXEC-03 | Phase 4 | Pending |

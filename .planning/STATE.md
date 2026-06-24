@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-06-24T15:33:47Z"
-last_activity: 2026-06-24 -- Completed Phase 03 Plan 01 (BarAggregator, migration 0003, events, get_market_snapshot)
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-06-24T15:43:57Z"
+last_activity: 2026-06-24 -- Completed Phase 03 Plan 02 (SignalEngine — I1/I2/I3 + entry-window + concurrent + daily-cap gates)
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 11
-  completed_plans: 9
-  percent: 36
+  completed_plans: 10
+  percent: 33
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 03 (intraday-signal-and-risk-engine) — EXECUTING
-Plan: 2 of 3
-Status: Executing Phase 03 (03-01 complete)
-Last activity: 2026-06-24 -- Completed Phase 03 Plan 01 (BarAggregator, migration 0003, events, get_market_snapshot)
+Plan: 3 of 3
+Status: Ready to execute
+Last activity: 2026-06-24 -- Completed Phase 03 Plan 02 (SignalEngine — all entry gates: I1/I2/I3, entry-window, concurrent cap, daily cap)
 
-Progress: [████████░░] 75%
+Progress: [█████████░] 91%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [████████░░] 75%
 | Phase 02-premarket-scanner P02 | 12 minutes | 3 tasks | 4 files |
 | Phase 02-premarket-scanner P03 | 18 | 3 tasks | 4 files |
 | Phase 03-intraday-signal-and-risk-engine P01 | 11 minutes | 3 tasks | 14 files |
+| Phase 03 P02 | 272 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,11 @@ Recent decisions affecting current work:
 - 03-01: LOD = session running-min from first K_5M bar (not single bar low) — Pitfall 3 / Open-Q3 RESOLVED
 - 03-01: get_market_snapshot is interpretation-free thin broker read; D-01/D-03 logic lives in 03-02 fetch_premarket_highs
 - 03-01: Migration 0003 uses callable with executescript for idempotent CREATE TABLE IF NOT EXISTS (WR-03)
+- 03-02: _in_entry_window() parses cfg.earliest_entry_et/latest_entry_et HH:MM strings — no hardcoded time literals (CFG-01)
+- 03-02: D-03 conservative exclusion — pre_high_price <= 0/None/NaN excluded; non-RET_OK snapshot returns empty dict without raising
+- 03-02: D-09 burst guard — _pending_count incremented immediately on SignalEvent emit; Phase 3 never writes daily_trade_count (Pitfall 5)
+- 03-02: D-10 re-entry gate requires BOTH broker-flat (get_positions()) AND no pending_intents PENDING row for the code
+- 03-02: asyncio.run() used in tests (Python 3.14 removed implicit default event loop in main thread)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -121,6 +127,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-24T15:33:47Z
-Stopped at: Completed 03-01-PLAN.md
-Resume file: .planning/phases/03-intraday-signal-and-risk-engine/03-02-PLAN.md
+Last session: 2026-06-24T15:43:57Z
+Stopped at: Completed 03-02-PLAN.md
+Resume file: .planning/phases/03-intraday-signal-and-risk-engine/03-03-PLAN.md
