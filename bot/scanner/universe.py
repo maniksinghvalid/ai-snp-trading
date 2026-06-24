@@ -26,6 +26,12 @@ _logger = get_logger(__name__)
 # URL for S&P 500 constituent list (Wikipedia)
 _WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
+# WR-05: minimum plausible universe size. The S&P 500 has ~500 constituents; a
+# parsed/cached list materially smaller than this is treated as corrupt rather
+# than authoritative (a truncated universe would also skew the 10% data-degradation
+# denominator downstream, D-06).
+_MIN_UNIVERSE_SIZE = 400
+
 
 # ============================================================
 # Public API
@@ -71,12 +77,20 @@ def fetch_sp500_symbols(cache_dir: str = "data") -> list:
     """
     try:
         tables = pd.read_html(_WIKI_URL)
-        df = tables[0]
-        # Validate structure — KeyError/missing column falls through to cache
-        if "Symbol" not in df.columns:
-            raise KeyError("'Symbol' column not found in Wikipedia table")
+        # WR-05: do NOT blindly trust tables[0] — Wikipedia may reorder tables.
+        # Select the constituents table by matching its expected columns.
+        df = _select_constituents_table(tables)
         raw_symbols = df["Symbol"].tolist()
         yf_symbols = [wiki_to_yfinance(s) for s in raw_symbols]
+
+        # WR-05: reject an implausibly small universe (truncated/garbage scrape)
+        # before it can be written as an authoritative cache and silently shrink
+        # the universe (which would also skew the 10% degradation denominator).
+        if len(yf_symbols) < _MIN_UNIVERSE_SIZE:
+            raise ValueError(
+                f"Parsed S&P 500 table has only {len(yf_symbols)} symbols "
+                f"(< {_MIN_UNIVERSE_SIZE} expected)"
+            )
 
         # Write dated cache
         os.makedirs(cache_dir, exist_ok=True)
@@ -91,12 +105,39 @@ def fetch_sp500_symbols(cache_dir: str = "data") -> list:
         pattern = os.path.join(cache_dir, "sp500_*.csv")
         cache_files = sorted(glob.glob(pattern), reverse=True)
         if cache_files:
-            _logger.warning(
-                "wikipedia_scrape_failed_using_cache",
-                cache=cache_files[0],
-            )
             cached_df = pd.read_csv(cache_files[0])
-            return cached_df["symbol"].tolist()
+            cached_symbols = cached_df["symbol"].tolist()
+            # WR-05: validate the cache too — a truncated/garbage cache must not be
+            # returned as authoritative.
+            if len(cached_symbols) >= _MIN_UNIVERSE_SIZE:
+                _logger.warning(
+                    "wikipedia_scrape_failed_using_cache",
+                    cache=cache_files[0],
+                )
+                return cached_symbols
+            _logger.warning(
+                "cached_universe_too_small_rejected",
+                cache=cache_files[0],
+                count=len(cached_symbols),
+                minimum=_MIN_UNIVERSE_SIZE,
+            )
         raise RuntimeError(
-            "No cached S&P 500 symbol list available and scrape failed"
+            "No valid cached S&P 500 symbol list available and scrape failed"
         )
+
+
+def _select_constituents_table(tables: list) -> pd.DataFrame:
+    """Return the S&P 500 constituents table from a list of parsed tables (WR-05).
+
+    Identifies the constituents table by its expected columns ("Symbol" plus a
+    descriptive company column such as "Security" or "GICS Sector") rather than
+    assuming it is tables[0]. Raises KeyError if no matching table is found.
+    """
+    for table in tables:
+        cols = set(table.columns)
+        if "Symbol" in cols and ("Security" in cols or "GICS Sector" in cols):
+            return table
+    raise KeyError(
+        "No S&P 500 constituents table found (no table with 'Symbol' + "
+        "'Security'/'GICS Sector' columns)"
+    )
