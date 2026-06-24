@@ -739,22 +739,22 @@ def load_watchlist(store: StateStore, session_date: str) -> dict:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does `pre_high_price` return a value before premarket trading has occurred?**
    - What we know: The field exists and is documented for US stocks. The plan calls for reading it "near 09:30 ET" (premarket ends at 09:30). If no premarket trades occurred for a specific watchlist code, `pre_high_price` may return 0 or N/A.
    - What's unclear: Whether 0 vs N/A vs a non-zero placeholder is returned for illiquid codes with no premarket activity.
-   - Recommendation: D-03 already handles this — any code where `pre_high_price <= 0` is skipped. Log a count at startup so the operator can see which codes lacked premarket data.
+   - RESOLVED: D-03 governs — any code where `pre_high_price <= 0` (zero, N/A, or unavailable) is excluded from signal evaluation for the session; never fall back to prior-day high. The fetch helper logs a count of codes with valid `pre_high_price` at 09:30 so the operator can see which codes lacked premarket data. Implemented in 03-01 Task 3 (`MoomooGateway.get_market_snapshot` — raw broker read, wave 1 so the consumer can use it) + 03-02 Task 1 (`fetch_premarket_highs` session-init reads `pre_high_price`, applies the D-03 exclusion, and freezes the rest).
 
 2. **How does `BarAggregator` receive a `bars_5m` DataFrame for `passes_intraday_filters()`?**
    - What we know: `passes_intraday_filters(code, bars_5m, ...)` expects a DataFrame of closed 5m bars. The `BarAggregator` receives bars one at a time. A rolling buffer of recent closed bars must be maintained.
    - What's unclear: How many bars to keep (the RVOL computation and swing-low trail need varying lookbacks). Phase 3 only needs the last closed bar's close for I1/I2 and the running RVOL from the baseline — the full multi-bar `bars_5m` is mainly needed for Phase 4 swing-low trailing.
-   - Recommendation: For Phase 3, `BarAggregator` maintains a per-code `deque` of closed bar dicts (max 50 bars = 4h+ of history). `passes_intraday_filters()` receives a DataFrame constructed from this deque. The deque also provides the LOD (min of lows).
+   - RESOLVED: `BarAggregator` maintains a per-code `deque(maxlen=50)` of closed-bar dicts (≈4h+ of 5m history). `passes_intraday_filters()` receives a DataFrame constructed from this deque. Implemented in 03-01 Task 2.
 
 3. **What is the correct `lod` to pass to `compute_initial_stop()`?**
    - What we know: `lod` should be the low-of-day — the minimum low across all regular-session bars so far. The `BarAggregator` must track this running minimum alongside the HOD maximum.
    - What's unclear: Whether the regular-session LOD should include the very first bar (which may be influenced by the open auction) or whether it should be the LOD since 09:35 ET.
-   - Recommendation: Include all regular-session bars from the first K_5M bar (typically `09:30–09:35 ET` bar). This is the most conservative LOD and aligns with how the strategy is described.
+   - RESOLVED: the `lod` passed to `compute_initial_stop()` is the session running-min across ALL regular-session 5m bars from the FIRST K_5M bar of the session (typically the `09:30–09:35 ET` bar) — NOT a single bar's low. This is the most conservative LOD and aligns with the strategy description. `BarAggregator` tracks `_lod[code]` as a running min updated on every push from the first bar; `SignalEvent.lod` carries this session running-min and is what flows into `compute_initial_stop(lod)`. Implemented in 03-01 Task 2.
 
 ---
 
