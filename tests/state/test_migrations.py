@@ -386,10 +386,15 @@ class TestMigration0003FreshDb:
         )
 
     def test_migration_0003_user_version_is_3(self, in_memory_conn):
-        """PRAGMA user_version must equal 3 after all three migrations."""
+        """PRAGMA user_version must equal CURRENT_VERSION after all migrations.
+
+        Note: originally tested for version==3; updated to CURRENT_VERSION after
+        migration 0004 was added in Phase 4. The test name is preserved for git
+        history continuity; CURRENT_VERSION now equals 4.
+        """
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == CURRENT_VERSION
 
     def test_migration_0003_daily_trade_count_columns(self, in_memory_conn):
         """daily_trade_count must have session_date, filled_count, updated_at columns."""
@@ -419,11 +424,15 @@ class TestMigration0003Idempotency:
     """Running run_migrations twice on a v3 DB must be a no-op."""
 
     def test_migration_0003_idempotent(self, in_memory_conn):
-        """Calling run_migrations twice on a v3 DB raises no error and stays at v3."""
+        """Calling run_migrations twice raises no error and stays at CURRENT_VERSION.
+
+        Note: class name retained for history; now CURRENT_VERSION == 4 after
+        migration 0004 was added in Phase 4.
+        """
         run_migrations(in_memory_conn)
         run_migrations(in_memory_conn)  # second call — must be a no-op
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == CURRENT_VERSION
 
     def test_v3_tables_intact_after_second_run(self, in_memory_conn):
         """After second run_migrations call, both new tables still present."""

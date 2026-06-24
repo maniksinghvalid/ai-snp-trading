@@ -27,6 +27,23 @@ from bot.state.store import StateStore
 # Helpers / Factories
 # ============================================================
 
+# Phase 4 (04-01) added 10 required execution fields to StrategyConfig.
+# These scanner tests don't exercise execution behavior, so _make_cfg spreads
+# these canonical defaults (matching rules.json) to satisfy the constructor.
+_EXECUTION_DEFAULTS = {
+    "entry_limit_buffer_usd": 0.05,
+    "entry_ttl_seconds": 20,
+    "entry_max_retries": 2,
+    "entry_poll_interval_seconds": 5,
+    "exit_limit_buffer_usd": 0.05,
+    "exit_ttl_seconds": 15,
+    "exit_escalation_step_usd": 0.10,
+    "exit_escalation_cadence_seconds": 10,
+    "force_close_escalation_step_usd": 0.20,
+    "force_close_escalation_cadence_seconds": 15,
+}
+
+
 def _make_cfg(
     min_price_usd: float = 3.0,
     d3_min_gap_pct: float = 3.0,
@@ -49,6 +66,7 @@ def _make_cfg(
         max_position_size_pct=10,
         max_concurrent_positions=5,
         max_trades_per_day=5,
+        **_EXECUTION_DEFAULTS,
     )
 
 

@@ -30,6 +30,28 @@ from bot.strategy.trend_join_long import TrendJoinLong
 
 
 # ============================================================
+# Execution defaults (Phase 4 — canonical rules.json execution block)
+# ============================================================
+#
+# StrategyConfig gained 10 required execution fields in Phase 4 (04-01).
+# These strategy tests don't exercise execution behavior, so every
+# StrategyConfig(...) call spreads these canonical defaults to satisfy the
+# constructor. Values match the execution block in rules.json exactly.
+_EXECUTION_DEFAULTS = {
+    "entry_limit_buffer_usd": 0.05,
+    "entry_ttl_seconds": 20,
+    "entry_max_retries": 2,
+    "entry_poll_interval_seconds": 5,
+    "exit_limit_buffer_usd": 0.05,
+    "exit_ttl_seconds": 15,
+    "exit_escalation_step_usd": 0.10,
+    "exit_escalation_cadence_seconds": 10,
+    "force_close_escalation_step_usd": 0.20,
+    "force_close_escalation_cadence_seconds": 15,
+}
+
+
+# ============================================================
 # Fixtures — canonical StrategyConfig (from rules.json values)
 # ============================================================
 
@@ -51,6 +73,7 @@ def _make_canonical_config() -> StrategyConfig:
         max_position_size_pct=10,
         max_concurrent_positions=5,
         max_trades_per_day=5,
+        **_EXECUTION_DEFAULTS,
     )
 
 
@@ -199,6 +222,7 @@ class TestPassesIntradayFilters:
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
             max_trades_per_day=5,
+            **_EXECUTION_DEFAULTS,
         )
         bars = self._make_5m_bars(50.0)
         baseline_strat = TrendJoinLong(baseline_cfg)
@@ -237,6 +261,7 @@ class TestComputeInitialStop:
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
             max_trades_per_day=5,
+            **_EXECUTION_DEFAULTS,
         )
         lod = 100.0
         result_1pct = TrendJoinLong(cfg_1pct).compute_initial_stop(lod)
@@ -265,6 +290,7 @@ class TestComputeInitialStop:
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=2.0,  # only risk budget changed
             max_position_size_pct=10, max_concurrent_positions=5,
             max_trades_per_day=5,
+            **_EXECUTION_DEFAULTS,
         )
         lod = 100.0
         result_risk_1 = TrendJoinLong(cfg_risk_1).compute_initial_stop(lod)
@@ -303,6 +329,7 @@ class TestConfigDrivenness:
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
             max_trades_per_day=5,
+            **_EXECUTION_DEFAULTS,
         )
 
         # A bar with 4% gap that passes the baseline (d3=3%) but fails the modified (d3=6%)
@@ -334,6 +361,7 @@ class TestConfigDrivenness:
             breakeven_trigger_r=1.0, max_risk_per_trade_pct=1.0,
             max_position_size_pct=10, max_concurrent_positions=5,
             max_trades_per_day=5,
+            **_EXECUTION_DEFAULTS,
         )
 
         bars = pd.DataFrame([

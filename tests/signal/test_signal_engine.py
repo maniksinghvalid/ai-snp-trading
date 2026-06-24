@@ -30,6 +30,23 @@ from bot.state.store import StateStore
 # Helpers / Fixtures
 # ============================================================
 
+# Phase 4 (04-01) added 10 required execution fields to StrategyConfig.
+# These signal tests don't exercise execution behavior, so make_cfg spreads
+# these canonical defaults (matching rules.json) to satisfy the constructor.
+_EXECUTION_DEFAULTS = {
+    "entry_limit_buffer_usd": 0.05,
+    "entry_ttl_seconds": 20,
+    "entry_max_retries": 2,
+    "entry_poll_interval_seconds": 5,
+    "exit_limit_buffer_usd": 0.05,
+    "exit_ttl_seconds": 15,
+    "exit_escalation_step_usd": 0.10,
+    "exit_escalation_cadence_seconds": 10,
+    "force_close_escalation_step_usd": 0.20,
+    "force_close_escalation_cadence_seconds": 15,
+}
+
+
 def make_cfg(**overrides) -> StrategyConfig:
     """Build a minimal StrategyConfig for tests. All params config-driven."""
     defaults = dict(
@@ -48,6 +65,7 @@ def make_cfg(**overrides) -> StrategyConfig:
         max_position_size_pct=10,
         max_concurrent_positions=5,
         max_trades_per_day=5,
+        **_EXECUTION_DEFAULTS,
     )
     defaults.update(overrides)
     return StrategyConfig(**defaults)
