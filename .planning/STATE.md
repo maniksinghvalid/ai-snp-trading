@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-06-24T15:53:38.007Z"
-last_activity: "2026-06-24 -- Completed Phase 03 Plan 03 (RiskEngine — live-equity sizing, LOD-1% stop, OrderIntent persistence)"
+status: planning
+stopped_at: Phase 4 context gathered
+last_updated: "2026-06-24T19:02:11.887Z"
+last_activity: 2026-06-24 -- Phase 03 verified and marked complete
 progress:
   total_phases: 6
   completed_phases: 3
@@ -21,22 +21,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 03 — intraday-signal-and-risk-engine
+**Current focus:** Phase 04 — order-and-position-management
 
 ## Current Position
 
-Phase: 03 (intraday-signal-and-risk-engine) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
-Last activity: 2026-06-24 -- Completed Phase 03 Plan 03 (RiskEngine — live-equity sizing, LOD-1% stop, OrderIntent persistence)
+Phase: 4 (order-and-position-management) — READY TO PLAN
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-06-24 -- Phase 03 verified and marked complete
 
-Progress: [██████████] 100%
+Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 3
+- Total plans completed: 6
 - Average duration: 6 minutes
 - Total execution time: ~0.3 hours
 
@@ -45,6 +45,7 @@ Progress: [██████████] 100%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4 complete | 22 min | 5.5 min |
+| 03 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -132,6 +133,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-24T15:58:44Z
-Stopped at: Completed 03-03-PLAN.md
-Resume file: None
+Last session: 2026-06-24T19:02:11.877Z
+Stopped at: Phase 4 context gathered
+Resume file: .planning/phases/04-order-and-position-management/04-CONTEXT.md
