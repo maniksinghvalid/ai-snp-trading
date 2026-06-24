@@ -224,3 +224,75 @@ class StateStore:
         """Close the store on exit from a with block."""
         self.close()
         return False  # do not suppress exceptions
+
+    # ============================================================
+    # Phase 4 Position Accessors
+    # ============================================================
+
+    def upsert_position(self, pos) -> None:
+        """Insert or update a PositionState row atomically (DB-first, Pitfall G).
+
+        Uses INSERT ... ON CONFLICT(position_id) DO UPDATE so that both new
+        positions (first fill, AWAITING_FILL → ACTIVE) and transition updates
+        (ACTIVE → PARTIAL_TAKEN → BREAKEVEN → TRAILING → CLOSED) go through a
+        single method. Commits immediately so that every FSM transition is
+        durable before updating in-memory state (Pitfall G, RESEARCH.md).
+
+        pos.phase must be a PositionPhase enum — .value is written as TEXT.
+        pos.opened_at and pos.updated_at are datetime | None; isoformat() is
+        used for the DB TEXT column (UTC ISO-8601 convention, D-09).
+
+        Args:
+            pos: A PositionState instance (bot.position.state). Not type-hinted
+                 here to avoid a circular import at the store layer.
+        """
+        self._conn.execute(
+            """INSERT INTO positions
+               (position_id, code, phase, entry_price, initial_stop, trail_stop,
+                full_quantity, remaining_quantity, entry_order_id, exit_order_id,
+                avg_fill_price, opened_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(position_id) DO UPDATE SET
+                 phase=excluded.phase,
+                 trail_stop=excluded.trail_stop,
+                 remaining_quantity=excluded.remaining_quantity,
+                 exit_order_id=excluded.exit_order_id,
+                 avg_fill_price=excluded.avg_fill_price,
+                 updated_at=excluded.updated_at""",
+            (
+                pos.position_id,
+                pos.code,
+                pos.phase.value,        # PositionPhase enum → TEXT
+                pos.entry_price,
+                pos.initial_stop,
+                pos.trail_stop,
+                pos.full_quantity,
+                pos.remaining_quantity,
+                pos.entry_order_id,
+                pos.exit_order_id,
+                pos.avg_fill_price,
+                pos.opened_at.isoformat() if pos.opened_at else None,
+                pos.updated_at.isoformat() if pos.updated_at else None,
+            ),
+        )
+        self._conn.commit()
+
+    def get_open_positions(self) -> list:
+        """Return all non-CLOSED position rows as dicts (for startup reconciliation).
+
+        Fetches every row from the positions table where phase != 'CLOSED'.
+        Returns a list of plain dicts (keyed by column name) so callers can
+        reconstruct PositionState objects without depending on the store's
+        sqlite3.Row factory setting.
+
+        Returns:
+            list: List of dicts, one per open/in-flight position row.
+                  Empty list if no open positions exist.
+        """
+        self._conn.row_factory = sqlite3.Row
+        rows = self._conn.execute(
+            "SELECT * FROM positions WHERE phase != 'CLOSED'"
+        ).fetchall()
+        # Reset row_factory so subsequent queries return plain tuples (default)
+        self._conn.row_factory = None
+        return [dict(r) for r in rows]

@@ -98,6 +98,18 @@ class StrategyConfig:
     max_concurrent_positions: int     # risk.max_concurrent_positions
     max_trades_per_day: int           # risk.max_trades_per_day
 
+    # ---- execution (Phase 4 tunables — CFG-01, D-05/D-07/D-08) ----
+    entry_limit_buffer_usd: float           # execution.entry_limit_buffer_usd
+    entry_ttl_seconds: float                # execution.entry_ttl_seconds
+    entry_max_retries: int                  # execution.entry_max_retries (int — retry count)
+    entry_poll_interval_seconds: float      # execution.entry_poll_interval_seconds
+    exit_limit_buffer_usd: float            # execution.exit_limit_buffer_usd
+    exit_ttl_seconds: float                 # execution.exit_ttl_seconds
+    exit_escalation_step_usd: float         # execution.exit_escalation_step_usd
+    exit_escalation_cadence_seconds: float  # execution.exit_escalation_cadence_seconds
+    force_close_escalation_step_usd: float           # execution.force_close_escalation_step_usd
+    force_close_escalation_cadence_seconds: float    # execution.force_close_escalation_cadence_seconds
+
 
 # ============================================================
 # Loader
@@ -146,6 +158,7 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
     tf = data["time_filter"]
     ex = data["exit"]
     rk = data["risk"]
+    ex_cfg = data.get("execution", {})
 
     return StrategyConfig(
         # universe
@@ -169,4 +182,15 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         max_position_size_pct=int(rk["max_position_size_pct_of_portfolio"]),
         max_concurrent_positions=int(rk["max_concurrent_positions"]),
         max_trades_per_day=int(rk["max_trades_per_day"]),
+        # execution (Phase 4 tunables — CFG-01, D-05/D-07/D-08)
+        entry_limit_buffer_usd=float(ex_cfg["entry_limit_buffer_usd"]),
+        entry_ttl_seconds=float(ex_cfg["entry_ttl_seconds"]),
+        entry_max_retries=int(ex_cfg["entry_max_retries"]),
+        entry_poll_interval_seconds=float(ex_cfg["entry_poll_interval_seconds"]),
+        exit_limit_buffer_usd=float(ex_cfg["exit_limit_buffer_usd"]),
+        exit_ttl_seconds=float(ex_cfg["exit_ttl_seconds"]),
+        exit_escalation_step_usd=float(ex_cfg["exit_escalation_step_usd"]),
+        exit_escalation_cadence_seconds=float(ex_cfg["exit_escalation_cadence_seconds"]),
+        force_close_escalation_step_usd=float(ex_cfg["force_close_escalation_step_usd"]),
+        force_close_escalation_cadence_seconds=float(ex_cfg["force_close_escalation_cadence_seconds"]),
     )

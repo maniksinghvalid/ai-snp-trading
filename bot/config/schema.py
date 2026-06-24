@@ -25,7 +25,8 @@ SCHEMA = {
         "intraday_filters",
         "time_filter",
         "exit",
-        "risk"
+        "risk",
+        "execution"
     ],
     "additionalProperties": True,
     "properties": {
@@ -131,6 +132,37 @@ SCHEMA = {
                 "max_position_size_pct_of_portfolio": {"type": "number"},
                 "max_concurrent_positions": {"type": "integer"},
                 "max_trades_per_day": {"type": "integer"}
+            }
+        },
+
+        # --------------------------------------------------------
+        # execution (Phase 4 tunables — CFG-01, D-05/D-07/D-08)
+        # --------------------------------------------------------
+        "execution": {
+            "type": "object",
+            "required": [
+                "entry_limit_buffer_usd",
+                "entry_ttl_seconds",
+                "entry_max_retries",
+                "entry_poll_interval_seconds",
+                "exit_limit_buffer_usd",
+                "exit_ttl_seconds",
+                "exit_escalation_step_usd",
+                "exit_escalation_cadence_seconds",
+                "force_close_escalation_step_usd",
+                "force_close_escalation_cadence_seconds"
+            ],
+            "properties": {
+                "entry_limit_buffer_usd":                 {"type": "number"},
+                "entry_ttl_seconds":                      {"type": "number"},
+                "entry_max_retries":                      {"type": "number"},
+                "entry_poll_interval_seconds":            {"type": "number"},
+                "exit_limit_buffer_usd":                  {"type": "number"},
+                "exit_ttl_seconds":                       {"type": "number"},
+                "exit_escalation_step_usd":               {"type": "number"},
+                "exit_escalation_cadence_seconds":        {"type": "number"},
+                "force_close_escalation_step_usd":        {"type": "number"},
+                "force_close_escalation_cadence_seconds": {"type": "number"}
             }
         }
     }

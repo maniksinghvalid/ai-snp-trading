@@ -177,14 +177,55 @@ def _migration_0003(conn: sqlite3.Connection) -> None:
     )""")
 
 
+# ============================================================
+# Migration 0004 — Phase 4 order-tracking + FSM columns on positions
+# ============================================================
+#
+# Adds three new columns to the positions table:
+#   entry_order_id  — broker order_id from place_order() for the entry (EXEC-05)
+#   exit_order_id   — broker order_id for any open exit order (nullable)
+#   avg_fill_price  — actual average fill price for entry (D-06); used for R math
+#
+# The existing `phase` column (migration 0001) is string-compatible with
+# PositionPhase enum values (ACTIVE, PARTIAL_TAKEN, BREAKEVEN, TRAILING, CLOSED).
+#
+# WR-03: callable migration with PRAGMA table_info guard on each ALTER so
+# partial re-runs after a mid-failure are idempotent (same pattern as 0002).
+# Uses conn.execute() (not executescript) for atomic commit with user_version bump.
+
+_POSITIONS_0004_COLUMNS = (
+    ("entry_order_id", "TEXT"),   # broker order_id for entry fill reconciliation (EXEC-05)
+    ("exit_order_id",  "TEXT"),   # open exit order_id (nullable)
+    ("avg_fill_price", "REAL"),   # actual fill price for R math (D-06)
+)
+
+
+def _migration_0004(conn: sqlite3.Connection) -> None:
+    """Add Phase 4 FSM and order-tracking columns to positions table.
+
+    Idempotent: each ALTER guarded by column-existence check (WR-03 pattern,
+    same as _migration_0002). The existing `phase` column (migration 0001) is
+    already present and string-compatible with PositionPhase enum values.
+    Uses conn.execute() (not executescript) for atomic commit with user_version
+    bump in run_migrations() (WR-03, see note at lines 143-152).
+
+    D-08: never edit shipped migrations 0001-0003 — new column always in 0004.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(positions)")}
+    for col, decl in _POSITIONS_0004_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {decl}")
+
+
 MIGRATIONS = [
     _MIGRATION_0001,
     _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
     _migration_0003,   # adds daily_trade_count + pending_intents (Phase 3, D-08/D-12)
+    _migration_0004,   # adds entry_order_id, exit_order_id, avg_fill_price (Phase 4)
 ]
 
 
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 
 # ============================================================
