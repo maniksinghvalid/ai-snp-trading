@@ -137,36 +137,40 @@ def _migration_0002(conn: sqlite3.Connection) -> None:
 #   pending_intents   — one row per emitted OrderIntent (D-12).
 #                       Lifecycle: PENDING → RESOLVED | EXPIRED (Phase 4 closes).
 #
-# WR-03: callable (not SQL string) so executescript's implicit COMMIT does not
-# race with the user_version bump. CREATE TABLE IF NOT EXISTS is already
-# idempotent without column-level guards.
+# WR-03: callable (not SQL string) so the DDL and the user_version bump commit
+# atomically. Each statement uses conn.execute() — NOT executescript() — because
+# executescript() issues an implicit COMMIT before executing, which means the
+# DDL commits before the PRAGMA user_version bump in run_migrations(). A crash
+# between _migration_0003 returning and the user_version bump would leave the
+# tables present but user_version still at 2 (the WR-03 atomicity guarantee
+# would be silently violated). Using conn.execute() keeps everything in the
+# caller's open transaction. CREATE TABLE IF NOT EXISTS is idempotent without
+# column-level guards.
 
 
 def _migration_0003(conn: sqlite3.Connection) -> None:
     """Add Phase 3 daily-trade counter and pending-intent tables (D-08, D-12).
 
     Idempotent: each CREATE TABLE uses IF NOT EXISTS so re-running after a
-    partial failure does not raise 'table already exists'. Called as a callable
-    so the user_version PRAGMA bump commits atomically with the DDL (WR-03).
+    partial failure does not raise 'table already exists'. Uses conn.execute()
+    (not executescript) so the DDL stays in the caller's open transaction and
+    commits atomically with the PRAGMA user_version bump (WR-03).
     """
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS daily_trade_count (
-            session_date    TEXT PRIMARY KEY,
-            filled_count    INTEGER NOT NULL DEFAULT 0,
-            updated_at      TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS pending_intents (
-            intent_id       TEXT PRIMARY KEY,
-            code            TEXT NOT NULL,
-            status          TEXT NOT NULL DEFAULT 'PENDING',
-            entry_price     REAL NOT NULL,
-            stop_price      REAL NOT NULL,
-            quantity        INTEGER NOT NULL,
-            emitted_at      TEXT NOT NULL,
-            resolved_at     TEXT
-        );
-    """)
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_trade_count (
+        session_date    TEXT PRIMARY KEY,
+        filled_count    INTEGER NOT NULL DEFAULT 0,
+        updated_at      TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS pending_intents (
+        intent_id       TEXT PRIMARY KEY,
+        code            TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'PENDING',
+        entry_price     REAL NOT NULL,
+        stop_price      REAL NOT NULL,
+        quantity        INTEGER NOT NULL,
+        emitted_at      TEXT NOT NULL,
+        resolved_at     TEXT
+    )""")
 
 
 MIGRATIONS = [
