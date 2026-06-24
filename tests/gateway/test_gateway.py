@@ -536,18 +536,43 @@ class TestGetMarketSnapshot:
         get_market_snapshot return that exact (ret, data) tuple unchanged
         (thin broker read — no interpretation).
         """
-        pytest.skip("Wave 0 stub — implemented in Task 3")
+        gw = _make_gateway_with_mocks()
+        expected_df = pd.DataFrame([{"code": "US.AAPL", "pre_high_price": 155.0}])
+        gw._quote_ctx.get_market_snapshot.return_value = (0, expected_df)
+
+        async def _run():
+            return await gw.get_market_snapshot(["US.AAPL"])
+
+        ret, data = asyncio.run(_run())
+        assert ret == 0, f"Expected RET_OK (0), got {ret}"
+        assert data is expected_df, "Must return the exact DataFrame from the broker"
 
     def test_get_market_snapshot_ret_error_returned_as_is(self):
         """
         A non-RET_OK ret is returned as-is (the caller — 03-02 fetch helper —
         treats it as an empty result; the gateway never raises here).
         """
-        pytest.skip("Wave 0 stub — implemented in Task 3")
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_market_snapshot.return_value = (1, "error detail")
+
+        async def _run():
+            return await gw.get_market_snapshot(["US.AAPL"])
+
+        ret, data = asyncio.run(_run())
+        assert ret == 1, f"Non-RET_OK must be returned as-is; got {ret}"
+        assert data == "error detail"
 
     def test_get_market_snapshot_passes_codes(self):
         """
         get_market_snapshot forwards the exact `codes` list to
         _quote_ctx.get_market_snapshot(codes) (<=20 watchlist codes).
         """
-        pytest.skip("Wave 0 stub — implemented in Task 3")
+        codes = ["US.AAPL", "US.MSFT", "US.TSLA"]
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_market_snapshot.return_value = (0, pd.DataFrame())
+
+        async def _run():
+            return await gw.get_market_snapshot(codes)
+
+        asyncio.run(_run())
+        gw._quote_ctx.get_market_snapshot.assert_called_once_with(codes)

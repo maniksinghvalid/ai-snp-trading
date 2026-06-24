@@ -298,6 +298,40 @@ class MoomooGateway:
             lambda: self._trade_ctx.position_list_query(),
         )
 
+    async def get_market_snapshot(self, codes: list) -> tuple:
+        """Raw broker snapshot read for the watchlist (D-01 premarket-high source).
+
+        Returns the (ret, data) tuple from quote_ctx.get_market_snapshot(codes)
+        unchanged — this is an interpretation-free thin broker read.
+
+        The premarket-high field on the returned DataFrame is `pre_high_price`
+        (RESEARCH Flag 2 RESOLVED — field available for US stocks without an
+        extended-hours subscription). The D-01/D-03 interpretation logic (reading
+        `pre_high_price`, excluding codes where it is zero, freezing the result)
+        lives in the 03-02 `fetch_premarket_highs` helper, NOT here.
+
+        The ≤20-code watchlist batch is well within the 400-code snapshot limit
+        (SIG-01 cap; RESEARCH Standard Stack).
+
+        Do NOT call `_check_ret` here — the caller (03-02 fetch helper) treats
+        a non-RET_OK ret as an empty result and degrades gracefully rather than
+        raising. The gateway read is interpretation-free.
+
+        Args:
+            codes: List of Moomoo-format codes (e.g. ["US.AAPL"]).
+                   Must be ≤20 items (SIG-01 watchlist cap).
+
+        Returns:
+            (ret, data) tuple from quote_ctx.get_market_snapshot(codes).
+            ret == RET_OK (0) on success; data is a DataFrame or similar.
+            Non-RET_OK ret is returned as-is without raising.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._quote_ctx.get_market_snapshot(codes),
+        )
+
     async def subscribe(self, codes: list, subtypes: list = None) -> None:
         """Subscribe to real-time K_5M candlestick pushes for the given codes.
 
