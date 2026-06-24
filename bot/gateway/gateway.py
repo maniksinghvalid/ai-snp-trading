@@ -486,6 +486,216 @@ class MoomooGateway:
         _logger.info("unsubscribed_k5m", codes=codes, count=len(codes))
 
     # --------------------------------------------------------
+    # Order Methods (EXEC-01/EXEC-02/EXEC-03/EXEC-05)
+    # --------------------------------------------------------
+
+    async def place_order(self, code: str, qty: int, price: float, trd_side) -> str:
+        """Place a marketable-limit order and return the broker order_id string.
+
+        Uses OrderType.NORMAL exclusively — MARKET order type is never submitted (EXEC-02).
+        Deferred import of OrderType so the module imports with moomoo-api absent.
+        Every placed order is appended to the audit log (SAFE-05).
+
+        Parameters:
+            code:     Moomoo-format code (e.g. "US.AAPL").
+            qty:      Integer share quantity.
+            price:    Limit price in USD.
+            trd_side: TrdSide enum value (BUY or SELL); caller supplies.
+
+        Returns:
+            str — broker-assigned order_id from the SDK response row.
+
+        Raises:
+            GatewayError — if SDK returns non-RET_OK.
+        """
+        # Deferred import — mirrors subscribe() pattern so test env without
+        # moomoo-api still imports bot.gateway.gateway (D-02 wrap-not-import).
+        from moomoo import OrderType  # noqa: F401 — NORMAL only; never submits a market order
+
+        loop = asyncio.get_running_loop()
+
+        def _place_blocking():
+            ret, data = self._trade_ctx.place_order(
+                price=float(price),
+                qty=int(qty),
+                code=code,
+                trd_side=trd_side,
+                order_type=OrderType.NORMAL,            # ALWAYS NORMAL — EXEC-02
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+            )
+            _check_ret(ret, data, "place_order")
+            row = data.iloc[0] if hasattr(data, "iloc") else data[0]
+            order_id = str(row.get("order_id", "") or row.get("orderID", ""))
+            from bot.safety.audit_log import append_audit
+            append_audit({
+                "event": "place_order",
+                "code": code,
+                "qty": int(qty),
+                "price": float(price),
+                "order_id": order_id,
+            })
+            return order_id
+
+        order_id = await loop.run_in_executor(None, _place_blocking)
+        _logger.info("order_placed", code=code, qty=qty, price=price, order_id=order_id)
+        return order_id
+
+    async def cancel_order(self, order_id: str) -> None:
+        """Cancel an open order via modify_order(op=CANCEL) (EXEC-03).
+
+        Cancellation is implemented as a modify_order call with
+        ModifyOrderOp.CANCEL, qty=0, price=0 — per the moomoo SDK cancel
+        semantics (skills/moomooapi/scripts/trade/cancel_order.py lines 56-63).
+        Deferred import of ModifyOrderOp for test-env compatibility.
+
+        Parameters:
+            order_id: Broker-assigned order_id string to cancel.
+
+        Raises:
+            GatewayError — if SDK returns non-RET_OK.
+        """
+        # Deferred import — mirrors subscribe() pattern.
+        from moomoo import ModifyOrderOp
+
+        loop = asyncio.get_running_loop()
+
+        def _cancel_blocking():
+            ret, data = self._trade_ctx.modify_order(
+                modify_order_op=ModifyOrderOp.CANCEL,
+                order_id=order_id,
+                qty=0,     # SDK requires qty/price even for cancel (cancel_order.py lines 56-63)
+                price=0,
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+            )
+            _check_ret(ret, data, "cancel_order")
+
+        await loop.run_in_executor(None, _cancel_blocking)
+        _logger.info("order_cancelled", order_id=order_id)
+
+    async def get_order_fills(self, refresh_cache: bool = True) -> list:
+        """Fetch fill records via deal_list_query with refresh_cache=True (Pitfall B).
+
+        MANDATORY: omitting refresh_cache=True returns stale OpenD-cached data
+        on SIMULATE (Pitfall B — empirically verified). Polling with this flag
+        is the authoritative fill source; push-based fills are unreliable on
+        SIMULATE (Pitfall A). Returns list of dicts with order_id present
+        (EXEC-05 fill reconciliation).
+
+        Parameters:
+            refresh_cache: Must remain True for SIMULATE; default True.
+
+        Returns:
+            list of dicts with keys: deal_id, order_id, code, qty, price,
+            trd_side, create_time. Empty list if no fills.
+
+        Raises:
+            GatewayError — if SDK returns non-RET_OK.
+        """
+        loop = asyncio.get_running_loop()
+        ret, data = await loop.run_in_executor(
+            None,
+            lambda: self._trade_ctx.deal_list_query(
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+                refresh_cache=refresh_cache,    # MANDATORY for SIMULATE (Pitfall B)
+            ),
+        )
+        _check_ret(ret, data, "deal_list_query")
+        if data is None or len(data) == 0:
+            return []
+        return [
+            {k: row.get(k) for k in [
+                "deal_id", "order_id", "code", "qty",
+                "price", "trd_side", "create_time",
+            ]}
+            for _, row in data.iterrows()
+        ]
+
+    async def get_order_status(self, order_id: str = "") -> list:
+        """Fetch order status via order_list_query with refresh_cache=True (Pitfall B).
+
+        MANDATORY: refresh_cache=True bypasses OpenD's stale cache on SIMULATE.
+        Returns list of dicts with dealt_qty and dealt_avg_price for partial-fill
+        detection (EXEC-05).
+
+        Parameters:
+            order_id: Filter to a specific order; empty string = all orders.
+
+        Returns:
+            list of dicts with keys: order_id, code, order_status, qty,
+            dealt_qty, dealt_avg_price, trd_side.
+
+        Raises:
+            GatewayError — if SDK returns non-RET_OK.
+        """
+        loop = asyncio.get_running_loop()
+        ret, data = await loop.run_in_executor(
+            None,
+            lambda: self._trade_ctx.order_list_query(
+                order_id=order_id,
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+                refresh_cache=True,             # MANDATORY for SIMULATE (Pitfall B)
+            ),
+        )
+        _check_ret(ret, data, "order_list_query")
+        if data is None or len(data) == 0:
+            return []
+        return [
+            {k: row.get(k) for k in [
+                "order_id", "code", "order_status", "qty",
+                "dealt_qty", "dealt_avg_price", "trd_side",
+            ]}
+            for _, row in data.iterrows()
+        ]
+
+    async def get_ask_price(self, code: str) -> float:
+        """Read the current ask price for a single code from a snapshot.
+
+        Reads the `ask_price` column from get_market_snapshot (confirmed column
+        name per skills/moomooapi/scripts/quote/get_snapshot.py _parse_snapshot_row
+        lines 57-58 via safe_get(row, "ask_price")). If ask_price is null or 0
+        (illiquid/halted), falls back to `last_price` (line 50). The engine
+        applies the +buffer; this method returns the raw market price.
+        Deferred SDK import via the existing get_market_snapshot path.
+
+        Returns:
+            float — ask price in USD (>= 0). 0.0 if snapshot unavailable.
+        """
+        ret, data = await self.get_market_snapshot([code])
+        if ret != RET_OK or data is None or len(data) == 0:
+            return 0.0
+        row = data.iloc[0] if hasattr(data, "iloc") else data[0]
+        ask = float(row.get("ask_price") or 0)
+        if ask == 0.0:
+            ask = float(row.get("last_price") or 0)
+        return ask
+
+    async def get_bid_price(self, code: str) -> float:
+        """Read the current bid price for a single code from a snapshot.
+
+        Reads the `bid_price` column from get_market_snapshot (confirmed column
+        name per skills/moomooapi/scripts/quote/get_snapshot.py _parse_snapshot_row
+        lines 57-58 via safe_get(row, "bid_price")). If bid_price is null or 0
+        (illiquid/halted), falls back to `last_price` (line 50). The engine
+        applies the -buffer; this method returns the raw market price.
+        Deferred SDK import via the existing get_market_snapshot path.
+
+        Returns:
+            float — bid price in USD (>= 0). 0.0 if snapshot unavailable.
+        """
+        ret, data = await self.get_market_snapshot([code])
+        if ret != RET_OK or data is None or len(data) == 0:
+            return 0.0
+        row = data.iloc[0] if hasattr(data, "iloc") else data[0]
+        bid = float(row.get("bid_price") or 0)
+        if bid == 0.0:
+            bid = float(row.get("last_price") or 0)
+        return bid
+
+    # --------------------------------------------------------
     # Reconciliation Skeletons (SAFE-02 / SAFE-03)
     # --------------------------------------------------------
 
