@@ -954,14 +954,335 @@ class TestRowToPositionState:
 
 
 # ============================================================
-# Test: POS-04 stub (remains for 04-04)
+# Test: POS-05 + D-09/D-10/D-11 — startup_reconcile via MoomooGateway (04-04)
+# ============================================================
+
+def test_restart_reconciliation():
+    """POS-05/D-09/D-10/D-11: startup_reconcile makes broker truth win.
+
+    Four sub-scenarios in one comprehensive test:
+
+    (a) D-09 close: StateStore has a position the broker says is flat →
+        reconcile marks it CLOSED in the DB.
+
+    (b) D-09 adopt-qty: StateStore has qty=300 but broker reports qty=250 →
+        reconcile adopts the broker qty (remaining_quantity updated to 250).
+
+    (c) D-10 orphan: broker has "US.GOOG" with no StateStore record → reconcile
+        inserts an ACTIVE position with avg_cost as entry_price and a computed
+        stop, and emits an orphan_adopted audit entry.
+
+    (d) D-11 never-loosen: a known position's post-restart swing-low is lower
+        than the persisted trail_stop → the stop must remain unchanged (never
+        loosened). The stop is persisted as-is; only on_bar raises it later.
+    """
+    import asyncio
+    import pandas as pd
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from bot.gateway.gateway import MoomooGateway, GatewayConfig
+    from bot.state.store import StateStore
+
+    # ---- Setup in-memory StateStore ----
+    import tempfile, os
+    tmp = tempfile.mktemp(suffix=".db")
+    store = StateStore(db_path=tmp).open()
+
+    # ---- Seed StateStore positions ----
+    # (a) Position that broker says is flat
+    pos_a_id = "POS-A-CLOSED"
+    store.conn.execute(
+        """INSERT INTO positions
+           (position_id, code, phase, entry_price, initial_stop, trail_stop,
+            full_quantity, remaining_quantity, entry_order_id, avg_fill_price,
+            opened_at, updated_at)
+           VALUES (?, 'US.AAPL', 'ACTIVE', 180.0, 178.0, 178.0,
+                   300, 300, 'ORDER-A', 180.0,
+                   '2026-06-24T09:30:00+00:00', '2026-06-24T09:30:00+00:00')""",
+        (pos_a_id,),
+    )
+    # (b) Position with qty mismatch (300 in DB, broker has 250)
+    pos_b_id = "POS-B-QTYMATCH"
+    store.conn.execute(
+        """INSERT INTO positions
+           (position_id, code, phase, entry_price, initial_stop, trail_stop,
+            full_quantity, remaining_quantity, entry_order_id, avg_fill_price,
+            opened_at, updated_at)
+           VALUES (?, 'US.TSLA', 'ACTIVE', 200.0, 197.0, 199.0,
+                   300, 300, 'ORDER-B', 200.0,
+                   '2026-06-24T09:30:00+00:00', '2026-06-24T09:30:00+00:00')""",
+        (pos_b_id,),
+    )
+    # (d) Known position with persisted trail_stop=99.5 — broker still open with 200 qty
+    pos_d_id = "POS-D-NEVER-LOOSEN"
+    store.conn.execute(
+        """INSERT INTO positions
+           (position_id, code, phase, entry_price, initial_stop, trail_stop,
+            full_quantity, remaining_quantity, entry_order_id, avg_fill_price,
+            opened_at, updated_at)
+           VALUES (?, 'US.NVDA', 'TRAILING', 100.0, 98.0, 99.5,
+                   200, 200, 'ORDER-D', 100.0,
+                   '2026-06-24T09:30:00+00:00', '2026-06-24T09:30:00+00:00')""",
+        (pos_d_id,),
+    )
+    store.conn.commit()
+
+    # ---- Build broker positions DataFrame ----
+    # US.AAPL is ABSENT (broker says flat → D-09 close)
+    # US.TSLA has qty=250 (differs from stored 300 → D-09 adopt-qty)
+    # US.GOOG is an orphan (not in StateStore → D-10)
+    # US.NVDA is present with qty=200 (same as stored → D-11 never-loosen)
+    broker_df = pd.DataFrame([
+        {"code": "US.TSLA", "qty": 250, "average_cost": 200.0},
+        {"code": "US.GOOG", "qty": 50,  "average_cost": 175.0},
+        {"code": "US.NVDA", "qty": 200, "average_cost": 100.0},
+    ])
+
+    # ---- Build a patched MoomooGateway that never connects to OpenD ----
+    cfg = GatewayConfig()
+    gw = object.__new__(MoomooGateway)
+    gw.cfg = cfg
+    gw._quote_ctx = None
+    gw._trade_ctx = None
+
+    # Mock get_positions to return the broker DataFrame
+    gw.get_positions = AsyncMock(return_value=(0, broker_df))
+    # Mock get_market_snapshot so _derive_lod_for_orphan gets a plausible LOD
+    snapshot_df = pd.DataFrame([{
+        "code": "US.GOOG",
+        "low_price": 170.0,
+        "last_price": 176.0,
+        "ask_price": 177.0,
+        "bid_price": 175.5,
+    }])
+    gw.get_market_snapshot = AsyncMock(return_value=(0, snapshot_df))
+    gw.subscribe = AsyncMock()
+
+    # Patch append_audit to capture events without writing to disk
+    # append_audit is imported locally in startup_reconcile from bot.safety.audit_log,
+    # so we patch it at the source module (bot.safety.audit_log.append_audit).
+    audit_events = []
+
+    with patch("bot.safety.audit_log.append_audit", side_effect=audit_events.append):
+        asyncio.run(gw.startup_reconcile(store, manager=None))
+
+    # ---- (a) D-09: US.AAPL not in broker → must be CLOSED in DB ----
+    row_a = store.conn.execute(
+        "SELECT phase FROM positions WHERE position_id=?", (pos_a_id,)
+    ).fetchone()
+    assert row_a is not None
+    assert row_a[0] == "CLOSED", (
+        f"D-09: US.AAPL absent from broker must be CLOSED in DB, got {row_a[0]!r}"
+    )
+
+    # ---- (b) D-09: US.TSLA qty mismatch → remaining_quantity updated to 250 ----
+    row_b = store.conn.execute(
+        "SELECT remaining_quantity FROM positions WHERE position_id=?", (pos_b_id,)
+    ).fetchone()
+    assert row_b is not None
+    assert row_b[0] == 250, (
+        f"D-09: US.TSLA qty must be adopted from broker (250), got {row_b[0]}"
+    )
+
+    # ---- (c) D-10: US.GOOG orphan → ACTIVE row inserted with stop and audit ----
+    import sqlite3 as _sqlite3
+    store.conn.row_factory = _sqlite3.Row
+    orphan_rows = store.conn.execute(
+        "SELECT * FROM positions WHERE code='US.GOOG'"
+    ).fetchall()
+    store.conn.row_factory = None
+    orphan_dicts = [dict(r) for r in orphan_rows]
+    assert len(orphan_dicts) == 1, (
+        f"D-10: orphan US.GOOG must be inserted into StateStore (got {len(orphan_dicts)} rows)"
+    )
+    orphan = orphan_dicts[0]
+    assert orphan["phase"] == "ACTIVE", (
+        f"D-10: orphan must be inserted as ACTIVE, got {orphan['phase']!r}"
+    )
+    assert orphan["entry_price"] == 175.0, (
+        f"D-10: orphan entry_price must be broker avg_cost (175.0), got {orphan['entry_price']}"
+    )
+    # Stop must be below LOD (170.0 * 0.99 = 168.3)
+    assert orphan["trail_stop"] < 170.0, (
+        f"D-10: orphan stop must be below LOD (170.0), got {orphan['trail_stop']}"
+    )
+    assert orphan["trail_stop"] > 0.0, (
+        f"D-10: orphan stop must be > 0.0, got {orphan['trail_stop']}"
+    )
+    # Confirm orphan_adopted audit entry was emitted
+    orphan_audits = [e for e in audit_events if e.get("event") == "orphan_adopted"]
+    assert len(orphan_audits) == 1, (
+        f"D-10: expected 1 orphan_adopted audit entry, got {len(orphan_audits)}"
+    )
+    assert orphan_audits[0]["code"] == "US.GOOG"
+
+    # ---- (d) D-11: US.NVDA known — trail_stop must NOT be loosened ----
+    row_d = store.conn.execute(
+        "SELECT trail_stop, remaining_quantity FROM positions WHERE position_id=?",
+        (pos_d_id,),
+    ).fetchone()
+    assert row_d is not None
+    assert row_d[0] == 99.5, (
+        f"D-11: US.NVDA trail_stop must remain 99.5 (never loosened), got {row_d[0]}"
+    )
+    assert row_d[1] == 200, (
+        f"D-11: US.NVDA remaining_quantity unchanged (broker matches), got {row_d[1]}"
+    )
+
+    # Cleanup
+    store.close()
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+
+
+# ============================================================
+# Test: POS-04 — Force-close at calendar-aware time (04-04)
 # ============================================================
 
 def test_force_close_half_day():
     """POS-04: Force-close at half-day early close vs 15:51 on normal day.
 
-    Implemented in 04-04. Mock calendar returns "13:00" for a half-day;
-    PositionManager must use earlier force-close time. Normal day uses "15:51"
-    derived from cfg.force_close_et (CFG-01).
+    Tests:
+      (a) get_force_close_time_et with mocked get_market_close_et returning "13:00"
+          → result == datetime.time(12, 51) (12:51 ET on half-day).
+      (b) get_force_close_time_et with mocked get_market_close_et returning "16:00"
+          → result == datetime.time(15, 51) (15:51 ET on normal day).
+      (c) force_close_all() with now_et mocked past the force-close time:
+          calls engine.manage_exit for each non-CLOSED position with SELL + force_close params.
+          No market order requested (D-08/EXEC-02).
     """
-    assert False, "TODO: implemented in 04-04"
+    import asyncio
+    import datetime
+    from unittest.mock import AsyncMock, MagicMock, patch, call
+
+    from bot.position.manager import PositionManager, get_force_close_time_et
+    from bot.position.state import PositionPhase, PositionState
+
+    # ---- (a) Half-day: get_market_close_et returns "13:00" → force-close = 12:51 ----
+    with patch("bot.position.manager.get_market_close_et", return_value="13:00"):
+        result_half = get_force_close_time_et(datetime.date(2026, 6, 24))
+    assert result_half == datetime.time(12, 51), (
+        f"POS-04 half-day: expected 12:51, got {result_half}"
+    )
+
+    # ---- (b) Normal day: get_market_close_et returns "16:00" → force-close = 15:51 ----
+    with patch("bot.position.manager.get_market_close_et", return_value="16:00"):
+        result_normal = get_force_close_time_et(datetime.date(2026, 6, 24))
+    assert result_normal == datetime.time(15, 51), (
+        f"POS-04 normal day: expected 15:51, got {result_normal}"
+    )
+
+    # ---- (c) force_close_all calls engine.manage_exit for each non-CLOSED position ----
+    mock_engine = MagicMock()
+    mock_engine.manage_exit = AsyncMock(return_value=0)
+    mock_store = MagicMock()
+    mock_store.upsert_position = MagicMock()
+
+    cfg = MagicMock()
+    cfg.force_close_escalation_step_usd = 0.20
+    cfg.force_close_escalation_cadence_seconds = 0.01
+    cfg.exit_ttl_seconds = 10.0
+    cfg.exit_limit_buffer_usd = 0.05
+
+    mock_strategy = MagicMock()
+
+    manager = PositionManager(
+        store=mock_store,
+        engine=mock_engine,
+        cfg=cfg,
+        strategy=mock_strategy,
+    )
+
+    # Add two open positions and one CLOSED position
+    pos_open1 = PositionState(
+        position_id="POS-FC-1",
+        code="US.AAPL",
+        phase=PositionPhase.ACTIVE,
+        entry_price=180.0,
+        initial_stop=178.0,
+        trail_stop=178.0,
+        full_quantity=100,
+        remaining_quantity=100,
+        entry_order_id="O-FC-1",
+        exit_order_id=None,
+        avg_fill_price=180.0,
+        opened_at=datetime.datetime(2026, 6, 24, 9, 30, 0, tzinfo=datetime.timezone.utc),
+        updated_at=datetime.datetime(2026, 6, 24, 9, 30, 0, tzinfo=datetime.timezone.utc),
+    )
+    pos_open2 = PositionState(
+        position_id="POS-FC-2",
+        code="US.TSLA",
+        phase=PositionPhase.TRAILING,
+        entry_price=200.0,
+        initial_stop=197.0,
+        trail_stop=199.0,
+        full_quantity=50,
+        remaining_quantity=50,
+        entry_order_id="O-FC-2",
+        exit_order_id=None,
+        avg_fill_price=200.0,
+        opened_at=datetime.datetime(2026, 6, 24, 9, 30, 0, tzinfo=datetime.timezone.utc),
+        updated_at=datetime.datetime(2026, 6, 24, 9, 30, 0, tzinfo=datetime.timezone.utc),
+    )
+    pos_closed = PositionState(
+        position_id="POS-FC-3",
+        code="US.MSFT",
+        phase=PositionPhase.CLOSED,
+        entry_price=300.0,
+        initial_stop=296.0,
+        trail_stop=296.0,
+        full_quantity=30,
+        remaining_quantity=0,
+        entry_order_id="O-FC-3",
+        exit_order_id=None,
+        avg_fill_price=300.0,
+        opened_at=datetime.datetime(2026, 6, 24, 9, 30, 0, tzinfo=datetime.timezone.utc),
+        updated_at=datetime.datetime(2026, 6, 24, 9, 30, 0, tzinfo=datetime.timezone.utc),
+    )
+    manager._positions["US.AAPL"] = pos_open1
+    manager._positions["US.TSLA"] = pos_open2
+    manager._positions["US.MSFT"] = pos_closed
+
+    # Mock now_et to be past the force-close time (15:52 ET > 15:51)
+    mock_now = datetime.datetime(2026, 6, 24, 15, 52, 0,
+                                 tzinfo=datetime.timezone.utc)
+
+    with patch("bot.position.manager.get_market_close_et", return_value="16:00"), \
+         patch("bot.position.manager.now_et", return_value=mock_now):
+        asyncio.run(manager.force_close_all(datetime.date(2026, 6, 24)))
+
+    # manage_exit must have been called for each non-CLOSED position
+    assert mock_engine.manage_exit.await_count == 2, (
+        f"POS-04: manage_exit must be called for 2 open positions, "
+        f"got {mock_engine.manage_exit.await_count}"
+    )
+
+    # Check that manage_exit was called with SELL side and force_close_* params
+    for call_args in mock_engine.manage_exit.call_args_list:
+        kwargs = call_args.kwargs if call_args.kwargs else {}
+        args = call_args.args
+
+        # code is 1st positional arg, qty 2nd, side 3rd
+        called_code = args[0] if args else kwargs.get("code", "")
+        assert called_code in ("US.AAPL", "US.TSLA"), (
+            f"POS-04: manage_exit called for unexpected code {called_code!r}"
+        )
+
+        # side must be TrdSide.SELL — expressed as a sentinel (lazy import)
+        # In test env without moomoo-api, side sentinel is truthy but not MARKET
+        # Verify no "MARKET" in the side argument (D-08/EXEC-02)
+        side_arg = args[2] if len(args) > 2 else kwargs.get("side", "")
+        assert "MARKET" not in str(side_arg), (
+            f"D-08: force_close must never use a market order, got side={side_arg!r}"
+        )
+
+    # CLOSED position must NOT be included in force-close
+    closed_calls = [
+        c for c in mock_engine.manage_exit.call_args_list
+        if (c.args[0] if c.args else c.kwargs.get("code", "")) == "US.MSFT"
+    ]
+    assert len(closed_calls) == 0, (
+        "POS-04: manage_exit must NOT be called for already-CLOSED positions"
+    )

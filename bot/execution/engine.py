@@ -102,19 +102,100 @@ class ExecutionEngine:
     # --------------------------------------------------------
 
     async def consume_intent(self, intent) -> Optional[FillEvent]:
-        """Consume an OrderIntent: place entry order, poll fills, emit FillEvent.
+        """Consume an OrderIntent: broker-verified duplicate guard then entry order.
 
-        Wraps _manage_entry_order; the caller (PositionManager) receives the
-        FillEvent and advances the FSM from AWAITING_FILL → ACTIVE.
+        EXEC-04 broker-verified duplicate guard runs AT THE TOP of this method,
+        BEFORE place_order is ever called. This is NOT an in-memory-only check —
+        it uses get_positions(refresh_cache=True) and get_order_status() to verify
+        broker state directly (Pitfall F — crash-between-place-and-persist).
+
+        Guard protocol (EXEC-04):
+          1. get_positions(refresh_cache=True) — if the broker reports an open
+             position for intent.code, block the entry and return None.
+          2. get_order_status() — if any open BUY order exists for intent.code,
+             block the entry and return None (Pitfall F: crash-between-place-and-persist).
+          Both checks are mandatory; either alone is insufficient (Pitfall F).
 
         Args:
             intent: OrderIntent from RiskEngine (code, quantity, entry_price,
                     stop_price, intent_id).
 
         Returns:
-            FillEvent on any fill (full or partial, D-06), or None if abandoned
-            after exceeding entry_max_retries (D-05).
+            FillEvent on any fill (full or partial, D-06), or None if:
+              - Duplicate detected by broker-verified guard (EXEC-04), OR
+              - Abandoned after exceeding entry_max_retries (D-05).
         """
+        # ---- EXEC-04: Broker-verified duplicate guard (BEFORE any place_order) ----
+        # Check 1: Broker has an open position for this code → block
+        try:
+            ret, broker_data = await self._gw.get_positions(refresh_cache=True)
+            if ret == 0 and broker_data is not None and len(broker_data) > 0:
+                broker_codes = set()
+                for _, row in broker_data.iterrows():
+                    code_val = str(row.get("code", "") or "")
+                    if code_val:
+                        broker_codes.add(code_val)
+                if intent.code in broker_codes:
+                    _logger.warning(
+                        "duplicate_entry_blocked_open_position",
+                        code=intent.code,
+                        intent_id=intent.intent_id,
+                    )
+                    append_audit({
+                        "event": "duplicate_entry_blocked",
+                        "reason": "open_broker_position",
+                        "code": intent.code,
+                        "intent_id": intent.intent_id,
+                    })
+                    return None
+        except Exception:
+            # On error, allow through — block only on confirmed duplicate (fail open)
+            _logger.warning(
+                "duplicate_guard_positions_check_failed",
+                code=intent.code,
+                exc_info=True,
+            )
+
+        # Check 2: Open BUY order for this code → block (Pitfall F)
+        try:
+            open_orders = await self._gw.get_order_status()
+            for order in open_orders:
+                order_code = str(order.get("code", "") or "")
+                order_status = str(order.get("order_status", "") or "")
+                order_side = str(order.get("trd_side", "") or "")
+                # Order is "open" if not in a terminal status
+                is_terminal = order_status in {
+                    "FILLED_ALL", "CANCELLED_ALL", "CANCELLED_PART",
+                    "FAILED", "DELETED", "EXPIRED",
+                }
+                is_buy = "BUY" in order_side.upper() or order_side == "0"
+                if (
+                    order_code == intent.code
+                    and is_buy
+                    and not is_terminal
+                ):
+                    _logger.warning(
+                        "duplicate_entry_blocked_open_buy_order",
+                        code=intent.code,
+                        intent_id=intent.intent_id,
+                        order_status=order_status,
+                    )
+                    append_audit({
+                        "event": "duplicate_entry_blocked",
+                        "reason": "open_buy_order",
+                        "code": intent.code,
+                        "intent_id": intent.intent_id,
+                    })
+                    return None
+        except Exception:
+            # On error, allow through (fail open — prefer miss over false block)
+            _logger.warning(
+                "duplicate_guard_order_status_check_failed",
+                code=intent.code,
+                exc_info=True,
+            )
+
+        # ---- Guard passed — proceed to place the entry order ----
         return await self._manage_entry_order(intent)
 
     async def _manage_entry_order(self, intent) -> Optional[FillEvent]:

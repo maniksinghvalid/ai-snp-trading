@@ -31,6 +31,7 @@ Usage:
     manager.flush_all()                 # called by KillSwitch on shutdown (04-04)
 """
 
+import datetime as _dt
 import pandas as pd
 from collections import deque
 from datetime import datetime, timezone
@@ -49,8 +50,44 @@ from bot.position.state import (
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
+from bot.scanner.calendar import get_market_close_et
 
 _logger = get_logger(__name__)
+
+
+# ============================================================
+# Calendar-aware force-close time (POS-04 / D-08)
+# ============================================================
+
+def get_force_close_time_et(today: _dt.date) -> _dt.time:
+    """Return the force-close time for today as a datetime.time in US Eastern.
+
+    Derived from get_market_close_et() minus 9 minutes — never hardcoded (CFG-01).
+
+    Protocol:
+      - Normal day: get_market_close_et returns "16:00" → force-close = 15:51 ET.
+      - Half-day:   get_market_close_et returns "13:00" → force-close = 12:51 ET.
+
+    The 9-minute buffer before the close gives enough time for the escalating-limit
+    exit loop to attempt 2-3 cancel-replace rounds before the bell (D-08).
+
+    Args:
+        today: calendar date to compute the force-close time for.
+
+    Returns:
+        datetime.time — the force-close time in ET (e.g. time(15, 51)).
+    """
+    _FORCE_CLOSE_BUFFER_MINUTES: int = 9
+    close_hhmm = get_market_close_et(today)  # "HH:MM" ET string
+    parts = close_hhmm.split(":")
+    close_h = int(parts[0])
+    close_m = int(parts[1])
+    force_m = close_m - _FORCE_CLOSE_BUFFER_MINUTES
+    force_h = close_h
+    if force_m < 0:
+        force_m += 60
+        force_h -= 1
+    return _dt.time(force_h, force_m)
 
 
 # ============================================================
@@ -227,6 +264,122 @@ class PositionManager:
                     "flush_all_error", code=code, exc_info=True
                 )
         _logger.info("flush_all_done", flushed=flushed)
+
+    # ============================================================
+    # Public API — EOD force-close (POS-04 / D-08)
+    # ============================================================
+
+    async def force_close_all(self, today: _dt.date = None) -> None:
+        """Force-close all non-CLOSED positions at the calendar-aware force-close time.
+
+        Called by the main loop when now_et() >= get_force_close_time_et(today).
+        Uses engine.manage_exit() with force_close_* escalation tunables from cfg
+        (D-08 / CFG-01). NEVER places a market order (EXEC-02 upheld even here).
+
+        Protocol (D-08):
+          1. Compute force-close time from get_market_close_et minus 9 min (half-day aware).
+          2. If now_et() < force-close time, return early (not yet time).
+          3. For each non-CLOSED position, call engine.manage_exit(SELL, force_close params).
+          4. If a position is still open (remaining_quantity > 0 after manage_exit),
+             emit a force_close_stuck audit/log entry and log a loud warning.
+
+        Args:
+            today: The trading date to compute force-close time for. Defaults to
+                   now_et().date() if None (ET-aware — never host timezone).
+        """
+        if today is None:
+            today = now_et().date()
+
+        force_close_time = get_force_close_time_et(today)
+        now = now_et()
+        now_time = now.timetz().replace(tzinfo=None).replace(microsecond=0)
+        now_time_naive = _dt.time(now.hour, now.minute, now.second)
+
+        if now_time_naive < force_close_time:
+            _logger.debug(
+                "force_close_not_yet",
+                force_close_time=str(force_close_time),
+                now_et=str(now_time_naive),
+            )
+            return
+
+        _logger.warning(
+            "force_close_starting",
+            force_close_time=str(force_close_time),
+            open_positions=sum(
+                1 for p in self._positions.values()
+                if p.phase != PositionPhase.CLOSED
+            ),
+        )
+
+        # Lazily import TrdSide to preserve test-env compatibility (deferred import pattern)
+        try:
+            from moomoo import TrdSide
+            sell_side = TrdSide.SELL
+        except ImportError:
+            sell_side = "SELL"  # test env sentinel (string is never MARKET)
+
+        for code, pos in list(self._positions.items()):
+            if pos.phase == PositionPhase.CLOSED:
+                continue
+
+            qty = pos.remaining_quantity
+            if qty <= 0:
+                continue
+
+            _logger.warning(
+                "force_close_position",
+                code=code,
+                qty=qty,
+                phase=pos.phase.value,
+            )
+
+            try:
+                if self._engine is not None:
+                    filled = await self._engine.manage_exit(
+                        code=code,
+                        qty=qty,
+                        side=sell_side,
+                        escalation_step=self._cfg.force_close_escalation_step_usd,
+                        escalation_cadence=self._cfg.force_close_escalation_cadence_seconds,
+                        ttl=self._cfg.exit_ttl_seconds,
+                    )
+                    # After manage_exit, check if position is now flat
+                    if filled < qty:
+                        # Still not fully flat — emit force_close_stuck alert (D-08)
+                        append_audit({
+                            "event": "force_close_stuck",
+                            "code": code,
+                            "remaining": qty - filled,
+                            "filled": filled,
+                        })
+                        _logger.warning(
+                            "force_close_stuck",
+                            code=code,
+                            remaining=qty - filled,
+                            filled=filled,
+                        )
+                    else:
+                        # Fully flat — persist CLOSED state DB-first
+                        pos.remaining_quantity = 0
+                        pos.phase = PositionPhase.CLOSED
+                        pos.updated_at = now_et()
+                        self._persist_position(pos, event="force_close")
+                        _logger.info("force_close_filled", code=code, qty=qty)
+            except Exception:
+                _logger.warning(
+                    "force_close_exit_error",
+                    code=code,
+                    qty=qty,
+                    exc_info=True,
+                )
+                # Emit force_close_stuck audit and keep retrying (D-08 — never silently carry)
+                append_audit({
+                    "event": "force_close_stuck",
+                    "code": code,
+                    "remaining": qty,
+                    "reason": "manage_exit raised",
+                })
 
     # ============================================================
     # Internal — fill handlers

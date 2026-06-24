@@ -301,16 +301,122 @@ def test_ttl_cancel_replace():
 
 
 # ============================================================
-# test_duplicate_guard — EXEC-04 (stub for 04-04)
+# test_duplicate_guard — EXEC-04 (implemented in 04-04)
 # ============================================================
 
 def test_duplicate_guard():
-    """EXEC-04: Broker get_positions() blocks duplicate entry (broker-truth guard).
+    """EXEC-04: Broker-verified duplicate guard blocks second entry for same code.
 
-    Implemented in 04-04. Mocked get_positions() returns existing position;
-    ExecutionEngine must refuse to place a second entry for the same code.
+    Two paths tested:
+      (a) get_positions() returns an open position for the code → consume_intent
+          blocks before place_order and returns None (EXEC-04 / D-09).
+      (b) get_positions() returns empty but get_order_status() has an open BUY
+          order for the code → consume_intent blocks (Pitfall F).
+
+    The guard MUST run before place_order — verified by asserting place_order is
+    never called when the guard fires. The check is broker-verified (refresh_cache)
+    not in-memory only.
     """
-    assert False, "TODO: implemented in 04-0X"
+    from bot.execution.engine import ExecutionEngine
+    import pandas as pd
+
+    cfg = _MockCfg()
+    intent = _MockIntent(code="US.AAPL")
+
+    # ---- Path (a): open position at broker → block ----
+    # Build a minimal broker positions DataFrame for the code
+    positions_df = pd.DataFrame([{
+        "code": "US.AAPL",
+        "qty": 100,
+        "average_cost": 182.0,
+        "position_side": "LONG",
+    }])
+
+    gw_a = MagicMock()
+    gw_a.get_positions = AsyncMock(return_value=(0, positions_df))  # RET_OK=0
+    gw_a.get_order_status = AsyncMock(return_value=[])
+    gw_a.place_order = AsyncMock(return_value="ORDER-SHOULD-NOT-PLACE")
+    gw_a.get_ask_price = AsyncMock(return_value=182.55)
+    gw_a.get_order_fills = AsyncMock(return_value=[])
+    gw_a.cancel_order = AsyncMock()
+
+    store_a = _make_mock_store()
+    engine_a = ExecutionEngine(gateway=gw_a, store=store_a, cfg=cfg)
+
+    result_a = _run(engine_a.consume_intent(intent))
+
+    # consume_intent must return None (blocked) and must NOT call place_order
+    assert result_a is None, (
+        "EXEC-04: consume_intent must return None when open broker position exists"
+    )
+    gw_a.place_order.assert_not_awaited(), (
+        "EXEC-04: place_order must NOT be called when duplicate guard fires"
+    )
+    # get_positions must have been called (broker-verified check)
+    gw_a.get_positions.assert_awaited()
+
+    # ---- Path (b): open BUY order at broker (Pitfall F) → block ----
+    # Empty positions but open BUY order for the code
+    empty_positions_df = pd.DataFrame([])  # no open positions
+
+    open_buy_orders = [{
+        "order_id": "ORDER-EXISTING-BUY",
+        "code": "US.AAPL",
+        "order_status": "WAITING_SUBMIT",  # not a terminal status
+        "qty": 100,
+        "dealt_qty": 0,
+        "dealt_avg_price": 0.0,
+        "trd_side": "BUY",
+    }]
+
+    gw_b = MagicMock()
+    gw_b.get_positions = AsyncMock(return_value=(0, empty_positions_df))
+    gw_b.get_order_status = AsyncMock(return_value=open_buy_orders)
+    gw_b.place_order = AsyncMock(return_value="ORDER-SHOULD-NOT-PLACE-B")
+    gw_b.get_ask_price = AsyncMock(return_value=182.55)
+    gw_b.get_order_fills = AsyncMock(return_value=[])
+    gw_b.cancel_order = AsyncMock()
+
+    store_b = _make_mock_store()
+    engine_b = ExecutionEngine(gateway=gw_b, store=store_b, cfg=cfg)
+
+    result_b = _run(engine_b.consume_intent(intent))
+
+    # consume_intent must return None (blocked by open BUY order)
+    assert result_b is None, (
+        "Pitfall F: consume_intent must return None when an open BUY order exists"
+    )
+    gw_b.place_order.assert_not_awaited(), (
+        "Pitfall F: place_order must NOT be called when an open BUY order exists"
+    )
+    # Both get_positions and get_order_status must have been called
+    gw_b.get_positions.assert_awaited()
+    gw_b.get_order_status.assert_awaited()
+
+    # ---- Path (c): no duplicate → entry proceeds normally ----
+    # Empty positions AND no open orders → guard passes, entry proceeds
+    gw_c = MagicMock()
+    gw_c.get_positions = AsyncMock(return_value=(0, empty_positions_df))
+    gw_c.get_order_status = AsyncMock(return_value=[])
+    gw_c.get_ask_price = AsyncMock(return_value=182.55)
+    gw_c.get_order_fills = AsyncMock(return_value=[
+        {"order_id": "ORDER-NEW", "code": "US.AAPL", "qty": 100, "price": 182.60},
+    ])
+    gw_c.place_order = AsyncMock(return_value="ORDER-NEW")
+    gw_c.cancel_order = AsyncMock()
+
+    store_c = _make_mock_store()
+    engine_c = ExecutionEngine(gateway=gw_c, store=store_c, cfg=cfg)
+
+    from bot.execution.events import FillEvent
+    result_c = _run(engine_c.consume_intent(intent))
+
+    # No duplicate → entry proceeds → FillEvent returned
+    assert result_c is not None, (
+        "EXEC-04: when no duplicate exists, consume_intent must proceed with entry"
+    )
+    assert isinstance(result_c, FillEvent)
+    gw_c.place_order.assert_awaited()
 
 
 # ============================================================

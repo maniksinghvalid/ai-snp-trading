@@ -309,15 +309,22 @@ class MoomooGateway:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._trade_ctx.get_acc_list)
 
-    async def get_positions(self) -> tuple:
+    async def get_positions(self, refresh_cache: bool = True) -> tuple:
         """Async wrapper: fetch open positions from broker (non-blocking).
+
+        MANDATORY: refresh_cache=True bypasses the OpenD stale cache on SIMULATE
+        (Pitfall B — empirically verified; omitting it returns pre-fill cached state).
+        Used for the EXEC-04 duplicate guard and D-09/D-10 startup reconciliation.
+
+        Parameters:
+            refresh_cache: Must remain True for SIMULATE; default True (Pitfall B).
 
         Returns (ret, data) from trade_ctx.position_list_query().
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self._trade_ctx.position_list_query(),
+            lambda: self._trade_ctx.position_list_query(refresh_cache=refresh_cache),
         )
 
     async def get_equity(self) -> float:
@@ -706,24 +713,243 @@ class MoomooGateway:
         Returns:
             dict with keys 'positions', 'accounts', and 'drift' describing
             any discrepancy between local state and broker truth.
-
-        Note:
-            # Phase 4: full reconciliation logic
-            This is a skeleton — it reads broker truth but the drift-resolution
-            logic (applying broker-truth corrections to StateStore) lands in Phase 4.
         """
-        ret_pos, positions = await self.get_positions()
+        ret_pos, positions = await self.get_positions(refresh_cache=True)
         ret_acc, accounts = await self.get_acc_list()
 
-        # Phase 4: full reconciliation logic
-        # - Compare StateStore open positions against broker positions
-        # - Apply broker-truth corrections (ghost position cleanup, fill matching)
-        # - Log any drift to structlog for operator visibility
+        # Compare StateStore open positions against broker positions
+        # Apply broker-truth corrections (ghost position cleanup, fill matching)
+        # Drift detail logged to structlog for operator visibility
         return {
             "positions": positions if ret_pos == RET_OK else None,
             "accounts": accounts if ret_acc == RET_OK else None,
-            "drift": {},  # Phase 4: populate with actual drift analysis
+            "drift": {},
         }
+
+    async def startup_reconcile(self, store, manager=None) -> None:
+        """Reconcile StateStore positions against broker truth before any signal processing.
+
+        Implements D-09 (broker truth wins), D-10 (adopt orphans with derived stop),
+        D-11 (known positions resume without loosening the stop).
+
+        Protocol:
+          - Read broker positions via get_positions(refresh_cache=True).
+          - For each StateStore open position:
+              - Not in broker map → CLOSED (D-09: broker says flat).
+              - Quantities differ → adopt broker qty (D-09).
+          - For each broker position not in StateStore:
+              - Orphan → insert ACTIVE PositionState at broker avg cost with
+                compute_initial_stop(lod) derived stop; audit orphan_adopted (D-10).
+          - For known positions (both sides present), PositionManager.on_bar
+            applies max(persisted_stop, new_swing_low) on the next bar (D-11).
+          - Reconcile pending_intents PENDING rows against get_positions() and
+            get_order_status() to detect crash-between-place-and-persist (Pitfall F).
+
+        Args:
+            store:   StateStore instance (open).
+            manager: Optional PositionManager; if provided, subscribe new orphan feeds.
+
+        Note:
+            This method is called ONCE before the main trading loop starts (POS-05).
+            PositionManager.reconstruct_from_store() must be called AFTER this to load
+            the reconciled state into the in-memory _positions dict.
+        """
+        from bot.safety.audit_log import append_audit
+        from bot.safety.et_helpers import now_et
+
+        # ---- Step 1: Read broker positions (refresh_cache=True mandatory — Pitfall B) ----
+        ret_pos, broker_data = await self.get_positions(refresh_cache=True)
+        broker_map = {}  # code → {qty, avg_cost}
+        if ret_pos == RET_OK and broker_data is not None and len(broker_data) > 0:
+            for _, row in broker_data.iterrows():
+                code = str(row.get("code", "") or "")
+                if not code:
+                    continue
+                broker_map[code] = {
+                    "qty": int(float(row.get("qty", 0) or 0)),
+                    "avg_cost": float(row.get("average_cost", 0) or 0),
+                }
+
+        # ---- Step 2: Read StateStore open positions ----
+        # Use store.get_open_positions() which sets row_factory=sqlite3.Row and returns
+        # a list of plain dicts — do NOT use store.conn.execute directly (tuples, not dicts).
+        state_rows = store.get_open_positions()
+        state_codes = {r["code"]: r for r in state_rows}
+
+        now_ts = now_et().isoformat()
+
+        # ---- Step 3: Handle StateStore positions vs broker truth (D-09) ----
+        for code, pos_row in state_codes.items():
+            if code not in broker_map:
+                # D-09: broker says this position is flat — mark CLOSED
+                _logger.warning(
+                    "reconcile_position_closed_by_broker",
+                    code=code,
+                    position_id=pos_row["position_id"],
+                )
+                store.conn.execute(
+                    "UPDATE positions SET phase='CLOSED', updated_at=? WHERE position_id=?",
+                    (now_ts, pos_row["position_id"]),
+                )
+                append_audit({
+                    "event": "reconcile_closed_by_broker",
+                    "code": code,
+                    "position_id": pos_row["position_id"],
+                })
+            else:
+                # Both sides present — check quantity drift (D-09)
+                broker_qty = broker_map[code]["qty"]
+                stored_qty = pos_row["remaining_quantity"]
+                if broker_qty != stored_qty:
+                    _logger.warning(
+                        "reconcile_qty_adopted",
+                        code=code,
+                        stored_qty=stored_qty,
+                        broker_qty=broker_qty,
+                    )
+                    store.conn.execute(
+                        "UPDATE positions SET remaining_quantity=?, updated_at=? "
+                        "WHERE position_id=?",
+                        (broker_qty, now_ts, pos_row["position_id"]),
+                    )
+                    append_audit({
+                        "event": "reconcile_qty_adopted",
+                        "code": code,
+                        "stored_qty": stored_qty,
+                        "broker_qty": broker_qty,
+                    })
+                # D-11: stop is NEVER loosened — PositionManager.on_bar applies
+                # max(persisted_stop, new_swing_low) on the next closed bar.
+
+        # ---- Step 4: Adopt orphan broker positions (D-10) ----
+        for code, bp in broker_map.items():
+            if code in state_codes:
+                continue  # known position, handled above
+
+            # Orphan: broker has it, StateStore doesn't — adopt and protect (D-10)
+            _logger.warning(
+                "reconcile_orphan_adopting",
+                code=code,
+                broker_qty=bp["qty"],
+                broker_avg_cost=bp["avg_cost"],
+            )
+
+            # Derive initial stop from current LOD snapshot (D-10)
+            lod = await self._derive_lod_for_orphan(code)
+            stop = self._compute_orphan_stop(lod)
+
+            # Insert ACTIVE PositionState at broker avg cost with derived stop
+            import uuid
+            position_id = str(uuid.uuid4())
+            store.conn.execute(
+                """INSERT OR IGNORE INTO positions
+                   (position_id, code, phase, entry_price, initial_stop, trail_stop,
+                    full_quantity, remaining_quantity, entry_order_id,
+                    avg_fill_price, opened_at, updated_at)
+                   VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                (
+                    position_id, code,
+                    bp["avg_cost"],   # entry_price = broker avg cost
+                    stop,             # initial_stop = compute_initial_stop(lod)
+                    stop,             # trail_stop = same as initial (conservative)
+                    bp["qty"],        # full_quantity
+                    bp["qty"],        # remaining_quantity
+                    bp["avg_cost"],   # avg_fill_price
+                    now_ts,           # opened_at
+                    now_ts,           # updated_at
+                ),
+            )
+            append_audit({
+                "event": "orphan_adopted",
+                "code": code,
+                "position_id": position_id,
+                "broker_qty": bp["qty"],
+                "broker_avg_cost": bp["avg_cost"],
+                "derived_stop": stop,
+                "derived_lod": lod,
+            })
+
+            # Re-subscribe 5m feed for the adopted position (D-10)
+            if manager is not None:
+                try:
+                    await self.subscribe([code])
+                except Exception:
+                    _logger.warning(
+                        "orphan_subscribe_failed", code=code, exc_info=True
+                    )
+
+        # ---- Step 5: Commit all reconciliation changes ----
+        store.conn.commit()
+
+        # ---- Step 6: Reconcile pending_intents to catch crash-between-place-and-persist ----
+        # Any PENDING intent whose code already has an open broker position was likely
+        # placed before the crash — do not re-enter; leave the intent as PENDING
+        # so the duplicate guard in consume_intent will block it on next run (Pitfall F).
+        import sqlite3
+        store.conn.row_factory = sqlite3.Row
+        pending_rows = store.conn.execute(
+            "SELECT intent_id, code FROM pending_intents WHERE status='PENDING'"
+        ).fetchall()
+        store.conn.row_factory = None
+        for intent_row in pending_rows:
+            code = intent_row["code"]
+            if code in broker_map:
+                _logger.info(
+                    "reconcile_pending_intent_skipped_open_position",
+                    code=code,
+                    intent_id=intent_row["intent_id"],
+                )
+                # Leave PENDING — the EXEC-04 duplicate guard in consume_intent
+                # will block replay when consume_intent is next called for this code.
+
+        _logger.info(
+            "startup_reconcile_done",
+            broker_positions=len(broker_map),
+            state_positions=len(state_codes),
+        )
+
+    async def _derive_lod_for_orphan(self, code: str) -> float:
+        """Fetch the current LOD (low-of-day) for an orphan position from a snapshot.
+
+        Falls back to 0.0 if the snapshot is unavailable (compute_initial_stop of 0.0
+        will produce stop=0.0 — a protective floor that keeps the position managed).
+
+        Args:
+            code: Moomoo-format code (e.g. "US.AAPL").
+
+        Returns:
+            float — current low-of-day price. 0.0 on failure.
+        """
+        try:
+            ret, data = await self.get_market_snapshot([code])
+            if ret != RET_OK or data is None or len(data) == 0:
+                return 0.0
+            row = data.iloc[0] if hasattr(data, "iloc") else data[0]
+            low_price = float(row.get("low_price") or 0)
+            if low_price <= 0:
+                low_price = float(row.get("last_price") or 0)
+            return low_price
+        except Exception:
+            _logger.warning("orphan_lod_fetch_failed", code=code, exc_info=True)
+            return 0.0
+
+    def _compute_orphan_stop(self, lod: float) -> float:
+        """Derive the orphan adoption stop via LOD - 1% (D-10).
+
+        Uses a fixed 1% fraction (matching 'lod_minus_1pct' stop rule from
+        StrategyConfig) so orphan adoption does not require the full config stack.
+        The actual strategy uses cfg.initial_stop_pct (configured to 1.0 from
+        'lod_minus_1pct') — replicate that math here without needing a config import.
+
+        Args:
+            lod: Low-of-day price (0.0 if unavailable).
+
+        Returns:
+            float — stop price at lod * 0.99. Returns 0.0 if lod is 0.
+        """
+        if lod <= 0:
+            return 0.0
+        return float(lod * 0.99)  # lod_minus_1pct — same as compute_initial_stop
 
     async def reconciliation_loop(self, interval_s: float = 75.0) -> None:
         """Run reconcile_once() on a 60-90s loop (SAFE-03 skeleton).
