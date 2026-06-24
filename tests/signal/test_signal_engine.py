@@ -101,7 +101,7 @@ def make_engine(
 
 def run(coro):
     """Synchronous helper to run a coroutine in tests."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ============================================================
