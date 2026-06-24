@@ -91,6 +91,20 @@ def _evaluate_symbol(
     if pd.isna(sma200_val):
         sma200_val = None
 
+    # CR-01: An unavailable SMA200 means the D2 trend filter ("prior close > SMA200" —
+    # the trend-join premise of the entire strategy) cannot be evaluated. Fail CLOSED:
+    # a symbol with >= rvol_lookback_days but < 200 prior sessions must be EXCLUDED,
+    # never admitted as if it were in an established uptrend. Previously sma200_val
+    # was coerced to 0.0 before the filter, which made D2 (`prior_close > 0.0`)
+    # always True for any real price — silently bypassing the trend filter.
+    if sma200_val is None:
+        _logger.warning(
+            "symbol_skipped_no_sma200",
+            symbol=symbol,
+            prior_sessions=int(n_prior),
+        )
+        return None
+
     # RVOL baseline — mean volume of the prior cfg.rvol_lookback_days sessions
     # This is the DENOMINATOR of the RVOL ratio (stored for Phase 3 reuse, D-08).
     # Only rows with date < scan_date are included (strict no-look-ahead cutoff).
@@ -114,10 +128,10 @@ def _evaluate_symbol(
         return None
     gap_pct = (today_open_val - prior_close_val) / prior_close_val * 100.0
 
-    # Apply D1/D2/D3 + universe price filter via TrendJoinLong
+    # Apply D1/D2/D3 + universe price filter via TrendJoinLong.
+    # sma200_val is guaranteed non-None here (excluded above if unavailable, CR-01).
     strategy = TrendJoinLong(cfg)
-    sma200_for_filter = sma200_val if sma200_val is not None else 0.0
-    if not strategy.passes_daily_filters(symbol, frame, sma200_for_filter):
+    if not strategy.passes_daily_filters(symbol, frame, sma200_val):
         return None
 
     moomoo_code = yfinance_to_moomoo(symbol)

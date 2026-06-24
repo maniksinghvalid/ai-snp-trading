@@ -300,6 +300,44 @@ class TestInsufficientHistory:
         assert "US.SHORT" not in result, "Short-history symbol must be excluded"
         assert "US.GOOD" in result, "Good-history symbol must be included"
 
+    def test_no_sma200_symbol_excluded(self, tmp_state_db):
+        """CR-01 regression: a symbol with >= rvol_lookback_days but < 200 prior
+        sessions has no SMA200 and MUST be excluded (D2 trend filter cannot be
+        evaluated). Previously a None SMA200 was coerced to 0.0, making D2
+        (`prior_close > 0.0`) always True — silently admitting the symbol with
+        zero trend verification.
+
+        NO_SMA200 has 50 rows (49 prior sessions): above the 14-day RVOL gate but
+        well below 200, so sma(prior_closes, 200) is NaN. It otherwise satisfies
+        D1/D3/price, so the ONLY thing that can exclude it is the SMA200 gate.
+        """
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(rvol_lookback_days=14)
+
+        # 50 rows → 49 prior sessions: passes 14-day history gate, fails 200-day SMA.
+        no_sma_frame = _make_daily_frame(n_days=50, scan_date=scan_date)
+        good_frame = _make_daily_frame(n_days=220, scan_date=scan_date)
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["NOSMA", "GOOD"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=lambda data, sym: no_sma_frame if sym == "NOSMA" else good_frame), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+
+        assert "US.NOSMA" not in result, (
+            "Symbol without a computable SMA200 must be excluded (D2 cannot be verified)"
+        )
+        assert "US.GOOD" in result, "Full-history symbol must still be included"
+
 
 # ============================================================
 # SCAN-08: Top-20 Cap
