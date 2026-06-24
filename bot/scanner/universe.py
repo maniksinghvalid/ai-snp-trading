@@ -10,7 +10,9 @@ Never calls sys.exit — raises on unrecoverable failure.
 Exports: fetch_sp500_symbols, wiki_to_yfinance, yfinance_to_moomoo
 """
 import glob
+import io
 import os
+import urllib.request
 
 import pandas as pd
 
@@ -25,6 +27,15 @@ _logger = get_logger(__name__)
 
 # URL for S&P 500 constituent list (Wikipedia)
 _WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+
+# Wikipedia returns HTTP 403 to requests without a browser-like User-Agent.
+# pandas' internal read_html fetch sends none, so we fetch the HTML ourselves
+# with this header and hand the markup to pd.read_html (UAT Test 1 / SCAN-01).
+_USER_AGENT = (
+    "Mozilla/5.0 (compatible; ai-snp-trading-bot/1.0; "
+    "+https://github.com/ranaroussi/yfinance)"
+)
+_WIKI_FETCH_TIMEOUT = 20  # seconds
 
 # WR-05: minimum plausible universe size. The S&P 500 has ~500 constituents; a
 # parsed/cached list materially smaller than this is treated as corrupt rather
@@ -76,7 +87,7 @@ def fetch_sp500_symbols(cache_dir: str = "data") -> list:
     Raises RuntimeError when scrape fails and no cache file exists.
     """
     try:
-        tables = pd.read_html(_WIKI_URL)
+        tables = _read_wiki_tables(_WIKI_URL)
         # WR-05: do NOT blindly trust tables[0] — Wikipedia may reorder tables.
         # Select the constituents table by matching its expected columns.
         df = _select_constituents_table(tables)
@@ -100,7 +111,13 @@ def fetch_sp500_symbols(cache_dir: str = "data") -> list:
 
         return yf_symbols
 
-    except Exception:
+    except Exception as exc:
+        # Surface WHY the scrape failed before falling back — a silent broad
+        # except is what hid the Wikipedia 403 (UAT Test 1 / SCAN-01).
+        _logger.warning(
+            "wikipedia_scrape_failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         # Fall back to the most recent dated cache on any exception
         pattern = os.path.join(cache_dir, "sp500_*.csv")
         cache_files = sorted(glob.glob(pattern), reverse=True)
@@ -124,6 +141,24 @@ def fetch_sp500_symbols(cache_dir: str = "data") -> list:
         raise RuntimeError(
             "No valid cached S&P 500 symbol list available and scrape failed"
         )
+
+
+def _read_wiki_tables(url: str) -> list:
+    """Fetch ``url`` with a browser-like User-Agent and parse its HTML tables.
+
+    Wikipedia returns HTTP 403 to pandas' default header-less request, so we
+    issue the GET ourselves with ``_USER_AGENT`` and hand the decoded markup to
+    pd.read_html. Keeping this a separate function lets tests exercise the
+    real parsing path while stubbing only the network read.
+
+    url: str — page URL to fetch.
+    Returns the list of DataFrames parsed from the page.
+    Raises urllib/HTTP errors on fetch failure (handled by the caller's fallback).
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(request, timeout=_WIKI_FETCH_TIMEOUT) as response:
+        html = response.read().decode("utf-8", "replace")
+    return pd.read_html(io.StringIO(html))
 
 
 def _select_constituents_table(tables: list) -> pd.DataFrame:

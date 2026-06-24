@@ -9,7 +9,7 @@ WR-05 constituents-table selection and small-list rejection.
 import os
 import pytest
 import pandas as pd
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 def _make_constituents_df(symbols=None) -> pd.DataFrame:
@@ -57,6 +57,62 @@ class TestWikipediaScrape:
         assert "MSFT" in result
         assert "BRK-B" in result     # normalised from BRK.B
         assert "BRK.B" not in result  # original dot form must not appear
+
+
+class TestWikipediaFetchUserAgent:
+    """SCAN-01 regression (UAT Test 1): the live fetch must send a User-Agent.
+
+    Wikipedia returns HTTP 403 to header-less requests, so fetch_sp500_symbols
+    must GET the page itself with a User-Agent and hand the HTML to pd.read_html.
+    These tests stub only the network read (urllib.request.urlopen) and exercise
+    the real parsing path — they FAIL against the old pd.read_html(url) code,
+    which never calls urlopen at all.
+    """
+
+    def _mock_response(self, html: str) -> MagicMock:
+        resp = MagicMock()
+        resp.read.return_value = html.encode("utf-8")
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return resp
+
+    def test_fetch_sends_user_agent_header(self, tmp_path):
+        """urllib.request.urlopen is called with a Request carrying a non-empty
+        User-Agent, and the fetched HTML is parsed into the symbol list."""
+        html = _make_constituents_df().to_html(index=False)
+        captured = {}
+
+        def fake_urlopen(request, *args, **kwargs):
+            captured["ua"] = request.get_header("User-agent")
+            return self._mock_response(html)
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            from bot.scanner.universe import fetch_sp500_symbols
+            result = fetch_sp500_symbols(cache_dir=str(tmp_path))
+
+        assert captured.get("ua"), "fetch must send a non-empty User-Agent header (Wikipedia 403s without one)"
+        assert "AAPL" in result and "BRK-B" in result
+
+    def test_no_direct_read_html_on_url(self, tmp_path):
+        """pd.read_html must never be handed the raw URL string (the 403 path).
+
+        If urlopen is stubbed but the code still calls pd.read_html(_WIKI_URL)
+        directly, the scrape would bypass the User-Agent fetch — assert the URL
+        is never passed to pd.read_html."""
+        html = _make_constituents_df().to_html(index=False)
+        real_read_html = pd.read_html
+        seen_args = []
+
+        def tracking_read_html(arg, *a, **k):
+            seen_args.append(arg)
+            return real_read_html(arg, *a, **k)
+
+        with patch("urllib.request.urlopen", side_effect=lambda req, *a, **k: self._mock_response(html)), \
+             patch("pandas.read_html", side_effect=tracking_read_html):
+            from bot.scanner.universe import fetch_sp500_symbols, _WIKI_URL
+            fetch_sp500_symbols(cache_dir=str(tmp_path))
+
+        assert _WIKI_URL not in seen_args, "pd.read_html must receive parsed HTML, not the raw URL (causes 403)"
 
 
 class TestTickerNormalization:
