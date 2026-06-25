@@ -459,11 +459,6 @@ class ExecutionEngine:
         can observe the intent was not filled (Phase-3 D-09/D-12).
         """
         try:
-            self._store.conn.execute(
-                "UPDATE pending_intents SET status='EXPIRED', resolved_at=? "
-                "WHERE intent_id=?",
-                (now_et().isoformat(), intent_id),
-            )
-            self._store.conn.commit()
+            self._store.expire_pending_intent(intent_id, now_et().isoformat())
         except Exception:
             _logger.warning("intent_expire_failed", intent_id=intent_id, exc_info=True)

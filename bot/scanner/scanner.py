@@ -8,11 +8,10 @@ baseline computation → top-20 gap-ranked cap → idempotent upsert persist.
 All filter thresholds are config-driven (cfg.d3_min_gap_pct, cfg.min_price_usd,
 cfg.rvol_lookback_days). No strategy literals are hardcoded here.
 
-Exports: run_daily_scan, run_intraday_rescan, _persist_watchlist, _evaluate_symbol
+Exports: run_daily_scan, run_intraday_rescan, _evaluate_symbol
 """
 import asyncio
 import concurrent.futures
-import sqlite3
 from datetime import date
 from typing import List, Optional, Set
 
@@ -169,73 +168,6 @@ def _evaluate_symbol(
         "sma200": sma200_val,
         "rvol_baseline": rvol_baseline_val,
     }
-
-
-# ============================================================
-# Persistence (Task 3 — idempotent upsert, SCAN-05)
-# ============================================================
-
-def _persist_watchlist(
-    conn: sqlite3.Connection,
-    scan_date: date,
-    candidates: list,
-    scan_pass: str,
-) -> None:
-    """Persist a ranked candidate list to daily_scan via an idempotent upsert.
-
-    Uses INSERT ... ON CONFLICT(scan_date, code) DO UPDATE so re-running the
-    same scan day does not duplicate rows (SCAN-05 / D-05). created_at is
-    intentionally excluded from the UPDATE clause — first-seen timestamp is
-    preserved across re-scans.
-
-    All values are bound via ? placeholders (T-02-06 — no SQL injection surface).
-
-    conn:       Open sqlite3.Connection with migrations applied.
-    scan_date:  The scan date (date object).
-    candidates: List of candidate dicts (code, gap_pct, rank, prior_day_high,
-                prior_close, sma200, rvol_baseline); rank assigned by caller.
-    scan_pass:  Label for the originating scan pass (e.g. "premarket").
-    """
-    created_at = now_et().isoformat()
-    scan_date_str = scan_date.isoformat()
-
-    for c in candidates:
-        conn.execute(
-            """
-            INSERT INTO daily_scan
-                (scan_date, code, gap_pct, rank, created_at,
-                 prior_day_high, prior_close, sma200, rvol_baseline, scan_pass)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(scan_date, code) DO UPDATE SET
-                gap_pct        = excluded.gap_pct,
-                rank           = excluded.rank,
-                prior_day_high = excluded.prior_day_high,
-                prior_close    = excluded.prior_close,
-                sma200         = excluded.sma200,
-                rvol_baseline  = excluded.rvol_baseline,
-                scan_pass      = excluded.scan_pass
-            """,
-            (
-                scan_date_str,
-                c["code"],
-                c["gap_pct"],
-                c["rank"],
-                created_at,
-                c.get("prior_day_high"),
-                c.get("prior_close"),
-                c.get("sma200"),
-                c.get("rvol_baseline"),
-                scan_pass,
-            ),
-        )
-
-    conn.commit()
-    _logger.info(
-        "watchlist_persisted",
-        count=len(candidates),
-        scan_date=scan_date_str,
-        scan_pass=scan_pass,
-    )
 
 
 # ============================================================
@@ -402,7 +334,7 @@ def run_daily_scan(
     for rank_idx, candidate in enumerate(top20, start=1):
         candidate["rank"] = rank_idx
 
-    _persist_watchlist(store.conn, scan_date, top20, scan_pass)
+    store.persist_watchlist(scan_date, top20, scan_pass)
 
     # Step 6: return moomoo codes
     result = [c["code"] for c in top20]
@@ -501,7 +433,7 @@ def run_intraday_rescan(
         candidate["rank"] = rank_idx
 
     # Step 7: upsert (idempotent — never DELETE, D-05)
-    _persist_watchlist(store.conn, scan_date, protected, scan_pass)
+    store.persist_watchlist(scan_date, protected, scan_pass)
 
     result = [c["code"] for c in protected]
 

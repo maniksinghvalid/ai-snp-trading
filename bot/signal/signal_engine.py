@@ -257,6 +257,7 @@ class SignalEngine:
 
         Returns 0 if no row exists (session not yet started or first trade of day).
         Phase 3 NEVER writes this table — only Phase 4 increments it at fill (RESEARCH Pitfall 5).
+        Delegates to store.get_filled_count() which acquires the lock internally (CR-01).
 
         Args:
             session_date_str: ISO date string (e.g. "2026-06-24").
@@ -264,11 +265,7 @@ class SignalEngine:
         Returns:
             int: The current filled_count, or 0 if no row exists.
         """
-        row = self._store.conn.execute(
-            "SELECT filled_count FROM daily_trade_count WHERE session_date = ?",
-            (session_date_str,),
-        ).fetchone()
-        return int(row[0]) if row is not None else 0
+        return self._store.get_filled_count(session_date_str)
 
     def has_pending_intent(self, code: str) -> bool:
         """Return True if there is a live PENDING intent for the given code (D-10).
@@ -276,6 +273,7 @@ class SignalEngine:
         Checks the pending_intents table for any row with status='PENDING' for
         the given code. Used by the D-10 re-entry gate to block re-signalling on
         a code that already has an unresolved intent (even when broker-flat).
+        Delegates to store.has_pending_intent() which acquires the lock internally (CR-01).
 
         Args:
             code: Moomoo-format stock code (e.g. "US.AAPL").
@@ -283,11 +281,7 @@ class SignalEngine:
         Returns:
             bool: True if a PENDING row exists for this code.
         """
-        row = self._store.conn.execute(
-            "SELECT 1 FROM pending_intents WHERE code = ? AND status = 'PENDING' LIMIT 1",
-            (code,),
-        ).fetchone()
-        return row is not None
+        return self._store.has_pending_intent(code)
 
     # ============================================================
     # Main Signal Evaluation (on_bar)
@@ -343,12 +337,7 @@ class SignalEngine:
         # Do NOT use UTC dates for *_date keys (migration 0001's "UTC" note applies to
         # *_time / *_at timestamp fields, not to session-scoped date keys).
         session_date_str = now_et().date().isoformat()
-        rvol_baseline_row = self._store.conn.execute(
-            "SELECT rvol_baseline FROM daily_scan WHERE scan_date = ? AND code = ?",
-            (session_date_str, code),
-        ).fetchone()
-
-        rvol_baseline = float(rvol_baseline_row[0]) if rvol_baseline_row else 0.0
+        rvol_baseline = self._store.get_rvol_baseline(session_date_str, code)
 
         if rvol_baseline <= 0.0:
             _logger.info(

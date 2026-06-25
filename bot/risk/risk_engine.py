@@ -157,21 +157,15 @@ class RiskEngine:
             intent_id=str(uuid.uuid4()),
         )
 
-        # D-12: persist to pending_intents (parameterized SQL — no f-string injection)
-        self._store.conn.execute(
-            "INSERT INTO pending_intents "
-            "(intent_id, code, status, entry_price, stop_price, quantity, emitted_at) "
-            "VALUES (?, ?, 'PENDING', ?, ?, ?, ?)",
-            (
-                intent.intent_id,
-                intent.code,
-                intent.entry_price,
-                intent.stop_price,
-                intent.quantity,
-                intent.emitted_at.isoformat(),
-            ),
+        # D-12: persist to pending_intents via guarded store method (CR-01)
+        self._store.insert_pending_intent(
+            intent.intent_id,
+            intent.code,
+            intent.entry_price,
+            intent.stop_price,
+            intent.quantity,
+            intent.emitted_at.isoformat(),
         )
-        self._store.conn.commit()
 
         # D-12 / RISK-03 #5: structured audit log with stop_price and quantity
         _logger.info(

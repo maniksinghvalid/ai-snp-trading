@@ -837,11 +837,7 @@ class MoomooGateway:
                 _logger.warning("reconcile_externally_closed", code=code)
                 pos = manager._positions.get(code)
                 if pos is not None:
-                    store.conn.execute(
-                        "UPDATE positions SET phase='CLOSED', updated_at=? WHERE position_id=?",
-                        (now_ts, pos.position_id),
-                    )
-                    store.conn.commit()
+                    store.mark_position_closed(pos.position_id, now_ts)
                     pos.phase = PositionPhase.CLOSED
                     del manager._positions[code]
                     append_audit({"event": "drift_closed_by_broker", "code": code})
@@ -875,12 +871,9 @@ class MoomooGateway:
                     # Sync remaining_quantity to broker truth
                     pos.remaining_quantity = broker_qty
                     # Update DB row (remaining_quantity + phase)
-                    store.conn.execute(
-                        "UPDATE positions SET remaining_quantity=?, phase=?, updated_at=? "
-                        "WHERE position_id=?",
-                        (broker_qty, pos.phase.value, now_ts, pos.position_id),
+                    store.update_position_qty_phase(
+                        pos.position_id, broker_qty, pos.phase.value, now_ts
                     )
-                    store.conn.commit()
                     append_audit({
                         "event": "reconcile_qty_drift",
                         "code": code,
@@ -914,18 +907,11 @@ class MoomooGateway:
             # (DB-first write via _persist_position) — the gateway INSERT becomes
             # the idempotent guard. When rowcount==0, the position already exists
             # in the DB (prior adoption); log noop and skip.
-            cursor = store.conn.execute(
-                """INSERT OR IGNORE INTO positions
-                   (position_id, code, phase, entry_price, initial_stop, trail_stop,
-                    full_quantity, remaining_quantity, entry_order_id,
-                    avg_fill_price, opened_at, updated_at)
-                   VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '', ?, ?, ?)""",
-                (position_id, code, bp["avg_cost"], stop, stop,
-                 bp["qty"], bp["qty"], bp["avg_cost"], now_ts, now_ts),
+            rowcount = store.insert_orphan_position(
+                position_id, code, bp["avg_cost"], stop, bp["qty"], now_ts
             )
-            store.conn.commit()
 
-            if cursor.rowcount == 0:
+            if rowcount == 0:
                 # INSERT OR IGNORE no-op — row already exists; do NOT audit or adopt (WR-04)
                 _logger.warning(
                     "reconcile_orphan_insert_noop",
@@ -1011,8 +997,8 @@ class MoomooGateway:
                 }
 
         # ---- Step 2: Read StateStore open positions ----
-        # Use store.get_open_positions() which sets row_factory=sqlite3.Row and returns
-        # a list of plain dicts — do NOT use store.conn.execute directly (tuples, not dicts).
+        # Use store.get_open_positions() — a guarded method that sets row_factory inside
+        # the lock and returns a list of plain dicts (CR-01 / T-06.1-09-01).
         state_rows = store.get_open_positions()
         state_codes = {r["code"]: r for r in state_rows}
 
@@ -1027,10 +1013,7 @@ class MoomooGateway:
                     code=code,
                     position_id=pos_row["position_id"],
                 )
-                store.conn.execute(
-                    "UPDATE positions SET phase='CLOSED', updated_at=? WHERE position_id=?",
-                    (now_ts, pos_row["position_id"]),
-                )
+                store.mark_position_closed(pos_row["position_id"], now_ts)
                 append_audit({
                     "event": "reconcile_closed_by_broker",
                     "code": code,
@@ -1047,11 +1030,7 @@ class MoomooGateway:
                         stored_qty=stored_qty,
                         broker_qty=broker_qty,
                     )
-                    store.conn.execute(
-                        "UPDATE positions SET remaining_quantity=?, updated_at=? "
-                        "WHERE position_id=?",
-                        (broker_qty, now_ts, pos_row["position_id"]),
-                    )
+                    store.update_position_qty(pos_row["position_id"], broker_qty, now_ts)
                     append_audit({
                         "event": "reconcile_qty_adopted",
                         "code": code,
@@ -1081,24 +1060,10 @@ class MoomooGateway:
             # Insert ACTIVE PositionState at broker avg cost with derived stop
             import uuid
             position_id = str(uuid.uuid4())
-            store.conn.execute(
-                """INSERT OR IGNORE INTO positions
-                   (position_id, code, phase, entry_price, initial_stop, trail_stop,
-                    full_quantity, remaining_quantity, entry_order_id,
-                    avg_fill_price, opened_at, updated_at)
-                   VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '', ?, ?, ?)""",
-                (
-                    position_id, code,
-                    bp["avg_cost"],   # entry_price = broker avg cost
-                    stop,             # initial_stop = compute_initial_stop(lod)
-                    stop,             # trail_stop = same as initial (conservative)
-                    bp["qty"],        # full_quantity
-                    bp["qty"],        # remaining_quantity
-                    bp["avg_cost"],   # avg_fill_price
-                    now_ts,           # opened_at
-                    now_ts,           # updated_at
-                ),
+            store.insert_orphan_position(
+                position_id, code, bp["avg_cost"], stop, bp["qty"], now_ts
             )
+            # Return value (rowcount) unused here — startup_reconcile does not gate on it
             append_audit({
                 "event": "orphan_adopted",
                 "code": code,
@@ -1118,19 +1083,13 @@ class MoomooGateway:
                         "orphan_subscribe_failed", code=code, exc_info=True
                     )
 
-        # ---- Step 5: Commit all reconciliation changes ----
-        store.conn.commit()
+        # ---- Step 5: Each guarded store method above already committed; no batch commit needed ----
 
         # ---- Step 6: Reconcile pending_intents to catch crash-between-place-and-persist ----
         # Any PENDING intent whose code already has an open broker position was likely
         # placed before the crash — do not re-enter; leave the intent as PENDING
         # so the duplicate guard in consume_intent will block it on next run (Pitfall F).
-        import sqlite3
-        store.conn.row_factory = sqlite3.Row
-        pending_rows = store.conn.execute(
-            "SELECT intent_id, code FROM pending_intents WHERE status='PENDING'"
-        ).fetchall()
-        store.conn.row_factory = None
+        pending_rows = store.get_pending_intent_codes("PENDING")
         for intent_row in pending_rows:
             code = intent_row["code"]
             if code in broker_map:

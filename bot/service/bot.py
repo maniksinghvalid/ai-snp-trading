@@ -446,17 +446,15 @@ class TradingBot:
             loop = asyncio.get_running_loop()
 
             def _premarket_scan_worker():
-                # Acquire the store lock on the WORKER thread (where conn is used).
-                # This serializes the scanner's conn.execute calls against loop-thread
-                # manager/engine writes (T-06.1-08-02).
-                with self._store.lock():
-                    self._scanner.run_daily_scan(
-                        self._store,
-                        self._gateway,
-                        self._cfg,
-                        scan_date=today,
-                        scan_pass="premarket",
-                    )
+                # Lock is now inside each StateStore method (CR-01 / T-06.1-09-01).
+                # Serialization is intrinsic — no outer with store.lock() needed.
+                self._scanner.run_daily_scan(
+                    self._store,
+                    self._gateway,
+                    self._cfg,
+                    scan_date=today,
+                    scan_pass="premarket",
+                )
 
             await loop.run_in_executor(None, _premarket_scan_worker)
             _logger.info("premarket_scan_done", date=str(today))
@@ -488,9 +486,8 @@ class TradingBot:
             loop = asyncio.get_running_loop()
 
             def _get_watchlist_worker():
-                # Acquire the store lock on the WORKER thread (where conn is used).
-                with self._store.lock():
-                    return self._store.get_watchlist_codes(today) if hasattr(self._store, "get_watchlist_codes") else []
+                # Lock is now inside store.get_watchlist_codes (CR-01 / T-06.1-09-01).
+                return self._store.get_watchlist_codes(today)
 
             codes = await loop.run_in_executor(None, _get_watchlist_worker)
             if codes:
@@ -533,17 +530,16 @@ class TradingBot:
             loop = asyncio.get_running_loop()
 
             def _intraday_rescan_worker():
-                # Acquire the store lock on the WORKER thread (where conn is used).
-                # This is the originally-reported crash site (T-06.1-08-01).
-                with self._store.lock():
-                    self._scanner.run_intraday_rescan(
-                        self._store,
-                        self._gateway,
-                        self._cfg,
-                        active_codes=set(),
-                        scan_date=today,
-                        scan_pass="intraday",
-                    )
+                # Lock is now inside each StateStore method (CR-01 / T-06.1-09-01).
+                # Serialization is intrinsic — no outer with store.lock() needed.
+                self._scanner.run_intraday_rescan(
+                    self._store,
+                    self._gateway,
+                    self._cfg,
+                    active_codes=set(),
+                    scan_date=today,
+                    scan_pass="intraday",
+                )
 
             await loop.run_in_executor(None, _intraday_rescan_worker)
             _logger.info("intraday_rescan_done", date=str(today))
@@ -599,13 +595,11 @@ class TradingBot:
             def _fetch_build_write():
                 """Run in executor: fetch store data + build HTML + write reports (T-05-04-04).
 
-                Acquires the store lock on the WORKER thread for the store reads so that
-                the row_factory flip + fetch + reset sequence is atomic against concurrent
-                loop-thread manager/engine writes (T-06.1-08-02).
+                Lock is inside each guarded store method (CR-01 / T-06.1-09-01) so
+                the row_factory flip + fetch + reset is always serialized.
                 """
-                with self._store.lock():
-                    trades_rows = self._store.get_closed_trades(today)
-                    positions_rows = self._store.get_open_positions()
+                trades_rows = self._store.get_closed_trades(today)
+                positions_rows = self._store.get_open_positions()
                 html_content = _build_daily_html(trades_rows, positions_rows, today)
                 _write_reports(html_content, today)
                 return trades_rows, positions_rows

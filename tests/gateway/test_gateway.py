@@ -462,8 +462,8 @@ class TestReconciliation:
         assert mock_pos.remaining_quantity == 180, (
             f"remaining_quantity must be synced to 180 (broker), got {mock_pos.remaining_quantity}"
         )
-        # DB update must have been issued
-        mock_store.conn.execute.assert_called()
+        # DB update must have been issued via guarded method (CR-01 / 06.1-09)
+        mock_store.update_position_qty_phase.assert_called()
 
     def test_reconcile_once_orphan_registers_in_memory(self):
         """CR-03: orphan broker position is registered in manager._positions via adopt_orphan.
@@ -501,10 +501,9 @@ class TestReconciliation:
         mock_manager.adopt_orphan = MagicMock(side_effect=_fake_adopt)
 
         mock_store = MagicMock()
-        cursor_mock = MagicMock()
-        cursor_mock.rowcount = 1  # simulate successful INSERT
-        mock_store.conn = MagicMock()
-        mock_store.conn.execute = MagicMock(return_value=cursor_mock)
+        # Simulate successful INSERT: insert_orphan_position returns rowcount=1
+        # (CR-01 / 06.1-09: guarded store method replaces raw conn.execute)
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
 
         mock_alerter = MagicMock()
         mock_alerter.send = AsyncMock()
@@ -586,10 +585,9 @@ class TestReconciliation:
         mock_manager._exiting = set()
 
         mock_store = MagicMock()
-        cursor_mock = MagicMock()
-        cursor_mock.rowcount = 0  # INSERT OR IGNORE no-op (collision)
-        mock_store.conn = MagicMock()
-        mock_store.conn.execute = MagicMock(return_value=cursor_mock)
+        # Simulate INSERT OR IGNORE no-op: insert_orphan_position returns rowcount=0
+        # (CR-01 / 06.1-09: guarded store method replaces raw conn.execute)
+        mock_store.insert_orphan_position = MagicMock(return_value=0)
 
         mock_alerter = MagicMock()
         mock_alerter.send = AsyncMock()
@@ -1052,7 +1050,7 @@ async def test_reconcile_once_externally_closed():
 
     When broker returns empty positions while manager._positions has one ACTIVE code
     not in manager._exiting, reconcile_once must:
-      - mark position CLOSED via store.conn.execute (DB update)
+      - mark position CLOSED via store.mark_position_closed() guarded method
       - remove code from manager._positions
       - fire alerter.send (Telegram alert)
       - return the code in result["closed"]
@@ -1087,5 +1085,5 @@ async def test_reconcile_once_externally_closed():
     assert "US.AAPL" in result["closed"], (
         f"US.AAPL must be in result['closed'], got: {result}"
     )
-    mock_store.conn.execute.assert_called()  # DB update issued
+    mock_store.mark_position_closed.assert_called()  # DB update via guarded method (CR-01 / 06.1-09)
 

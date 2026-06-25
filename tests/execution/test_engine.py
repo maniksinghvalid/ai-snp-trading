@@ -265,12 +265,8 @@ def test_ttl_cancel_replace():
     assert result is None, "Scenario 2: expected None (abandoned) after max_retries"
     assert gw2.cancel_order.await_count > 0, "All attempts must be cancelled on abandon"
 
-    # D-05: store must have been told about the EXPIRED status
-    call_args_list = store2.conn.execute.call_args_list
-    expired_calls = [c for c in call_args_list if "EXPIRED" in str(c)]
-    assert len(expired_calls) >= 1, (
-        "D-05: pending_intent must be resolved to EXPIRED on abandon"
-    )
+    # D-05: store must have been told about the EXPIRED status via guarded method (CR-01 / 06.1-09)
+    store2.expire_pending_intent.assert_called()
 
     # ----------------------------------------------------------------
     # Scenario 3: config-swap proves entry_max_retries controls retry count (CFG-01)

@@ -962,15 +962,7 @@ class PositionManager:
             )
             session_date = fill_et.date().isoformat()
             now_ts = now_et().isoformat()
-            self._store.conn.execute(
-                """INSERT INTO daily_trade_count (session_date, filled_count, updated_at)
-                   VALUES (?, 1, ?)
-                   ON CONFLICT(session_date) DO UPDATE SET
-                     filled_count = filled_count + 1,
-                     updated_at = excluded.updated_at""",
-                (session_date, now_ts),
-            )
-            self._store.conn.commit()
+            self._store.increment_daily_filled_count(session_date, now_ts)
             _logger.info(
                 "daily_filled_count_incremented", session_date=session_date
             )
@@ -995,12 +987,7 @@ class PositionManager:
                 if fill_time
                 else now_et().isoformat()
             )
-            self._store.conn.execute(
-                "UPDATE pending_intents SET status='RESOLVED', resolved_at=? "
-                "WHERE intent_id=? AND status='PENDING'",
-                (ts, intent_id),
-            )
-            self._store.conn.commit()
+            self._store.resolve_pending_intent(intent_id, ts)
             _logger.info(
                 "pending_intent_resolved", intent_id=intent_id
             )

@@ -639,9 +639,11 @@ class TestIdempotency:
         )
 
     def test_upsert_updates_rank(self, tmp_state_db):
-        """Re-persisting the same code with a different rank/gap updates the existing row."""
-        from bot.scanner.scanner import _persist_watchlist
+        """Re-persisting the same code with a different rank/gap updates the existing row.
 
+        Updated to use store.persist_watchlist() — _persist_watchlist was moved into
+        StateStore.persist_watchlist() in plan 06.1-09 (CR-01 encapsulation).
+        """
         store = StateStore()
         store.open()
 
@@ -658,22 +660,24 @@ class TestIdempotency:
             }
         ]
 
-        _persist_watchlist(store.conn, scan_date, candidates, "premarket")
+        store.persist_watchlist(scan_date, candidates, "premarket")
 
         # Re-persist with updated gap and rank
         candidates[0]["gap_pct"] = 5.5
         candidates[0]["rank"] = 2
 
-        _persist_watchlist(store.conn, scan_date, candidates, "intraday_1")
+        store.persist_watchlist(scan_date, candidates, "intraday_1")
 
-        row = store.conn.execute(
-            "SELECT gap_pct, rank, scan_pass FROM daily_scan WHERE scan_date=? AND code=?",
-            (scan_date.isoformat(), "US.AAPL"),
-        ).fetchone()
-        count = store.conn.execute(
-            "SELECT COUNT(*) FROM daily_scan WHERE scan_date=? AND code=?",
-            (scan_date.isoformat(), "US.AAPL"),
-        ).fetchone()[0]
+        # Use guarded store method to read back (conn property is deprecated for external use)
+        with store._lock:
+            row = store._conn.execute(
+                "SELECT gap_pct, rank, scan_pass FROM daily_scan WHERE scan_date=? AND code=?",
+                (scan_date.isoformat(), "US.AAPL"),
+            ).fetchone()
+            count = store._conn.execute(
+                "SELECT COUNT(*) FROM daily_scan WHERE scan_date=? AND code=?",
+                (scan_date.isoformat(), "US.AAPL"),
+            ).fetchone()[0]
         store.close()
 
         assert count == 1, "Re-upsert must not create a duplicate row"
