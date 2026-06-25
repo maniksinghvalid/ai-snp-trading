@@ -53,7 +53,6 @@ def _make_watchdog_with_mocks():
 # SVC-02: Watchdog behavior
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-02 (OpenDWatchdog not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_disconnect_disables_entries():
     """Watchdog must set bot._entries_enabled = False on OpenD disconnect (SVC-02)."""
@@ -73,7 +72,6 @@ async def test_disconnect_disables_entries():
     )
 
 
-@pytest.mark.xfail(reason="implemented in 05-02 (OpenDWatchdog not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_reconnect_reenables_entries():
     """On reconnect, watchdog must call startup_reconcile then re-enable entries (SVC-02)."""
