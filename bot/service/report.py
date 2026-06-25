@@ -174,8 +174,12 @@ def _compute_histogram(r_multiples: list) -> dict:
                 placed = True
                 break
         if not placed:
-            # v >= 3 → last bucket "3+"
-            counts["3+"] += 1
+            if v < _BINS[0]:
+                # v < -3 → underflow into the first ("-3") bucket
+                counts[_LABELS[0]] += 1
+            else:
+                # v >= 3 → overflow into the last ("3", displayed "3+") bucket
+                counts[_LABELS[-1]] += 1
     return counts
 
 

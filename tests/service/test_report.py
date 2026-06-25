@@ -76,3 +76,21 @@ def test_r_histogram_buckets(tmp_path):
     # At least one negative bucket (loss)
     negative_buckets = {k: v for k, v in buckets.items() if float(k) < 0}
     assert len(negative_buckets) > 0, "Histogram must have at least one negative R bucket"
+
+
+def test_r_histogram_overflow_and_underflow_buckets(tmp_path):
+    """R>=3 and R<-3 must land in the overflow/underflow buckets, not raise (DASH-01).
+
+    Regression: the overflow branch previously wrote counts["3+"] to a dict keyed
+    by "3", raising KeyError and crashing EOD report generation on any session
+    with an R>=3 trade. R<-3 also fell through and was miscounted as a big win.
+    """
+    builder = _make_report_builder_with_mocks(tmp_path)
+
+    # R=3.5 (overflow → "3"), R=-5.0 (underflow → "-3"), R=0.5 (normal "0")
+    buckets = builder._build_r_histogram([3.5, -5.0, 0.5])
+
+    assert sum(buckets.values()) == 3, "All 3 trades must be bucketed without loss"
+    assert buckets["3"] == 1, "R=3.5 must land in the overflow ('3'/'3+') bucket"
+    assert buckets["-3"] == 1, "R=-5.0 must land in the underflow ('-3') bucket"
+    assert buckets["0"] == 1, "R=0.5 must land in the '0' bucket"
