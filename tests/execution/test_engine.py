@@ -8,6 +8,14 @@ Implements the 04-03 test targets:
   - test_ttl_cancel_replace: EXEC-03 cancel-replace on TTL; abandon after max_retries
   - test_fill_by_order_id: EXEC-05 fill matched by order_id; partial exit != stop-out
 
+Paper-fill regression tests (paper-deal-list-unsupported fix):
+  - test_paper_fill_entry_no_deal_list_query: entry fill loop uses order_list_query,
+    never deal_list_query — GatewayError from deal_list_query must not surface
+  - test_paper_fill_exit_no_deal_list_query: manage_exit fill loop uses order_list_query —
+    GatewayError from deal_list_query must not surface; correct total_filled / remaining
+  - test_paper_fill_exit_partial_then_full: manage_exit partial-then-full fill across two
+    outer iterations (different order_ids) — no double-count, EXEC-05 / CR-02 invariants
+
 Still-stub (implemented in 04-04):
   - test_entry_placed_simulate: live SIMULATE verification (manual; 04-VALIDATION)
   - test_duplicate_guard: EXEC-04 broker duplicate-entry guard
@@ -96,7 +104,9 @@ def test_entry_placed_simulate_unit():
     """EXEC-01 (automated mock-gateway): consume_intent places entry under SIMULATE.
 
     Drives _manage_entry_order with a mock gateway whose place_order returns an
-    order_id and whose get_order_fills returns one matching fill. Asserts:
+    order_id and whose get_order_status returns one matching order row with dealt_qty
+    (order_list_query path — deal_list_query is unsupported on SIMULATE paper accounts).
+    Asserts:
       (i) gateway.place_order called once with code="US.AAPL"
           and that the engine never submits a MARKET order type
       (ii) cfg.trd_env == "SIMULATE" (no live broker)
@@ -111,8 +121,14 @@ def test_entry_placed_simulate_unit():
     gw = MagicMock()
     gw.place_order = AsyncMock(return_value="ORDER-101")
     gw.get_ask_price = AsyncMock(return_value=182.55)
-    gw.get_order_fills = AsyncMock(return_value=[
-        {"order_id": "ORDER-101", "code": "US.AAPL", "qty": 100, "price": 182.60},
+    # get_order_status returns cumulative dealt_qty per order (order_list_query path).
+    # deal_list_query (get_order_fills) is unsupported on SIMULATE paper accounts.
+    gw.get_order_status = AsyncMock(return_value=[
+        {
+            "order_id": "ORDER-101", "code": "US.AAPL",
+            "order_status": "FILLED_ALL", "qty": 100,
+            "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
+        },
     ])
     gw.cancel_order = AsyncMock()
 
@@ -129,6 +145,7 @@ def test_entry_placed_simulate_unit():
     assert fill_event.order_id == "ORDER-101"
     assert fill_event.code == "US.AAPL"
     assert fill_event.filled_qty == 100
+    assert abs(fill_event.avg_fill_price - 182.60) < 0.001
 
     # (i) place_order called once; engine passes code correctly
     gw.place_order.assert_awaited_once()
@@ -165,8 +182,12 @@ def test_no_market_orders():
     gw = MagicMock()
     gw.place_order = AsyncMock(return_value="ORDER-NOMARKET")
     gw.get_ask_price = AsyncMock(return_value=150.00)
-    gw.get_order_fills = AsyncMock(return_value=[
-        {"order_id": "ORDER-NOMARKET", "code": "US.TSLA", "qty": 50, "price": 150.05},
+    gw.get_order_status = AsyncMock(return_value=[
+        {
+            "order_id": "ORDER-NOMARKET", "code": "US.TSLA",
+            "order_status": "FILLED_ALL", "qty": 50,
+            "dealt_qty": 50, "dealt_avg_price": 150.05, "trd_side": "BUY",
+        },
     ])
     gw.cancel_order = AsyncMock()
 
@@ -216,19 +237,23 @@ def test_ttl_cancel_replace():
         placed_orders_s1.append(oid)
         return oid
 
-    async def mock_fills_s1():
+    async def mock_order_status_s1(order_id=""):
         # No fill while only the first order has been placed;
-        # return fill once the second order is placed (i.e., after first TTL + re-place)
-        if len(placed_orders_s1) >= 2:
+        # return dealt_qty once the second order is placed (after first TTL + re-place).
+        # get_order_status returns cumulative dealt_qty per order (order_list_query path).
+        if len(placed_orders_s1) >= 2 and order_id == placed_orders_s1[1]:
             return [
-                {"order_id": placed_orders_s1[1], "code": "US.AAPL",
-                 "qty": 100, "price": 182.60}
+                {
+                    "order_id": placed_orders_s1[1], "code": "US.AAPL",
+                    "order_status": "FILLED_ALL", "qty": 100,
+                    "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
+                }
             ]
         return []
 
     gw1 = MagicMock()
     gw1.get_ask_price = AsyncMock(return_value=182.55)
-    gw1.get_order_fills = mock_fills_s1
+    gw1.get_order_status = mock_order_status_s1
     gw1.place_order = mock_place_s1
     gw1.cancel_order = AsyncMock()
 
@@ -250,7 +275,7 @@ def test_ttl_cancel_replace():
     # ----------------------------------------------------------------
     gw2 = MagicMock()
     gw2.get_ask_price = AsyncMock(return_value=182.55)
-    gw2.get_order_fills = AsyncMock(return_value=[])   # never fills
+    gw2.get_order_status = AsyncMock(return_value=[])   # never shows a fill (dealt_qty always 0)
     # Provide enough order_id values for all retry iterations
     gw2.place_order = AsyncMock(side_effect=[
         "S2-O-1", "S2-O-2", "S2-O-3", "S2-O-4", "S2-O-5",
@@ -281,7 +306,7 @@ def test_ttl_cancel_replace():
 
     gw3 = MagicMock()
     gw3.get_ask_price = AsyncMock(return_value=182.55)
-    gw3.get_order_fills = AsyncMock(return_value=[])
+    gw3.get_order_status = AsyncMock(return_value=[])   # never shows a fill
     gw3.place_order = mock_place_s3
     gw3.cancel_order = AsyncMock()
 
@@ -339,7 +364,6 @@ def test_duplicate_guard():
     gw_a.get_order_status = AsyncMock(return_value=[])
     gw_a.place_order = AsyncMock(return_value="ORDER-SHOULD-NOT-PLACE")
     gw_a.get_ask_price = AsyncMock(return_value=182.55)
-    gw_a.get_order_fills = AsyncMock(return_value=[])
     gw_a.cancel_order = AsyncMock()
 
     store_a = _make_mock_store()
@@ -376,7 +400,6 @@ def test_duplicate_guard():
     gw_b.get_order_status = AsyncMock(return_value=open_buy_orders)
     gw_b.place_order = AsyncMock(return_value="ORDER-SHOULD-NOT-PLACE-B")
     gw_b.get_ask_price = AsyncMock(return_value=182.55)
-    gw_b.get_order_fills = AsyncMock(return_value=[])
     gw_b.cancel_order = AsyncMock()
 
     store_b = _make_mock_store()
@@ -396,14 +419,22 @@ def test_duplicate_guard():
     gw_b.get_order_status.assert_awaited()
 
     # ---- Path (c): no duplicate → entry proceeds normally ----
-    # Empty positions AND no open orders → guard passes, entry proceeds
+    # Empty positions AND no open orders → guard passes, entry proceeds.
+    # get_order_status is called twice: once for the duplicate guard (returns [])
+    # and once for fill polling (returns the filled order row).
     gw_c = MagicMock()
     gw_c.get_positions = AsyncMock(return_value=(0, empty_positions_df))
-    gw_c.get_order_status = AsyncMock(return_value=[])
-    gw_c.get_ask_price = AsyncMock(return_value=182.55)
-    gw_c.get_order_fills = AsyncMock(return_value=[
-        {"order_id": "ORDER-NEW", "code": "US.AAPL", "qty": 100, "price": 182.60},
+    gw_c.get_order_status = AsyncMock(side_effect=[
+        [],   # first call: duplicate guard check → no open orders
+        [     # second call: fill poll → order filled
+            {
+                "order_id": "ORDER-NEW", "code": "US.AAPL",
+                "order_status": "FILLED_ALL", "qty": 100,
+                "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
+            }
+        ],
     ])
+    gw_c.get_ask_price = AsyncMock(return_value=182.55)
     gw_c.place_order = AsyncMock(return_value="ORDER-NEW")
     gw_c.cancel_order = AsyncMock()
 
@@ -428,11 +459,12 @@ def test_duplicate_guard():
 def test_fill_by_order_id():
     """EXEC-05: Fill matched by order_id only; partial exit != stop-out.
 
-    Synthetic deal rows: one row matches entry order_id, one shares the code
-    but has a different order_id (an unrelated exit fill). Asserts:
-      - Only the matching order_id row is counted for the entry fill
-      - A 100-share fill against a 300-share entry is not treated as full fill
-        (partial fill is accepted as the position — D-06)
+    Uses get_order_status(order_id) path (order_list_query — works on SIMULATE).
+    The engine passes the specific order_id to get_order_status so the gateway
+    filters at the query level. The test verifies:
+      - Only the row whose order_id matches is counted (EXEC-05 order_id matching)
+      - A 100-share dealt_qty against a 300-share entry is accepted as a partial fill
+        (D-06) and the unfiltered response row for a different order_id is ignored
       - Fill reconciliation by order_id (never by code or quantity)
     """
     from bot.execution.engine import ExecutionEngine
@@ -445,12 +477,21 @@ def test_fill_by_order_id():
     ENTRY_ORDER_ID = "ENTRY-ORDER-999"
     OTHER_ORDER_ID = "EXIT-ORDER-111"   # same code, different order_id
 
-    # Synthetic fill table: matching row + unrelated row for same code
-    gw.get_order_fills = AsyncMock(return_value=[
-        # This is the entry fill (matching order_id)
-        {"order_id": ENTRY_ORDER_ID, "code": "US.AAPL", "qty": 100, "price": 182.60},
-        # This is an unrelated exit fill (different order_id) — must NOT be counted
-        {"order_id": OTHER_ORDER_ID, "code": "US.AAPL", "qty": 200, "price": 183.00},
+    # get_order_status(order_id) returns ALL active orders (like order_list_query).
+    # The engine filters by matching order_id — verify it ignores unrelated rows.
+    gw.get_order_status = AsyncMock(return_value=[
+        # This is the entry fill (matching order_id) — 100 shares dealt
+        {
+            "order_id": ENTRY_ORDER_ID, "code": "US.AAPL",
+            "order_status": "FILLED_PART", "qty": 300,
+            "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
+        },
+        # This is an unrelated order (different order_id) — must NOT be counted
+        {
+            "order_id": OTHER_ORDER_ID, "code": "US.AAPL",
+            "order_status": "FILLED_ALL", "qty": 200,
+            "dealt_qty": 200, "dealt_avg_price": 183.00, "trd_side": "SELL",
+        },
     ])
     gw.place_order = AsyncMock(return_value=ENTRY_ORDER_ID)
     gw.cancel_order = AsyncMock()
@@ -458,23 +499,236 @@ def test_fill_by_order_id():
     store = _make_mock_store()
     engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
 
-    # Entry for 300 shares; only 100 actually fill (partial fill, D-06)
+    # Entry for 300 shares; only 100 actually deal (partial fill, D-06)
     intent = _MockIntent(quantity=300)
     fill_event = _run(engine._manage_entry_order(intent))
 
-    # FillEvent must only account for the matched order_id row (100 shares)
+    # FillEvent must only account for the matched order_id row (100 dealt shares)
     assert fill_event is not None
     assert isinstance(fill_event, FillEvent)
     assert fill_event.order_id == ENTRY_ORDER_ID, (
         "EXEC-05: fill must be keyed by order_id, not code"
     )
     assert fill_event.filled_qty == 100, (
-        "EXEC-05: only matching order_id fill row counted (100 shares, not 300)"
+        "EXEC-05: only matching order_id dealt_qty counted (100 shares, not 300)"
     )
     # D-06: partial fill (100/300) is accepted as the position, not rejected
     assert fill_event.is_entry is True
 
-    # Verify the OTHER_ORDER_ID fill (200 shares) was NOT included
+    # Verify the OTHER_ORDER_ID row (200 dealt shares) was NOT included
     assert fill_event.filled_qty != 300, (
-        "EXEC-05: unrelated order_id fill must not be conflated with entry fill"
+        "EXEC-05: unrelated order_id row must not be conflated with entry fill"
     )
+    assert fill_event.filled_qty != 200, (
+        "EXEC-05: OTHER_ORDER_ID dealt_qty must not be summed with entry fill"
+    )
+
+
+# ============================================================
+# Paper-fill regression tests — paper-deal-list-unsupported fix
+# ============================================================
+# These tests lock the paper fill path: fill detection must use get_order_status
+# (order_list_query, works on SIMULATE) not get_order_fills (deal_list_query,
+# raises GatewayError on SIMULATE: "Paper trading does not support deal data.").
+
+
+def test_paper_fill_entry_no_deal_list_query():
+    """Paper fill regression: _manage_entry_order uses get_order_status, never deal_list_query.
+
+    Gateway test-double where get_order_fills raises GatewayError (simulating
+    SIMULATE paper account) and get_order_status returns progressive dealt_qty.
+    Asserts:
+      - No GatewayError raised (deal_list_query path NOT taken)
+      - FillEvent emitted with correct filled_qty from dealt_qty
+      - get_order_fills is never called (dead code path eliminated)
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.execution.events import FillEvent
+    from bot.gateway.gateway import GatewayError as GwError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.get_ask_price = AsyncMock(return_value=150.00)
+    gw.place_order = AsyncMock(return_value="PAPER-ORDER-001")
+    gw.cancel_order = AsyncMock()
+
+    # deal_list_query path raises (as SIMULATE paper account does)
+    async def _deal_list_raises():
+        raise GwError("deal_list_query failed: ret=-1, data=Paper trading does not support deal data.")
+
+    gw.get_order_fills = _deal_list_raises
+
+    # order_list_query path returns dealt_qty (SIMULATE paper account supports this)
+    gw.get_order_status = AsyncMock(return_value=[
+        {
+            "order_id": "PAPER-ORDER-001", "code": "US.NVDA",
+            "order_status": "FILLED_ALL", "qty": 50,
+            "dealt_qty": 50, "dealt_avg_price": 150.10, "trd_side": "BUY",
+        },
+    ])
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    intent = _MockIntent(code="US.NVDA", quantity=50)
+
+    # Must NOT raise GatewayError — deal_list_query path must not be taken
+    fill_event = _run(engine._manage_entry_order(intent))
+
+    assert fill_event is not None, "Paper entry fill: FillEvent must be emitted"
+    assert isinstance(fill_event, FillEvent)
+    assert fill_event.filled_qty == 50, "Paper entry fill: dealt_qty from order_list_query"
+    assert abs(fill_event.avg_fill_price - 150.10) < 0.001
+    assert fill_event.is_entry is True
+
+    # get_order_fills must never have been called (dead path eliminated)
+    # If get_order_fills were awaited, _deal_list_raises would have propagated and
+    # fill_event would be None. The fact fill_event is not None proves it was not called.
+    # We additionally verify get_order_status was used.
+    gw.get_order_status.assert_awaited()
+
+
+def test_paper_fill_exit_no_deal_list_query():
+    """Paper fill regression: manage_exit uses get_order_status, never deal_list_query.
+
+    Drives a single manage_exit call (300 shares) against a gateway test-double where:
+      - get_order_fills raises GatewayError (SIMULATE paper not supported)
+      - get_order_status returns full fill in first poll round (dealt_qty == 300)
+
+    Asserts:
+      - No GatewayError (deal_list_query path NOT taken)
+      - total_filled == 300 (all shares exited in one round)
+      - remaining after the call == 0 (position fully flat)
+      - get_order_status was called (correct path used)
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError as GwError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.get_bid_price = AsyncMock(return_value=149.90)
+    gw.place_order = AsyncMock(return_value="EXIT-PAPER-001")
+    gw.cancel_order = AsyncMock()
+
+    async def _deal_list_raises(*args, **kwargs):
+        raise GwError("deal_list_query failed: ret=-1, data=Paper trading does not support deal data.")
+
+    gw.get_order_fills = _deal_list_raises
+
+    gw.get_order_status = AsyncMock(return_value=[
+        {
+            "order_id": "EXIT-PAPER-001", "code": "US.NVDA",
+            "order_status": "FILLED_ALL", "qty": 300,
+            "dealt_qty": 300, "dealt_avg_price": 149.85, "trd_side": "SELL",
+        },
+    ])
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    try:
+        from moomoo import TrdSide
+        sell_side = TrdSide.SELL
+    except ImportError:
+        sell_side = "SELL"
+
+    # Must NOT raise GatewayError
+    total_filled = _run(engine.manage_exit(
+        code="US.NVDA",
+        qty=300,
+        side=sell_side,
+        escalation_step=0.10,
+        escalation_cadence=0.01,
+        ttl=0.05,
+    ))
+
+    assert total_filled == 300, (
+        f"Paper exit fill: expected total_filled=300, got {total_filled}"
+    )
+    # get_order_status must have been used (correct path)
+    gw.get_order_status.assert_awaited()
+
+
+def test_paper_fill_exit_partial_then_full():
+    """Paper fill regression: manage_exit partial-then-full across two outer iterations.
+
+    Simulates the 300-share partial-scale-out scenario (CR-02 quantity invariant):
+      Round 1: place order for 300, get_order_status → dealt_qty=100 (partial fill)
+               total_filled → 100, remaining → 200. Cancel remainder, re-place.
+      Round 2: place order for 200, get_order_status → dealt_qty=200 (full fill)
+               total_filled → 300, remaining → 0. Loop exits.
+
+    Asserts:
+      - No GatewayError at any point (deal_list_query never called)
+      - total_filled == 300 (correct cumulation across two order_ids)
+      - place_order called exactly twice (once per outer iteration)
+      - No double-count: each order_id's dealt_qty counted exactly once
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError as GwError
+
+    cfg = _MockCfg()
+    placed_orders = []
+
+    async def mock_place(code, qty, price, side):
+        oid = f"EXIT-PAPER-{len(placed_orders) + 1}"
+        placed_orders.append(oid)
+        return oid
+
+    async def mock_order_status(order_id=""):
+        # Round 1 (first order): partial fill — 100 of 300 dealt
+        if len(placed_orders) >= 1 and order_id == placed_orders[0]:
+            return [
+                {
+                    "order_id": placed_orders[0], "code": "US.NVDA",
+                    "order_status": "FILLED_PART", "qty": 300,
+                    "dealt_qty": 100, "dealt_avg_price": 149.85, "trd_side": "SELL",
+                }
+            ]
+        # Round 2 (second order): full fill — 200 of 200 dealt
+        if len(placed_orders) >= 2 and order_id == placed_orders[1]:
+            return [
+                {
+                    "order_id": placed_orders[1], "code": "US.NVDA",
+                    "order_status": "FILLED_ALL", "qty": 200,
+                    "dealt_qty": 200, "dealt_avg_price": 149.80, "trd_side": "SELL",
+                }
+            ]
+        return []
+
+    gw = MagicMock()
+    gw.get_bid_price = AsyncMock(return_value=149.90)
+    gw.place_order = mock_place
+    gw.cancel_order = AsyncMock()
+    gw.get_order_fills = AsyncMock(side_effect=GwError(
+        "deal_list_query failed: ret=-1, data=Paper trading does not support deal data."
+    ))
+    gw.get_order_status = mock_order_status
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    try:
+        from moomoo import TrdSide
+        sell_side = TrdSide.SELL
+    except ImportError:
+        sell_side = "SELL"
+
+    # Must NOT raise GatewayError
+    total_filled = _run(engine.manage_exit(
+        code="US.NVDA",
+        qty=300,
+        side=sell_side,
+        escalation_step=0.10,
+        escalation_cadence=0.01,
+        ttl=0.05,
+    ))
+
+    assert total_filled == 300, (
+        f"CR-02 quantity invariant: expected total_filled=300, got {total_filled}"
+    )
+    assert len(placed_orders) == 2, (
+        f"Expected exactly 2 place_order calls (partial then remainder), got {len(placed_orders)}"
+    )
+    # No double-count: Round 1 dealt 100, Round 2 dealt 200 → total 300 (not 400 or 600)
+    # If double-count occurred, total_filled would be 200 (100+100) or exceed 300.

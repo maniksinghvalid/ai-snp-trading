@@ -199,14 +199,21 @@ class ExecutionEngine:
         return await self._manage_entry_order(intent)
 
     async def _manage_entry_order(self, intent) -> Optional[FillEvent]:
-        """Place a marketable-limit entry; poll deal_list_query for fills by order_id.
+        """Place a marketable-limit entry; poll order_list_query for fills by order_id.
 
         Protocol (D-04/D-05/D-06/EXEC-03/EXEC-05):
           1. Price entry at ask + cfg.entry_limit_buffer_usd (D-04).
           2. Place via gateway.place_order (OrderType.NORMAL — EXEC-02 enforced by gateway).
           3. Poll every cfg.entry_poll_interval_seconds until cfg.entry_ttl_seconds.
-          4. Match fills by order_id only (EXEC-05).
-          5. On any fill: cancel remainder (D-06), emit FillEvent(is_entry=True).
+          4. Match fills by order_id only (EXEC-05) via get_order_status(order_id) which
+             returns cumulative dealt_qty/dealt_avg_price from order_list_query.
+             NOTE: deal_list_query is NOT used here because it is unsupported on SIMULATE
+             paper accounts (Futu returns ret=-1 "Paper trading does not support deal data.").
+             order_list_query returns per-order cumulative dealt_qty, which is correct for
+             fill detection (EXEC-05). On first poll that shows dealt_qty > 0, we cancel the
+             remainder and emit FillEvent — no cross-round double-count risk because we
+             return immediately on the first partial or full fill (D-06).
+          5. On any fill (dealt_qty > 0): cancel remainder (D-06), emit FillEvent(is_entry=True).
           6. On TTL with no fill: cancel, re-price at fresh ask+buffer, re-place.
              Repeat up to cfg.entry_max_retries times (D-05).
           7. After exceeding the cap: cancel, mark pending_intent EXPIRED, return None.
@@ -249,49 +256,54 @@ class ExecutionEngine:
             while loop.time() < deadline:
                 await asyncio.sleep(self._cfg.entry_poll_interval_seconds)
 
-                fills = await self._gw.get_order_fills()
+                # Poll via order_list_query (get_order_status) — cumulative dealt_qty.
+                # deal_list_query (get_order_fills) is NOT used: it is unsupported on
+                # SIMULATE paper accounts ("Paper trading does not support deal data.").
+                # get_order_status(order_id) returns ONE row per order with cumulative
+                # dealt_qty and dealt_avg_price — sufficient for EXEC-05 fill matching.
+                # On first dealt_qty > 0 we cancel the remainder and return immediately
+                # so there is no cross-round double-count risk (D-06).
+                order_rows = await self._gw.get_order_status(order_id)
                 matched = [
-                    f for f in fills
-                    if str(f.get("order_id", "")) == str(order_id)
+                    r for r in order_rows
+                    if str(r.get("order_id", "")) == str(order_id)
                 ]
 
                 if matched:
-                    total_filled = sum(int(f.get("qty", 0) or 0) for f in matched)
-                    total_value = sum(
-                        float(f.get("qty", 0) or 0) * float(f.get("price", 0) or 0)
-                        for f in matched
-                    )
-                    avg_fill_price = total_value / total_filled if total_filled > 0 else 0.0
+                    row = matched[0]
+                    total_filled = int(row.get("dealt_qty", 0) or 0)
+                    avg_fill_price = float(row.get("dealt_avg_price", 0.0) or 0.0)
 
-                    # D-06: cancel unfilled remainder, accept partial fill as position
-                    try:
-                        await self._gw.cancel_order(order_id)
-                    except Exception:
-                        pass  # remainder may already be fully filled — swallow
+                    if total_filled > 0:
+                        # D-06: cancel unfilled remainder, accept partial fill as position
+                        try:
+                            await self._gw.cancel_order(order_id)
+                        except Exception:
+                            pass  # remainder may already be fully filled — swallow
 
-                    fill_event = FillEvent(
-                        order_id=str(order_id),
-                        intent_id=intent.intent_id,
-                        code=intent.code,
-                        filled_qty=int(total_filled),
-                        avg_fill_price=float(avg_fill_price),
-                        is_entry=True,
-                        fill_time=now_et(),
-                    )
-                    append_audit({
-                        "event": "entry_fill_detected",
-                        "order_id": order_id,
-                        "filled_qty": int(total_filled),
-                        "avg_fill_price": float(avg_fill_price),
-                        "intent_id": intent.intent_id,
-                    })
-                    _logger.info(
-                        "entry_fill_detected",
-                        order_id=order_id,
-                        filled_qty=int(total_filled),
-                        avg_fill_price=float(avg_fill_price),
-                    )
-                    return fill_event
+                        fill_event = FillEvent(
+                            order_id=str(order_id),
+                            intent_id=intent.intent_id,
+                            code=intent.code,
+                            filled_qty=int(total_filled),
+                            avg_fill_price=float(avg_fill_price),
+                            is_entry=True,
+                            fill_time=now_et(),
+                        )
+                        append_audit({
+                            "event": "entry_fill_detected",
+                            "order_id": order_id,
+                            "filled_qty": int(total_filled),
+                            "avg_fill_price": float(avg_fill_price),
+                            "intent_id": intent.intent_id,
+                        })
+                        _logger.info(
+                            "entry_fill_detected",
+                            order_id=order_id,
+                            filled_qty=int(total_filled),
+                            avg_fill_price=float(avg_fill_price),
+                        )
+                        return fill_event
 
             # TTL expired for this attempt — cancel current order
             try:
@@ -367,6 +379,17 @@ class ExecutionEngine:
 
         Returns:
             int — total filled quantity across all exit order_ids (cumulative).
+
+        Fill detection uses get_order_status(order_id) → order_list_query (cumulative
+        dealt_qty per order) instead of get_order_fills() → deal_list_query. The latter
+        is unsupported on SIMULATE paper accounts ("Paper trading does not support deal
+        data."). Each outer while iteration places a NEW order_id; within the inner poll
+        loop for a given order_id, dealt_qty is cumulative for that order — assigning
+        order_filled_this_round = dealt_qty is correct because we break on the first
+        non-zero read (no cross-round double-count for the same order_id). Across
+        outer iterations total_filled accumulates the per-order dealt_qty values,
+        which are independent (different order_ids). This preserves the EXEC-05 /
+        CR-02 quantity-tracking invariants (remaining decrements once per order_id fill).
         """
         total_filled = 0
         remaining = qty
@@ -394,14 +417,21 @@ class ExecutionEngine:
             while loop.time() < deadline:
                 await asyncio.sleep(escalation_cadence)
 
-                fills = await self._gw.get_order_fills()
+                # Poll via order_list_query (get_order_status) — cumulative dealt_qty.
+                # deal_list_query (get_order_fills) is NOT used: unsupported on SIMULATE
+                # ("Paper trading does not support deal data."). get_order_status returns
+                # ONE row per order with cumulative dealt_qty. We break on first non-zero
+                # read so order_filled_this_round = dealt_qty is the total fill for this
+                # order_id in this round (no cross-round double-count — EXEC-05 / CR-02).
+                order_rows = await self._gw.get_order_status(order_id)
                 matched = [
-                    f for f in fills
-                    if str(f.get("order_id", "")) == str(order_id)
+                    r for r in order_rows
+                    if str(r.get("order_id", "")) == str(order_id)
                 ]
                 if matched:
-                    order_filled_this_round = sum(int(f.get("qty", 0) or 0) for f in matched)
-                    break
+                    order_filled_this_round = int(matched[0].get("dealt_qty", 0) or 0)
+                    if order_filled_this_round > 0:
+                        break
 
             if order_filled_this_round > 0:
                 total_filled += order_filled_this_round
