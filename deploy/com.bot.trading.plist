@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  deploy/com.bot.trading.plist — launchd LaunchAgent supervisor TEMPLATE (D-05/D-06)
+
+  INSTRUCTIONS:
+    1. Fill in all OPERATOR placeholder values (paths, secrets).
+    2. chmod 600 ~/Library/LaunchAgents/com.bot.trading.plist  (T-05-04-02: secrets in env block)
+    3. DO NOT commit a filled-in copy of this file — keep secrets out of git history.
+    4. Load:    launchctl load ~/Library/LaunchAgents/com.bot.trading.plist
+       Status:  launchctl list | grep com.bot.trading
+       Unload:  launchctl unload ~/Library/LaunchAgents/com.bot.trading.plist
+
+  ThrottleInterval (D-06): launchd waits at least this many seconds between crash-restarts.
+  The default of 30 matches service.launchd_throttle_interval_s in rules.json.
+  Increase to 60 if the bot is crash-looping on a persistent error.
+-->
+<plist version="1.0">
+<dict>
+
+    <!-- ============================================================ -->
+    <!-- Service identity                                              -->
+    <!-- ============================================================ -->
+
+    <key>Label</key>
+    <string>com.bot.trading</string>
+
+    <!-- ============================================================ -->
+    <!-- Program — use the FULL path to the venv Python (Pitfall 6)  -->
+    <!-- launchd does NOT source .bashrc/.zshrc; system PATH is bare  -->
+    <!-- ============================================================ -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- REPLACE with full absolute path to your virtualenv Python binary -->
+        <string>/Users/OPERATOR/path/to/venv/bin/python</string>
+        <string>-m</string>
+        <string>bot</string>
+    </array>
+
+    <!-- Working directory: absolute path to the repo root -->
+    <key>WorkingDirectory</key>
+    <string>/Users/OPERATOR/path/to/ai-snp-trading-claude</string>
+
+    <!-- ============================================================ -->
+    <!-- Supervision (D-05 / D-06)                                    -->
+    <!-- ============================================================ -->
+
+    <!-- KeepAlive: restart the process if it exits for any reason (D-05) -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- RunAtLoad: start the agent immediately when loaded (and on login) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- ThrottleInterval: minimum seconds between crash-restarts (D-06).  -->
+    <!-- Must match service.launchd_throttle_interval_s in rules.json (30)  -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- ============================================================ -->
+    <!-- Environment variables (D-05/D-13)                            -->
+    <!-- Paper-safety flags are HARDCODED here (T-05-04-SAFE).        -->
+    <!-- Telegram secrets: fill in and chmod 600 the plist file.      -->
+    <!-- PATH must be explicit; launchd does not source shell profiles  -->
+    <!-- ============================================================ -->
+
+    <key>EnvironmentVariables</key>
+    <dict>
+
+        <!-- Paper-trading safety — hardcoded, never change to REAL here -->
+        <key>PAPER_TRADING</key>
+        <string>true</string>
+
+        <key>FUTU_TRD_ENV</key>
+        <string>SIMULATE</string>
+
+        <!-- OpenD connection (defaults match the local OpenD service) -->
+        <key>FUTU_OPEND_HOST</key>
+        <string>127.0.0.1</string>
+
+        <key>FUTU_OPEND_PORT</key>
+        <string>11111</string>
+
+        <!-- Telegram secrets — fill these in; DO NOT commit the filled-in plist -->
+        <key>TELEGRAM_BOT_TOKEN</key>
+        <string>YOUR_TOKEN_HERE</string>
+
+        <key>TELEGRAM_CHAT_ID</key>
+        <string>YOUR_CHAT_ID_HERE</string>
+
+        <!-- Explicit PATH: launchd's default PATH is /usr/bin:/bin only (Pitfall 6) -->
+        <!-- Add /opt/homebrew/bin for Apple Silicon Homebrew; /usr/local/bin for Intel -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+    </dict>
+
+    <!-- ============================================================ -->
+    <!-- Log redirection (SVC-03 / D-06)                              -->
+    <!-- logs/ is gitignored; launchd creates the files if missing    -->
+    <!-- ============================================================ -->
+
+    <key>StandardOutPath</key>
+    <string>/Users/OPERATOR/path/to/ai-snp-trading-claude/logs/bot.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/OPERATOR/path/to/ai-snp-trading-claude/logs/bot.stderr.log</string>
+
+</dict>
+</plist>
