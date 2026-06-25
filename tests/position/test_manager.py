@@ -598,24 +598,41 @@ class TestOnBarStopOut:
     """Verify stop-out transitions from on_bar (D-02)."""
 
     def test_close_below_trail_stop_triggers_stop_out(
-        self, manager, open_store, mock_engine, mock_strategy
+        self, open_store, mock_strategy
     ):
-        """A bar.close <= trail_stop triggers a STOP_OUT transition and persists CLOSED."""
+        """A bar.close <= trail_stop triggers a STOP_OUT transition and persists CLOSED.
+
+        Uses a full-fill engine (manage_exit returns full remaining_quantity) to assert
+        that a successful stop-out leaves phase==CLOSED and DB row CLOSED.
+        """
+        # Full-fill engine so the stop-out completes
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=300)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
         pos = _make_pos(
             phase=PositionPhase.ACTIVE,
             trail_stop=98.0,
             entry_price=100.0,
             initial_stop=98.0,
+            remaining_quantity=300,
         )
-        manager._positions["US.AAPL"] = pos
+        mgr._positions["US.AAPL"] = pos
         open_store.upsert_position(pos)
 
         # Close AT the trail_stop — triggers stop-out (D-02: close <= trail_stop)
         bar = _make_bar(close=97.5)
 
-        asyncio.run(manager.on_bar(bar))
+        asyncio.run(mgr.on_bar(bar))
 
-        # FSM transitioned to CLOSED
+        # FSM transitioned to CLOSED (full fill)
         assert pos.phase == PositionPhase.CLOSED
         # DB also shows CLOSED
         rows = open_store.conn.execute(
@@ -1645,21 +1662,36 @@ class TestPendingExitReason:
     """
 
     def test_stop_out_records_stop_out_reason(
-        self, manager, open_store, mock_engine
+        self, open_store, mock_strategy
     ):
-        """ACTIVE phase → close <= trail_stop → pending_exit_reason == 'stop_out'."""
+        """ACTIVE phase → close <= trail_stop → pending_exit_reason == 'stop_out'.
+
+        Uses a full-fill engine (manage_exit returns 300) so the stop-out completes
+        and the position transitions to CLOSED.
+        """
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=300)
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
         pos = _make_pos(
             phase=PositionPhase.ACTIVE,
             entry_price=100.0,
             initial_stop=98.0,
             trail_stop=98.0,
+            remaining_quantity=300,
         )
-        manager._positions["US.AAPL"] = pos
+        mgr._positions["US.AAPL"] = pos
         open_store.upsert_position(pos)
 
         # Close below trail_stop triggers stop_out from ACTIVE phase
         bar = _make_bar(close=97.0)
-        asyncio.run(manager.on_bar(bar))
+        asyncio.run(mgr.on_bar(bar))
 
         assert pos.phase == PositionPhase.CLOSED
         assert pos.pending_exit_reason == "stop_out", (
@@ -1667,21 +1699,35 @@ class TestPendingExitReason:
         )
 
     def test_trailing_stop_records_trail_stop_reason(
-        self, manager, open_store, mock_engine
+        self, open_store, mock_strategy
     ):
-        """TRAILING phase → close <= trail_stop → pending_exit_reason == 'trail_stop'."""
+        """TRAILING phase → close <= trail_stop → pending_exit_reason == 'trail_stop'.
+
+        Uses a full-fill engine (manage_exit returns 300).
+        """
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=300)
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
         pos = _make_pos(
             phase=PositionPhase.TRAILING,
             entry_price=100.0,
             initial_stop=98.0,
             trail_stop=99.5,
+            remaining_quantity=300,
         )
-        manager._positions["US.AAPL"] = pos
+        mgr._positions["US.AAPL"] = pos
         open_store.upsert_position(pos)
 
         # Close below trail_stop from TRAILING phase → trail_stop reason
         bar = _make_bar(close=99.0)
-        asyncio.run(manager.on_bar(bar))
+        asyncio.run(mgr.on_bar(bar))
 
         assert pos.phase == PositionPhase.CLOSED
         assert pos.pending_exit_reason == "trail_stop", (
@@ -1689,21 +1735,35 @@ class TestPendingExitReason:
         )
 
     def test_breakeven_stop_records_breakeven_reason(
-        self, manager, open_store, mock_engine
+        self, open_store, mock_strategy
     ):
-        """BREAKEVEN phase → close <= trail_stop → pending_exit_reason == 'breakeven'."""
+        """BREAKEVEN phase → close <= trail_stop → pending_exit_reason == 'breakeven'.
+
+        Uses a full-fill engine (manage_exit returns 300).
+        """
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=300)
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
         pos = _make_pos(
             phase=PositionPhase.BREAKEVEN,
             entry_price=100.0,
             initial_stop=98.0,
             trail_stop=100.0,  # stop at entry (breakeven)
+            remaining_quantity=300,
         )
-        manager._positions["US.AAPL"] = pos
+        mgr._positions["US.AAPL"] = pos
         open_store.upsert_position(pos)
 
         # Close at entry price (which is the trail_stop) → stop_out from BREAKEVEN
         bar = _make_bar(close=99.8)
-        asyncio.run(manager.on_bar(bar))
+        asyncio.run(mgr.on_bar(bar))
 
         assert pos.phase == PositionPhase.CLOSED
         assert pos.pending_exit_reason == "breakeven", (
@@ -2067,21 +2127,20 @@ class TestExitAlertRealReason:
 def test_exit_alert_fires_after_manage_exit(tmp_state_db):
     """After D-01/D-02 fix: manage_exit() return value drives on_exit_alert (WARNING-01).
 
-    With engine.manage_exit mocked to return filled_qty=10, a stop-out (bar.close
-    below trail_stop) must fire the on_exit_alert callback with (code, reason,
+    With engine.manage_exit mocked to return filled_qty=100 (full fill), a stop-out
+    (bar.close below trail_stop) must fire the on_exit_alert callback with (code, reason,
     r_multiple). The test asserts the D-01/D-02 contract: alert driven by the
     manage_exit() return value, not by exit_order_id push-match.
 
-    RED today: _place_exit_order() returns None and call sites set pos.exit_order_id
-    instead of applying filled_qty. The on_exit_alert callback is never called.
-    Turns GREEN when Plan 06.1-03 fixes _place_exit_order and its call sites.
+    Note: uses full fill (100 == remaining_quantity) so the full-fill path fires the alert.
+    A short fill (filled_qty < qty) is tested by test_short_fill_stop_out_reprotects which
+    asserts no alert fires on incomplete exits.
     """
-    from collections import deque
     from bot.state.store import StateStore
 
-    # Build mock engine whose manage_exit returns filled_qty=10 (simulates sell fill)
+    # Build mock engine whose manage_exit returns filled_qty=100 (full fill of 100 remaining)
     mock_engine = MagicMock()
-    mock_engine.manage_exit = AsyncMock(return_value=10)
+    mock_engine.manage_exit = AsyncMock(return_value=100)
 
     mock_strategy = MagicMock()
     mock_strategy.compute_swing_low_2_2 = MagicMock(return_value=99.0)

@@ -571,9 +571,10 @@ class PositionManager:
     ) -> None:
         """ACTIVE → PARTIAL_TAKEN: submit a partial-profit exit for qty shares.
 
-        evaluate_close() has already decremented pos.remaining_quantity and set
-        pos.phase to PARTIAL_TAKEN. We call _persist_position (DB-first), then
-        ask the engine to place the exit order.
+        Handler-owns convention: evaluate_close() does NOT decrement
+        pos.remaining_quantity (advisory-only on quantity). This handler applies
+        exactly ONE decrement driven by the broker's filled_qty. This is symmetric
+        with _trigger_stop_out which also applies the single decrement on fill.
 
         D-01/D-02: filled_qty from _place_exit_order drives remaining_quantity decrement
         and partial_profit_filled persist. Alert fires from the existing alert block
@@ -598,7 +599,23 @@ class PositionManager:
             finally:
                 self._exiting.discard(pos.code)
             if filled_qty > 0:
+                # Single decrement driven by broker filled_qty (handler-owns convention).
+                # This is the ONLY decrement for the partial — evaluate_close no longer
+                # mutates remaining_quantity.
                 pos.remaining_quantity = max(0, pos.remaining_quantity - filled_qty)
+                if filled_qty < qty:
+                    # SHORT fill: credit only what the broker actually sold, and warn.
+                    _logger.warning(
+                        "partial_short_fill",
+                        code=pos.code,
+                        requested=qty,
+                        filled=filled_qty,
+                        remaining=pos.remaining_quantity,
+                    )
+                if pos.remaining_quantity == 0:
+                    # WR-01: partial that zeroes remaining marks the position CLOSED,
+                    # symmetric with _trigger_stop_out's full-fill behaviour.
+                    pos.phase = PositionPhase.CLOSED
                 pos.updated_at = now_et()
                 self._persist_position(pos, event="partial_profit_filled")
 
@@ -688,10 +705,15 @@ class PositionManager:
             finally:
                 self._exiting.discard(pos.code)
             # D-01/D-02: apply exit from the manage_exit return value (not exit_order_id).
-            if filled_qty > 0:
+            # Restructured as NOT-fail-open (CR-01 / SAFE-03):
+            #   FULL fill (filled_qty >= qty): close, persist stop_out_filled, fire alert.
+            #   ZERO or SHORT fill (filled_qty < qty): credit actual filled shares (WR-02),
+            #     revert to managed phase so on_bar retries next bar, persist incomplete,
+            #     log error — do NOT fire the success alert.
+            if filled_qty >= qty:
+                # Full fill — close the position.
                 pos.remaining_quantity = max(0, pos.remaining_quantity - filled_qty)
-                if pos.remaining_quantity == 0:
-                    pos.phase = PositionPhase.CLOSED
+                pos.phase = PositionPhase.CLOSED
                 pos.updated_at = now_et()
                 self._persist_position(pos, event="stop_out_filled")
                 # Fire exit alert synchronously from the filled return (ALERT-02 / ALERT-04).
@@ -709,6 +731,45 @@ class PositionManager:
                         )
                     except Exception:
                         _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
+            else:
+                # Zero or short fill — do NOT leave the position CLOSED-but-held.
+                # Credit any partial fill the broker did execute (WR-02).
+                pos.remaining_quantity = max(0, pos.remaining_quantity - filled_qty)
+                if pos.remaining_quantity == 0:
+                    # Short fill happened to zero remaining — treat as full close.
+                    pos.phase = PositionPhase.CLOSED
+                    pos.updated_at = now_et()
+                    self._persist_position(pos, event="stop_out_filled")
+                    if self._on_exit_alert is not None:
+                        try:
+                            entry = pos.entry_price or 0.0
+                            stop = pos.initial_stop or 0.0
+                            exit_proxy = pos.avg_fill_price or entry
+                            risk = entry - stop
+                            r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
+                            self._on_exit_alert(
+                                pos.code,
+                                pos.pending_exit_reason or "stop_out",
+                                round(r_multiple, 2),
+                            )
+                        except Exception:
+                            _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
+                else:
+                    # remaining > 0: revert the premature CLOSED so on_bar retries.
+                    # prev_phase defensive fallback: None or already CLOSED → ACTIVE
+                    safe_managed = prev_phase
+                    if safe_managed is None or safe_managed == PositionPhase.CLOSED:
+                        safe_managed = PositionPhase.ACTIVE
+                    pos.phase = safe_managed
+                    pos.updated_at = now_et()
+                    self._persist_position(pos, event="stop_out_incomplete")
+                    _logger.error(
+                        "stop_out_incomplete",
+                        code=pos.code,
+                        requested=qty,
+                        filled=filled_qty,
+                        remaining=pos.remaining_quantity,
+                    )
 
         _logger.info(
             "fsm_stop_out",

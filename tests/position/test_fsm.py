@@ -99,13 +99,18 @@ def test_partial_profit_trigger():
     assert pos4.phase == PositionPhase.CLOSED
     assert qty4 == 100  # all remaining shares
 
-    # --- remaining_quantity decrements on PARTIAL ---
+    # --- evaluate_close PARTIAL is advisory-only on quantity (handler-owns convention) ---
+    # evaluate_close computes and returns partial_qty but does NOT mutate
+    # remaining_quantity. The handler (_trigger_partial_profit) owns the single
+    # decrement, driven by the broker's filled_qty. This is symmetric with STOP_OUT
+    # which also does not decrement here.
     pos5 = _make_pos(entry_price=100.0, initial_stop=96.0, remaining_quantity=90)
     action5, qty5 = pos5.evaluate_close(103.0, cfg)
     assert action5 == FSM_ACTION_PARTIAL
     expected_partial = math.floor(90 * 0.3333)   # 29
     assert qty5 == expected_partial
-    assert pos5.remaining_quantity == 90 - expected_partial
+    # remaining_quantity is UNCHANGED by evaluate_close — handler applies the decrement
+    assert pos5.remaining_quantity == 90
 
 
 # ============================================================

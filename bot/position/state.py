@@ -195,6 +195,13 @@ class PositionState:
         Notes:
             This method MUTATES self.phase and self.trail_stop on transitions.
             PositionManager must persist to DB AFTER calling this method.
+
+            Decrement-ownership convention (handler-owns):
+            evaluate_close is advisory-only on quantity. For PARTIAL, it computes
+            and returns partial_qty but does NOT mutate remaining_quantity. The
+            handler (_trigger_partial_profit) applies exactly ONE decrement driven
+            by the broker's filled_qty. This is symmetric with STOP_OUT branches
+            which also do not mutate remaining_quantity here.
         """
         if self.phase in (PositionPhase.AWAITING_FILL, PositionPhase.CLOSED):
             return (FSM_ACTION_NONE, 0)
@@ -211,7 +218,10 @@ class PositionState:
                 partial_qty = math.floor(
                     self.remaining_quantity * cfg.partial_profit_fraction
                 )
-                self.remaining_quantity -= partial_qty
+                # Handler-owns convention: do NOT decrement remaining_quantity here.
+                # The handler (_trigger_partial_profit) applies the single decrement
+                # driven by the broker's filled_qty. This is symmetric with the
+                # STOP_OUT branches above (which also return without decrementing).
                 self.phase = PositionPhase.PARTIAL_TAKEN
                 return (FSM_ACTION_PARTIAL, partial_qty)
 
