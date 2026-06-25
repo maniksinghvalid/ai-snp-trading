@@ -197,10 +197,10 @@ class StateStore:
         parent = os.path.dirname(os.path.abspath(self._db_path))
         os.makedirs(parent, exist_ok=True)
 
-        # check_same_thread=False: the connection is shared across the asyncio
-        # event-loop thread AND ThreadPoolExecutor worker threads (the four
-        # scheduled executor jobs). All access is serialized by self._lock so
-        # concurrent use is safe without relying on SQLite's internal mutex.
+        # Disable the same-thread check: the connection is intentionally shared
+        # across the asyncio event-loop thread AND ThreadPoolExecutor worker
+        # threads (the four scheduled executor jobs). All access is serialized
+        # by self._lock so concurrent use is safe (T-06.1-08-01/02).
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         # Enable WAL mode for better concurrency (non-breaking for tests)
         self._conn.execute("PRAGMA journal_mode=WAL")
