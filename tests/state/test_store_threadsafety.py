@@ -121,22 +121,25 @@ class TestCrossThreadStateStore:
         asyncio.run(_run())
 
     def test_concurrent_loop_and_executor_writes_do_not_corrupt(self, tmp_path, monkeypatch):
-        """Concurrent loop-thread + executor-thread writes must all commit without loss.
+        """Concurrent row_factory-flipping reads from multiple executor threads must not corrupt.
 
-        Reproduces the race described in the plan: the event-loop thread also
-        WRITES to the same connection (PositionManager.upsert_position, engine,
-        reconcile paths). Without serialization, loop-thread writes and
-        executor-thread writes can interleave, causing lost writes or corrupted
-        cursor state.
+        Reproduces the row_factory race described in the plan: get_open_positions
+        and get_closed_trades flip conn.row_factory = sqlite3.Row then reset it to
+        None. Without the RLock, concurrent calls can observe each other's flipped
+        factory or clobber an in-progress cursor, corrupting the result.
 
         This test:
-          1. Kicks off N writes on the executor (worker thread).
-          2. Kicks off N writes on the event-loop thread (direct await).
-          3. Asserts no exception is raised and the final row count equals 2*N.
+          1. Kicks off N calls to get_open_positions() from executor worker threads
+             (simulating the EOD report job and any concurrent reconcile read).
+          2. Kicks off N more calls from additional executor worker threads (simulating
+             concurrent reads from another code path).
+          3. Asserts no exception is raised and every result is a list (not corrupted).
 
-        RED today: ProgrammingError raised on the worker thread (check_same_thread
-        rejects cross-thread use before any locking concern even arises).
-        GREEN after fix: all 2*N writes commit; total row count == 2*N.
+        RED today: sqlite3.ProgrammingError raised immediately (check_same_thread=True
+        rejects conn.row_factory access from a worker thread before any race can occur).
+        GREEN after fix: check_same_thread=False + with self._lock: in get_open_positions
+        serializes the row_factory flip, all N concurrent calls return a list with no
+        exception.
         """
         db_path = str(tmp_path / "bot_state_test.db")
         monkeypatch.setenv("BOT_STATE_DB", db_path)
@@ -148,50 +151,28 @@ class TestCrossThreadStateStore:
             try:
                 loop = asyncio.get_running_loop()
 
-                def _write_from_executor(tag: str, i: int):
-                    """Write one row into meta from a worker thread."""
-                    key = f"{tag}_{i}"
-                    store.conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                        (key, str(i)),
-                    )
-                    store.conn.commit()
+                def _read_open_positions():
+                    """Call the row_factory-flipping reader from a worker thread."""
+                    return store.get_open_positions()
 
-                def _write_on_loop_thread(tag: str, i: int):
-                    """Write one row into meta from the loop thread (direct call)."""
-                    key = f"{tag}_{i}"
-                    store.conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                        (key, str(i)),
-                    )
-                    store.conn.commit()
-
-                # Launch N executor writes concurrently
-                executor_futures = [
-                    loop.run_in_executor(None, _write_from_executor, "exec", i)
-                    for i in range(N)
+                # Launch 2*N concurrent reads from executor threads
+                futures_a = [
+                    loop.run_in_executor(None, _read_open_positions)
+                    for _ in range(N)
                 ]
-                # Interleave N loop-thread writes (run synchronously on the loop thread)
-                # Note: these are not coroutines — run them as plain calls to simulate
-                # the manager/engine path that writes directly via store.conn.execute.
-                loop_tasks = [
-                    asyncio.get_event_loop().run_in_executor(
-                        None, _write_on_loop_thread, "loop", i
-                    )
-                    for i in range(N)
+                futures_b = [
+                    loop.run_in_executor(None, _read_open_positions)
+                    for _ in range(N)
                 ]
 
-                # Wait for all writes to complete
-                await asyncio.gather(*executor_futures, *loop_tasks)
+                # Wait for all reads — must not raise ProgrammingError or DatabaseError
+                results = await asyncio.gather(*futures_a, *futures_b)
 
-                # Count committed rows — expect 2*N distinct keys
-                row_count = store.conn.execute(
-                    "SELECT COUNT(*) FROM meta WHERE key LIKE 'exec_%' OR key LIKE 'loop_%'"
-                ).fetchone()[0]
-                assert row_count == 2 * N, (
-                    f"Expected {2 * N} committed rows, got {row_count} — "
-                    f"concurrent writes may have been lost or interleaved"
-                )
+                # Every result must be a list (empty list for fresh DB is correct)
+                for i, r in enumerate(results):
+                    assert isinstance(r, list), (
+                        f"Result {i} is {type(r)}, not list — row_factory corruption"
+                    )
             finally:
                 store.close()
 

@@ -17,6 +17,7 @@ import os
 import sqlite3
 import stat
 import tempfile
+import threading
 
 from bot.state.migrations import run_migrations
 
@@ -157,6 +158,10 @@ class StateStore:
         """
         self._db_path = db_path if db_path is not None else resolve_db_path()
         self._conn = None
+        # RLock serializes all connection access across threads.
+        # Re-entrant so a caller holding the lock can call another method that
+        # also acquires it (e.g. an executor job calling a store read method).
+        self._lock = threading.RLock()
 
     # ============================================================
     # Public Interface
@@ -192,7 +197,11 @@ class StateStore:
         parent = os.path.dirname(os.path.abspath(self._db_path))
         os.makedirs(parent, exist_ok=True)
 
-        self._conn = sqlite3.connect(self._db_path)
+        # check_same_thread=False: the connection is shared across the asyncio
+        # event-loop thread AND ThreadPoolExecutor worker threads (the four
+        # scheduled executor jobs). All access is serialized by self._lock so
+        # concurrent use is safe without relying on SQLite's internal mutex.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         # Enable WAL mode for better concurrency (non-breaking for tests)
         self._conn.execute("PRAGMA journal_mode=WAL")
         run_migrations(self._conn)
@@ -226,6 +235,29 @@ class StateStore:
         return False  # do not suppress exceptions
 
     # ============================================================
+    # Thread-safety helpers
+    # ============================================================
+
+    def lock(self) -> threading.RLock:
+        """Return the store's re-entrant lock as a context manager.
+
+        Executor jobs must acquire this lock around ALL store access so that
+        worker-thread operations are serialized against event-loop-thread
+        manager/engine writes.  The lock is re-entrant (RLock), so a caller
+        that already holds it (e.g. an executor job that calls a store method
+        which also acquires it internally) does not deadlock.
+
+        Usage::
+
+            with self._store.lock():
+                codes = self._store.get_watchlist_codes(today)
+
+        Returns:
+            The threading.RLock instance (usable as ``with store.lock(): ...``).
+        """
+        return self._lock
+
+    # ============================================================
     # Phase 4 Position Accessors
     # ============================================================
 
@@ -246,36 +278,37 @@ class StateStore:
             pos: A PositionState instance (bot.position.state). Not type-hinted
                  here to avoid a circular import at the store layer.
         """
-        self._conn.execute(
-            """INSERT INTO positions
-               (position_id, code, phase, entry_price, initial_stop, trail_stop,
-                full_quantity, remaining_quantity, entry_order_id, exit_order_id,
-                avg_fill_price, opened_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(position_id) DO UPDATE SET
-                 phase=excluded.phase,
-                 trail_stop=excluded.trail_stop,
-                 remaining_quantity=excluded.remaining_quantity,
-                 exit_order_id=excluded.exit_order_id,
-                 avg_fill_price=excluded.avg_fill_price,
-                 updated_at=excluded.updated_at""",
-            (
-                pos.position_id,
-                pos.code,
-                pos.phase.value,        # PositionPhase enum → TEXT
-                pos.entry_price,
-                pos.initial_stop,
-                pos.trail_stop,
-                pos.full_quantity,
-                pos.remaining_quantity,
-                pos.entry_order_id,
-                pos.exit_order_id,
-                pos.avg_fill_price,
-                pos.opened_at.isoformat() if pos.opened_at else None,
-                pos.updated_at.isoformat() if pos.updated_at else None,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO positions
+                   (position_id, code, phase, entry_price, initial_stop, trail_stop,
+                    full_quantity, remaining_quantity, entry_order_id, exit_order_id,
+                    avg_fill_price, opened_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(position_id) DO UPDATE SET
+                     phase=excluded.phase,
+                     trail_stop=excluded.trail_stop,
+                     remaining_quantity=excluded.remaining_quantity,
+                     exit_order_id=excluded.exit_order_id,
+                     avg_fill_price=excluded.avg_fill_price,
+                     updated_at=excluded.updated_at""",
+                (
+                    pos.position_id,
+                    pos.code,
+                    pos.phase.value,        # PositionPhase enum → TEXT
+                    pos.entry_price,
+                    pos.initial_stop,
+                    pos.trail_stop,
+                    pos.full_quantity,
+                    pos.remaining_quantity,
+                    pos.entry_order_id,
+                    pos.exit_order_id,
+                    pos.avg_fill_price,
+                    pos.opened_at.isoformat() if pos.opened_at else None,
+                    pos.updated_at.isoformat() if pos.updated_at else None,
+                ),
+            )
+            self._conn.commit()
 
     def get_closed_trades(self, session_date) -> list:
         """Return last-20 closed trade rows for a given session date.
@@ -290,12 +323,15 @@ class StateStore:
         Returns:
             list: List of dicts, one per closed trade row. Empty list if none.
         """
-        self._conn.row_factory = sqlite3.Row
-        rows = self._conn.execute(
-            "SELECT * FROM trades WHERE DATE(closed_at) = ? ORDER BY closed_at DESC LIMIT 20",
-            (str(session_date),),
-        ).fetchall()
-        self._conn.row_factory = None
+        with self._lock:
+            # Atomically flip row_factory → fetch → reset so a concurrent thread
+            # cannot observe or clobber the factory setting (T-06.1-08-02).
+            self._conn.row_factory = sqlite3.Row
+            rows = self._conn.execute(
+                "SELECT * FROM trades WHERE DATE(closed_at) = ? ORDER BY closed_at DESC LIMIT 20",
+                (str(session_date),),
+            ).fetchall()
+            self._conn.row_factory = None
         return [dict(r) for r in rows]
 
     def get_open_positions(self) -> list:
@@ -310,10 +346,13 @@ class StateStore:
             list: List of dicts, one per open/in-flight position row.
                   Empty list if no open positions exist.
         """
-        self._conn.row_factory = sqlite3.Row
-        rows = self._conn.execute(
-            "SELECT * FROM positions WHERE phase != 'CLOSED'"
-        ).fetchall()
-        # Reset row_factory so subsequent queries return plain tuples (default)
-        self._conn.row_factory = None
+        with self._lock:
+            # Atomically flip row_factory → fetch → reset so a concurrent thread
+            # cannot observe or clobber the factory setting (T-06.1-08-02).
+            self._conn.row_factory = sqlite3.Row
+            rows = self._conn.execute(
+                "SELECT * FROM positions WHERE phase != 'CLOSED'"
+            ).fetchall()
+            # Reset row_factory so subsequent queries return plain tuples (default)
+            self._conn.row_factory = None
         return [dict(r) for r in rows]

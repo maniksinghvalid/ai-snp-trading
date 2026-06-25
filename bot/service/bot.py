@@ -444,16 +444,21 @@ class TradingBot:
         _logger.info("premarket_scan_start", date=str(today))
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: self._scanner.run_daily_scan(
-                    self._store,
-                    self._gateway,
-                    self._cfg,
-                    scan_date=today,
-                    scan_pass="premarket",
-                ),
-            )
+
+            def _premarket_scan_worker():
+                # Acquire the store lock on the WORKER thread (where conn is used).
+                # This serializes the scanner's conn.execute calls against loop-thread
+                # manager/engine writes (T-06.1-08-02).
+                with self._store.lock():
+                    self._scanner.run_daily_scan(
+                        self._store,
+                        self._gateway,
+                        self._cfg,
+                        scan_date=today,
+                        scan_pass="premarket",
+                    )
+
+            await loop.run_in_executor(None, _premarket_scan_worker)
             _logger.info("premarket_scan_done", date=str(today))
         except asyncio.CancelledError:
             raise
@@ -481,10 +486,13 @@ class TradingBot:
 
             # Read active watchlist codes from the store
             loop = asyncio.get_running_loop()
-            codes = await loop.run_in_executor(
-                None,
-                lambda: self._store.get_watchlist_codes(today) if hasattr(self._store, "get_watchlist_codes") else [],
-            )
+
+            def _get_watchlist_worker():
+                # Acquire the store lock on the WORKER thread (where conn is used).
+                with self._store.lock():
+                    return self._store.get_watchlist_codes(today) if hasattr(self._store, "get_watchlist_codes") else []
+
+            codes = await loop.run_in_executor(None, _get_watchlist_worker)
             if codes:
                 await self._gateway.subscribe(codes)
                 _logger.info("market_open_subscribe_done", codes=codes, count=len(codes))
@@ -523,17 +531,21 @@ class TradingBot:
         _logger.info("intraday_rescan_start", date=str(today))
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: self._scanner.run_intraday_rescan(
-                    self._store,
-                    self._gateway,
-                    self._cfg,
-                    active_codes=set(),
-                    scan_date=today,
-                    scan_pass="intraday",
-                ),
-            )
+
+            def _intraday_rescan_worker():
+                # Acquire the store lock on the WORKER thread (where conn is used).
+                # This is the originally-reported crash site (T-06.1-08-01).
+                with self._store.lock():
+                    self._scanner.run_intraday_rescan(
+                        self._store,
+                        self._gateway,
+                        self._cfg,
+                        active_codes=set(),
+                        scan_date=today,
+                        scan_pass="intraday",
+                    )
+
+            await loop.run_in_executor(None, _intraday_rescan_worker)
             _logger.info("intraday_rescan_done", date=str(today))
         except asyncio.CancelledError:
             raise
@@ -585,9 +597,15 @@ class TradingBot:
             loop = asyncio.get_running_loop()
 
             def _fetch_build_write():
-                """Run in executor: fetch store data + build HTML + write reports (T-05-04-04)."""
-                trades_rows = self._store.get_closed_trades(today)
-                positions_rows = self._store.get_open_positions()
+                """Run in executor: fetch store data + build HTML + write reports (T-05-04-04).
+
+                Acquires the store lock on the WORKER thread for the store reads so that
+                the row_factory flip + fetch + reset sequence is atomic against concurrent
+                loop-thread manager/engine writes (T-06.1-08-02).
+                """
+                with self._store.lock():
+                    trades_rows = self._store.get_closed_trades(today)
+                    positions_rows = self._store.get_open_positions()
                 html_content = _build_daily_html(trades_rows, positions_rows, today)
                 _write_reports(html_content, today)
                 return trades_rows, positions_rows
