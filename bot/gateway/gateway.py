@@ -420,6 +420,19 @@ class MoomooGateway:
             lambda: self._quote_ctx.get_market_snapshot(codes),
         )
 
+    def set_handler(self, handler) -> None:
+        """Register a CurKlineHandlerBase push handler on the quote context.
+
+        Must be called after connect() and before subscribe(). Safe to call once
+        at bot startup — handler survives reconnects as long as _quote_ctx is reused.
+        Calling with the same handler a second time is harmless (idempotent).
+
+        Args:
+            handler: CurKlineHandlerBase subclass instance (e.g. BarAggregator).
+        """
+        self._quote_ctx.set_handler(handler)
+        _logger.info("push_handler_registered", handler=type(handler).__name__)
+
     async def subscribe(self, codes: list, subtypes: list = None) -> None:
         """Subscribe to real-time K_5M candlestick pushes for the given codes.
 
