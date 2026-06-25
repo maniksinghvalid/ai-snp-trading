@@ -110,6 +110,23 @@ class StrategyConfig:
     force_close_escalation_step_usd: float           # execution.force_close_escalation_step_usd
     force_close_escalation_cadence_seconds: float    # execution.force_close_escalation_cadence_seconds
 
+    # ---- service (Phase 5 tunables — CFG-01, D-01/D-03/D-06/D-10) ----
+    premarket_scan_et: str                  # service.premarket_scan_et  ("HH:MM" ET)
+    market_open_et: str                     # service.market_open_et
+    intraday_rescan_interval_min: int       # service.intraday_rescan_interval_min
+    intraday_rescan_start_et: str           # service.intraday_rescan_start_et
+    intraday_rescan_end_et: str             # service.intraday_rescan_end_et (SCAN-07 window end)
+    eod_report_et: str                      # service.eod_report_et
+    watchdog_poll_interval_s: float         # service.watchdog_poll_interval_s (D-10)
+    watchdog_reconnect_initial_s: float     # service.watchdog_reconnect_initial_s
+    watchdog_reconnect_cap_s: float         # service.watchdog_reconnect_cap_s (D-10)
+    alerts_enabled: bool                    # service.alerts_enabled (D-13 non-secret toggle)
+    misfire_grace_scan_s: int               # service.misfire_grace_scan_s (D-03/Pitfall 7)
+    misfire_grace_rescan_s: int             # service.misfire_grace_rescan_s
+    force_close_misfire_grace_s: int        # service.force_close_misfire_grace_s (D-03/Pitfall 7)
+    launchd_throttle_interval_s: int        # service.launchd_throttle_interval_s (D-06)
+    crash_loop_alert_threshold: int         # service.crash_loop_alert_threshold (D-06)
+
 
 # ============================================================
 # Loader
@@ -159,6 +176,7 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
     ex = data["exit"]
     rk = data["risk"]
     ex_cfg = data.get("execution", {})
+    svc_cfg = data.get("service", {})
 
     return StrategyConfig(
         # universe
@@ -193,4 +211,20 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         exit_escalation_cadence_seconds=float(ex_cfg["exit_escalation_cadence_seconds"]),
         force_close_escalation_step_usd=float(ex_cfg["force_close_escalation_step_usd"]),
         force_close_escalation_cadence_seconds=float(ex_cfg["force_close_escalation_cadence_seconds"]),
+        # service (Phase 5 tunables — CFG-01, D-01/D-03/D-06/D-10)
+        premarket_scan_et=str(svc_cfg["premarket_scan_et"]),
+        market_open_et=str(svc_cfg["market_open_et"]),
+        intraday_rescan_interval_min=int(svc_cfg["intraday_rescan_interval_min"]),
+        intraday_rescan_start_et=str(svc_cfg["intraday_rescan_start_et"]),
+        intraday_rescan_end_et=str(svc_cfg["intraday_rescan_end_et"]),
+        eod_report_et=str(svc_cfg["eod_report_et"]),
+        watchdog_poll_interval_s=float(svc_cfg["watchdog_poll_interval_s"]),
+        watchdog_reconnect_initial_s=float(svc_cfg["watchdog_reconnect_initial_s"]),
+        watchdog_reconnect_cap_s=float(svc_cfg["watchdog_reconnect_cap_s"]),
+        alerts_enabled=bool(svc_cfg["alerts_enabled"]),
+        misfire_grace_scan_s=int(svc_cfg["misfire_grace_scan_s"]),
+        misfire_grace_rescan_s=int(svc_cfg["misfire_grace_rescan_s"]),
+        force_close_misfire_grace_s=int(svc_cfg["force_close_misfire_grace_s"]),
+        launchd_throttle_interval_s=int(svc_cfg["launchd_throttle_interval_s"]),
+        crash_loop_alert_threshold=int(svc_cfg["crash_loop_alert_threshold"]),
     )

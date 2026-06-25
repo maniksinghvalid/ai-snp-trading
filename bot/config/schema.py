@@ -26,7 +26,8 @@ SCHEMA = {
         "time_filter",
         "exit",
         "risk",
-        "execution"
+        "execution",
+        "service"
     ],
     "additionalProperties": True,
     "properties": {
@@ -163,6 +164,47 @@ SCHEMA = {
                 "exit_escalation_cadence_seconds":        {"type": "number"},
                 "force_close_escalation_step_usd":        {"type": "number"},
                 "force_close_escalation_cadence_seconds": {"type": "number"}
+            }
+        },
+
+        # --------------------------------------------------------
+        # service (Phase 5 tunables — CFG-01, D-01/D-03/D-06/D-10)
+        # --------------------------------------------------------
+        "service": {
+            "type": "object",
+            "required": [
+                "premarket_scan_et",
+                "market_open_et",
+                "intraday_rescan_interval_min",
+                "intraday_rescan_start_et",
+                "intraday_rescan_end_et",
+                "eod_report_et",
+                "watchdog_poll_interval_s",
+                "watchdog_reconnect_initial_s",
+                "watchdog_reconnect_cap_s",
+                "alerts_enabled",
+                "misfire_grace_scan_s",
+                "misfire_grace_rescan_s",
+                "force_close_misfire_grace_s",
+                "launchd_throttle_interval_s",
+                "crash_loop_alert_threshold"
+            ],
+            "properties": {
+                "premarket_scan_et":              {"type": "string"},
+                "market_open_et":                 {"type": "string"},
+                "intraday_rescan_interval_min":   {"type": "integer"},
+                "intraday_rescan_start_et":       {"type": "string"},
+                "intraday_rescan_end_et":         {"type": "string"},
+                "eod_report_et":                  {"type": "string"},
+                "watchdog_poll_interval_s":       {"type": "number"},
+                "watchdog_reconnect_initial_s":   {"type": "number"},
+                "watchdog_reconnect_cap_s":       {"type": "number"},
+                "alerts_enabled":                 {"type": "boolean"},
+                "misfire_grace_scan_s":           {"type": "integer"},
+                "misfire_grace_rescan_s":         {"type": "integer"},
+                "force_close_misfire_grace_s":    {"type": "integer"},
+                "launchd_throttle_interval_s":    {"type": "integer"},
+                "crash_loop_alert_threshold":     {"type": "integer"}
             }
         }
     }
