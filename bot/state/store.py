@@ -277,6 +277,27 @@ class StateStore:
         )
         self._conn.commit()
 
+    def get_closed_trades(self, session_date) -> list:
+        """Return last-20 closed trade rows for a given session date.
+
+        Queries the trades table for rows WHERE DATE(closed_at) = session_date,
+        ordered by closed_at DESC, limited to 20 rows (RESEARCH Open Q1).
+
+        Uses the row_factory → fetchall → reset pattern (same as get_open_positions).
+        NULL r_multiple values are preserved as-is; callers guard with `or 0.0`.
+
+        session_date: date or str — the trading session date in YYYY-MM-DD format.
+        Returns:
+            list: List of dicts, one per closed trade row. Empty list if none.
+        """
+        self._conn.row_factory = sqlite3.Row
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE DATE(closed_at) = ? ORDER BY closed_at DESC LIMIT 20",
+            (str(session_date),),
+        ).fetchall()
+        self._conn.row_factory = None
+        return [dict(r) for r in rows]
+
     def get_open_positions(self) -> list:
         """Return all non-CLOSED position rows as dicts (for startup reconciliation).
 

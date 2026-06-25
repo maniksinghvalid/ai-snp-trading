@@ -41,7 +41,6 @@ def _make_report_builder_with_mocks(tmp_path):
 # DASH-01: HTML report sections
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-04 (ReportBuilder not yet created)", strict=False)
 def test_html_report_sections(tmp_path):
     """build_daily_html must produce HTML with all required report sections (DASH-01)."""
     builder = _make_report_builder_with_mocks(tmp_path)
@@ -60,7 +59,6 @@ def test_html_report_sections(tmp_path):
     )
 
 
-@pytest.mark.xfail(reason="implemented in 05-04 (ReportBuilder not yet created)", strict=False)
 def test_r_histogram_buckets(tmp_path):
     """_build_r_histogram must produce correct bucket counts for test trade data (DASH-01)."""
     builder = _make_report_builder_with_mocks(tmp_path)
