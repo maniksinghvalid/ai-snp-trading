@@ -359,6 +359,266 @@ class TestReconciliation:
 
         asyncio.run(_run())
 
+    # ------------------------------------------------------------------
+    # 06.1-07: CR-01 / CR-03 / WR-03 / WR-04 — in-memory effect tests
+    # These drive the in-memory effects of reconcile_once, not just
+    # the return-dict shape (the gap the existing tests left open).
+    # ------------------------------------------------------------------
+
+    def test_reconcile_once_reprotects_closed_but_held(self):
+        """CR-01: CLOSED-but-held position is re-armed in memory (SAFE-03).
+
+        When a code is in manager._positions with phase==CLOSED but broker still
+        holds shares (present in broker_map), reconcile_once must:
+          - NOT delete the position from _positions
+          - Re-arm to a managed phase (phase != CLOSED after call)
+          - Sync remaining_quantity to broker qty
+          - Audit reconcile_qty_drift
+          - Fire a DRIFT alert
+        """
+        from bot.position.state import PositionPhase
+
+        gw = _make_gateway_with_mocks()
+        # Broker still holds 150 shares
+        broker_df = pd.DataFrame([{
+            "code": "US.AAPL", "qty": 150, "average_cost": 151.0
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+
+        # In-memory position is CLOSED (the bug state)
+        mock_pos = MagicMock()
+        mock_pos.position_id = "pos-close-001"
+        mock_pos.phase = PositionPhase.CLOSED
+        mock_pos.remaining_quantity = 150
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {"US.AAPL": mock_pos}
+        mock_manager._exiting = set()
+
+        mock_store = MagicMock()
+        mock_store.conn = MagicMock()
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        result = asyncio.run(_run())
+
+        # Position must NOT be deleted from _positions
+        assert "US.AAPL" in mock_manager._positions, (
+            "CLOSED-but-held position must remain in _positions after re-arm"
+        )
+        # Phase must be re-armed (not CLOSED)
+        assert mock_pos.phase != PositionPhase.CLOSED, (
+            f"Position phase must be re-armed (not CLOSED), got {mock_pos.phase}"
+        )
+        # remaining_quantity must be synced to broker qty
+        assert mock_pos.remaining_quantity == 150, (
+            f"remaining_quantity must be synced to broker qty=150, got {mock_pos.remaining_quantity}"
+        )
+        # DRIFT alert must be fired
+        mock_alerter.send.assert_called()
+
+    def test_reconcile_once_qty_drift_adopts_broker_qty(self):
+        """CR-01: qty drift — stored remaining != broker qty → remaining updated.
+
+        When code is in both _positions and broker_map, phase managed (ACTIVE),
+        but remaining_quantity differs, reconcile_once must update remaining_quantity
+        to broker qty and audit reconcile_qty_drift.
+        """
+        from bot.position.state import PositionPhase
+
+        gw = _make_gateway_with_mocks()
+        # Broker has 180 shares; memory has 200
+        broker_df = pd.DataFrame([{
+            "code": "US.AAPL", "qty": 180, "average_cost": 150.0
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+
+        mock_pos = MagicMock()
+        mock_pos.position_id = "pos-drift-001"
+        mock_pos.phase = PositionPhase.ACTIVE
+        mock_pos.remaining_quantity = 200  # diverges from broker's 180
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {"US.AAPL": mock_pos}
+        mock_manager._exiting = set()
+
+        mock_store = MagicMock()
+        mock_store.conn = MagicMock()
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        asyncio.run(_run())
+
+        # remaining_quantity must be updated to broker qty
+        assert mock_pos.remaining_quantity == 180, (
+            f"remaining_quantity must be synced to 180 (broker), got {mock_pos.remaining_quantity}"
+        )
+        # DB update must have been issued
+        mock_store.conn.execute.assert_called()
+
+    def test_reconcile_once_orphan_registers_in_memory(self):
+        """CR-03: orphan broker position is registered in manager._positions via adopt_orphan.
+
+        When broker has a code not in manager._positions, reconcile_once must:
+          - Call manager.adopt_orphan(code=..., qty=..., avg_cost=..., stop=...)
+          - The code must be present in manager._positions after the call
+          - subscribe must be called once
+          - drift_orphan_adopted audit emitted only when row actually inserted
+        """
+        from bot.position.state import PositionPhase
+
+        gw = _make_gateway_with_mocks()
+        # Broker has an orphan
+        broker_df = pd.DataFrame([{
+            "code": "US.NVDA", "qty": 100, "average_cost": 500.0
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=495.0)
+        gw._compute_orphan_stop = MagicMock(return_value=490.0)
+        gw.subscribe = AsyncMock()
+
+        # Track adopt_orphan calls; wire a fake that registers in _positions
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+
+        def _fake_adopt(code, qty, avg_cost, stop, position_id=None):
+            pos = MagicMock()
+            pos.phase = PositionPhase.ACTIVE
+            pos.remaining_quantity = qty
+            mock_manager._positions[code] = pos
+            return pos
+
+        mock_manager.adopt_orphan = MagicMock(side_effect=_fake_adopt)
+
+        mock_store = MagicMock()
+        cursor_mock = MagicMock()
+        cursor_mock.rowcount = 1  # simulate successful INSERT
+        mock_store.conn = MagicMock()
+        mock_store.conn.execute = MagicMock(return_value=cursor_mock)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        asyncio.run(_run())
+
+        # adopt_orphan must have been called
+        mock_manager.adopt_orphan.assert_called_once()
+
+        # Position must be in _positions
+        assert "US.NVDA" in mock_manager._positions, (
+            "Orphan must be registered in _positions after adopt_orphan call"
+        )
+
+        # subscribe must have been called
+        gw.subscribe.assert_called_once()
+
+    def test_reconcile_once_drift_alert_task_is_retained(self):
+        """WR-03: DRIFT alert task is stored in self._bg_tasks (not bare create_task).
+
+        The gateway instance must have a _bg_tasks set attribute. When
+        reconcile_once fires an alert (externally-closed path), the task must be
+        retained in _bg_tasks so it is not GC'd before the send completes.
+        """
+        gw = _make_gateway_with_mocks()
+        gw.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        mock_pos = MagicMock()
+        mock_pos.position_id = "pos-wr03-001"
+        mock_manager = MagicMock()
+        mock_manager._positions = {"US.AAPL": mock_pos}
+        mock_manager._exiting = set()
+
+        mock_store = MagicMock()
+        mock_store.conn = MagicMock()
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+
+        asyncio.run(_run())
+
+        # _bg_tasks set must exist on the gateway (WR-03 retention)
+        assert hasattr(gw, "_bg_tasks"), (
+            "MoomooGateway must have a _bg_tasks set (WR-03: retain alert task reference)"
+        )
+        assert isinstance(gw._bg_tasks, set), (
+            f"_bg_tasks must be a set, got {type(gw._bg_tasks)}"
+        )
+
+    def test_reconcile_once_no_false_audit_on_insert_noop(self):
+        """WR-04: INSERT OR IGNORE no-op (rowcount==0) does NOT emit drift_orphan_adopted.
+
+        When the orphan INSERT OR IGNORE silently no-ops (collision / pre-existing row),
+        cursor.rowcount == 0 → drift_orphan_adopted must NOT be audited, and
+        adopt_orphan must NOT be called.
+        """
+        import bot.safety.audit_log as _al
+
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.MSFT", "qty": 50, "average_cost": 300.0
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=295.0)
+        gw._compute_orphan_stop = MagicMock(return_value=292.0)
+        gw.subscribe = AsyncMock()
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+
+        mock_store = MagicMock()
+        cursor_mock = MagicMock()
+        cursor_mock.rowcount = 0  # INSERT OR IGNORE no-op (collision)
+        mock_store.conn = MagicMock()
+        mock_store.conn.execute = MagicMock(return_value=cursor_mock)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        # Capture audit writes
+        audit_entries = []
+        orig_append = _al.append_audit
+        _al.append_audit = lambda entry: audit_entries.append(entry)
+        try:
+            async def _run():
+                return await gw.reconcile_once(
+                    store=mock_store, manager=mock_manager, alerter=mock_alerter
+                )
+            asyncio.run(_run())
+        finally:
+            _al.append_audit = orig_append
+
+        # drift_orphan_adopted must NOT be in audit entries (WR-04)
+        adopted_events = [e for e in audit_entries if e.get("event") == "drift_orphan_adopted"]
+        assert len(adopted_events) == 0, (
+            f"drift_orphan_adopted must NOT be audited on no-op INSERT; "
+            f"got {adopted_events}"
+        )
+        # adopt_orphan must NOT be called on INSERT no-op
+        if hasattr(mock_manager.adopt_orphan, "call_count"):
+            assert mock_manager.adopt_orphan.call_count == 0, (
+                "adopt_orphan must NOT be called on INSERT no-op (rowcount==0)"
+            )
+
 
 # ============================================================
 # D-02 Compliance: no import from skills/
@@ -829,276 +1089,3 @@ async def test_reconcile_once_externally_closed():
     )
     mock_store.conn.execute.assert_called()  # DB update issued
 
-
-# ============================================================
-# Task 2 (06.1-07): CR-01 / CR-03 / WR-03 / WR-04 RED tests
-# ============================================================
-
-class TestReconciliationCR0107:
-    """Tests for reconcile_once steady-state recovery + adopt_orphan wiring.
-
-    These drive the in-memory effects — not just the return-dict shape.
-    All RED until gateway.py reconcile_once is updated in 06.1-07.
-    """
-
-    def test_reconcile_once_reprotects_closed_but_held(self):
-        """CR-01: CLOSED-but-held position is re-armed in memory (SAFE-03).
-
-        When a code is in manager._positions with phase==CLOSED but broker still
-        holds shares (present in broker_map), reconcile_once must:
-          - NOT delete the position from _positions
-          - Re-arm to a managed phase (phase != CLOSED after call)
-          - Sync remaining_quantity to broker qty
-          - Audit reconcile_qty_drift
-          - Fire a DRIFT alert
-        """
-        from bot.position.state import PositionState, PositionPhase
-        import uuid
-
-        gw = _make_gateway_with_mocks()
-        # Broker still holds 150 shares
-        broker_df = pd.DataFrame([{
-            "code": "US.AAPL", "qty": 150, "average_cost": 151.0
-        }])
-        gw.get_positions = AsyncMock(return_value=(0, broker_df))
-
-        # In-memory position is CLOSED (the bug state: fail-open stop-out left it CLOSED)
-        mock_pos = MagicMock()
-        mock_pos.position_id = "pos-close-001"
-        mock_pos.phase = PositionPhase.CLOSED
-        mock_pos.remaining_quantity = 150
-
-        mock_manager = MagicMock()
-        mock_manager._positions = {"US.AAPL": mock_pos}
-        mock_manager._exiting = set()
-
-        mock_store = MagicMock()
-        mock_store.conn = MagicMock()
-
-        mock_alerter = MagicMock()
-        mock_alerter.send = AsyncMock()
-
-        async def _run():
-            return await gw.reconcile_once(
-                store=mock_store, manager=mock_manager, alerter=mock_alerter
-            )
-        result = asyncio.run(_run())
-
-        # Position must NOT be deleted from _positions
-        assert "US.AAPL" in mock_manager._positions, (
-            "CLOSED-but-held position must remain in _positions after re-arm"
-        )
-        # Phase must be re-armed (not CLOSED)
-        assert mock_pos.phase != PositionPhase.CLOSED, (
-            f"Position phase must be re-armed (not CLOSED), got {mock_pos.phase}"
-        )
-        # remaining_quantity must be synced to broker qty
-        assert mock_pos.remaining_quantity == 150, (
-            f"remaining_quantity must be synced to broker qty=150, got {mock_pos.remaining_quantity}"
-        )
-        # DRIFT alert must be fired
-        mock_alerter.send.assert_called()
-
-    def test_reconcile_once_qty_drift_adopts_broker_qty(self):
-        """CR-01: qty drift — stored remaining != broker qty → remaining updated.
-
-        When code is in both _positions and broker_map, with phase managed (ACTIVE),
-        but remaining_quantity differs, reconcile_once must update remaining_quantity
-        to broker qty and audit reconcile_qty_drift.
-        """
-        from bot.position.state import PositionState, PositionPhase
-
-        gw = _make_gateway_with_mocks()
-        # Broker has 180 shares; memory has 200
-        broker_df = pd.DataFrame([{
-            "code": "US.AAPL", "qty": 180, "average_cost": 150.0
-        }])
-        gw.get_positions = AsyncMock(return_value=(0, broker_df))
-
-        mock_pos = MagicMock()
-        mock_pos.position_id = "pos-drift-001"
-        mock_pos.phase = PositionPhase.ACTIVE
-        mock_pos.remaining_quantity = 200  # diverges from broker's 180
-
-        mock_manager = MagicMock()
-        mock_manager._positions = {"US.AAPL": mock_pos}
-        mock_manager._exiting = set()
-
-        mock_store = MagicMock()
-        mock_store.conn = MagicMock()
-        mock_alerter = MagicMock()
-        mock_alerter.send = AsyncMock()
-
-        async def _run():
-            return await gw.reconcile_once(
-                store=mock_store, manager=mock_manager, alerter=mock_alerter
-            )
-        asyncio.run(_run())
-
-        # remaining_quantity must be updated to broker qty
-        assert mock_pos.remaining_quantity == 180, (
-            f"remaining_quantity must be synced to 180 (broker), got {mock_pos.remaining_quantity}"
-        )
-        # DB update must have been issued
-        mock_store.conn.execute.assert_called()
-
-    def test_reconcile_once_orphan_registers_in_memory(self):
-        """CR-03: orphan broker position is registered in manager._positions via adopt_orphan.
-
-        When broker has a code not in manager._positions, reconcile_once must:
-          - Call manager.adopt_orphan(code=..., qty=..., avg_cost=..., stop=...)
-          - The code must be present in manager._positions after the call
-          - subscribe must be called once
-          - drift_orphan_adopted audit must be emitted (only when row actually inserted)
-        """
-        gw = _make_gateway_with_mocks()
-        # Broker has an orphan
-        broker_df = pd.DataFrame([{
-            "code": "US.NVDA", "qty": 100, "average_cost": 500.0
-        }])
-        gw.get_positions = AsyncMock(return_value=(0, broker_df))
-        gw._derive_lod_for_orphan = AsyncMock(return_value=495.0)
-        gw._compute_orphan_stop = MagicMock(return_value=490.0)
-        gw.subscribe = AsyncMock()
-
-        # Track adopt_orphan calls
-        adopted = {}
-        from bot.position.state import PositionState, PositionPhase
-        import uuid as _uuid
-        def _fake_adopt(code, qty, avg_cost, stop, position_id=None):
-            pos = MagicMock()
-            pos.phase = PositionPhase.ACTIVE
-            pos.remaining_quantity = qty
-            mock_manager._positions[code] = pos
-            adopted[code] = {"qty": qty, "avg_cost": avg_cost, "stop": stop}
-            return pos
-
-        mock_manager = MagicMock()
-        mock_manager._positions = {}
-        mock_manager._exiting = set()
-        mock_manager.adopt_orphan = MagicMock(side_effect=_fake_adopt)
-
-        mock_store = MagicMock()
-        cursor_mock = MagicMock()
-        cursor_mock.rowcount = 1  # simulate successful INSERT
-        mock_store.conn = MagicMock()
-        mock_store.conn.execute = MagicMock(return_value=cursor_mock)
-
-        mock_alerter = MagicMock()
-        mock_alerter.send = AsyncMock()
-
-        async def _run():
-            return await gw.reconcile_once(
-                store=mock_store, manager=mock_manager, alerter=mock_alerter
-            )
-        result = asyncio.run(_run())
-
-        # adopt_orphan must have been called
-        mock_manager.adopt_orphan.assert_called_once()
-        call_kwargs = mock_manager.adopt_orphan.call_args
-        assert call_kwargs is not None, "adopt_orphan was not called"
-
-        # Position must be in _positions
-        assert "US.NVDA" in mock_manager._positions, (
-            "Orphan must be registered in _positions after adopt_orphan call"
-        )
-
-        # subscribe must have been called
-        gw.subscribe.assert_called_once()
-
-    def test_reconcile_once_drift_alert_task_is_retained(self):
-        """WR-03: externally-closed DRIFT alert task is retained in self._bg_tasks.
-
-        The bare asyncio.create_task(alerter.send(...)) (unreferenced) at reconcile_once
-        line 822-824 must be replaced with a tracked reference. After reconcile_once,
-        gw._bg_tasks must exist and the gateway instance must have a _bg_tasks set.
-        """
-        gw = _make_gateway_with_mocks()
-        gw.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
-
-        mock_pos = MagicMock()
-        mock_pos.position_id = "pos-wr03-001"
-        mock_manager = MagicMock()
-        mock_manager._positions = {"US.AAPL": mock_pos}
-        mock_manager._exiting = set()
-
-        mock_store = MagicMock()
-        mock_store.conn = MagicMock()
-
-        mock_alerter = MagicMock()
-        mock_alerter.send = AsyncMock()
-
-        async def _run():
-            await gw.reconcile_once(
-                store=mock_store, manager=mock_manager, alerter=mock_alerter
-            )
-
-        asyncio.run(_run())
-
-        # _bg_tasks set must exist on the gateway (WR-03 retention)
-        assert hasattr(gw, "_bg_tasks"), (
-            "MoomooGateway must have a _bg_tasks set (WR-03: retain alert task reference)"
-        )
-        assert isinstance(gw._bg_tasks, set), (
-            f"_bg_tasks must be a set, got {type(gw._bg_tasks)}"
-        )
-
-    def test_reconcile_once_no_false_audit_on_insert_noop(self):
-        """WR-04: INSERT OR IGNORE no-op (rowcount==0) does NOT emit drift_orphan_adopted.
-
-        When the orphan INSERT OR IGNORE silently no-ops (collision / pre-existing row),
-        cursor.rowcount == 0, and drift_orphan_adopted must NOT be audited.
-        A reconcile_orphan_insert_noop log/audit should be emitted instead.
-        """
-        import json
-        import tempfile
-        import os
-        import bot.safety.audit_log as _al
-
-        gw = _make_gateway_with_mocks()
-        broker_df = pd.DataFrame([{
-            "code": "US.MSFT", "qty": 50, "average_cost": 300.0
-        }])
-        gw.get_positions = AsyncMock(return_value=(0, broker_df))
-        gw._derive_lod_for_orphan = AsyncMock(return_value=295.0)
-        gw._compute_orphan_stop = MagicMock(return_value=292.0)
-        gw.subscribe = AsyncMock()
-
-        mock_manager = MagicMock()
-        mock_manager._positions = {}
-        mock_manager._exiting = set()
-        # adopt_orphan should NOT be called when rowcount == 0
-
-        mock_store = MagicMock()
-        cursor_mock = MagicMock()
-        cursor_mock.rowcount = 0  # INSERT OR IGNORE no-op (collision)
-        mock_store.conn = MagicMock()
-        mock_store.conn.execute = MagicMock(return_value=cursor_mock)
-
-        mock_alerter = MagicMock()
-        mock_alerter.send = AsyncMock()
-
-        # Capture audit writes
-        audit_entries = []
-        orig_append = _al.append_audit
-        _al.append_audit = lambda entry: audit_entries.append(entry)
-        try:
-            async def _run():
-                return await gw.reconcile_once(
-                    store=mock_store, manager=mock_manager, alerter=mock_alerter
-                )
-            asyncio.run(_run())
-        finally:
-            _al.append_audit = orig_append
-
-        # drift_orphan_adopted must NOT be in audit entries
-        adopted_events = [e for e in audit_entries if e.get("event") == "drift_orphan_adopted"]
-        assert len(adopted_events) == 0, (
-            f"drift_orphan_adopted must NOT be audited on no-op INSERT; "
-            f"got {adopted_events}"
-        )
-        # adopt_orphan must NOT be called
-        if hasattr(mock_manager.adopt_orphan, "call_count"):
-            assert mock_manager.adopt_orphan.call_count == 0, (
-                "adopt_orphan must NOT be called on INSERT no-op (rowcount==0)"
-            )
