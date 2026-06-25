@@ -206,13 +206,18 @@ class PositionManager:
         if pos.phase in (PositionPhase.BREAKEVEN, PositionPhase.TRAILING):
             new_swing_low = self._compute_swing_low(bar.code)
 
+        # Capture prev_phase BEFORE evaluate_close mutates pos.phase.
+        # Used to derive the correct exit reason in _trigger_stop_out
+        # (breakeven vs trail_stop vs stop_out — ALERT-02).
+        prev_phase = pos.phase
+
         action, qty = pos.evaluate_close(bar.close, self._cfg, new_swing_low)
 
         if action == FSM_ACTION_NONE:
             return
 
         if action == FSM_ACTION_STOP_OUT:
-            await self._trigger_stop_out(pos, qty, bar.time_key)
+            await self._trigger_stop_out(pos, qty, bar.time_key, prev_phase)
         elif action == FSM_ACTION_PARTIAL:
             await self._trigger_partial_profit(pos, qty, bar.time_key)
         elif action == FSM_ACTION_BREAKEVEN:
@@ -383,6 +388,8 @@ class PositionManager:
                         pos.remaining_quantity = 0
                         pos.phase = PositionPhase.CLOSED
                         pos.updated_at = now_et()
+                        # Record force_close reason for the alert (ALERT-02). In-memory only.
+                        pos.pending_exit_reason = "force_close"
                         self._persist_position(pos, event="force_close")
                         _logger.info("force_close_filled", code=code, qty=qty)
             except Exception:
@@ -548,6 +555,9 @@ class PositionManager:
             qty:      Number of shares to sell (floor(remaining * partial_profit_fraction)).
             time_key: Closed bar time_key (for logging).
         """
+        # Record the partial exit reason (ALERT-02). In-memory only — not persisted.
+        pos.pending_exit_reason = "partial"
+
         pos.updated_at = now_et()
         self._persist_position(pos, event="partial_profit")
 
@@ -592,7 +602,7 @@ class PositionManager:
         )
 
     async def _trigger_stop_out(
-        self, pos: PositionState, qty: int, time_key: str
+        self, pos: PositionState, qty: int, time_key: str, prev_phase=None
     ) -> None:
         """Any phase → CLOSED via stop: submit a stop-out exit for qty remaining shares.
 
@@ -601,10 +611,23 @@ class PositionManager:
         ask the engine to place the exit order.
 
         Args:
-            pos:      PositionState (phase already CLOSED by evaluate_close).
-            qty:      Remaining shares to exit.
-            time_key: Closed bar time_key (for logging).
+            pos:        PositionState (phase already CLOSED by evaluate_close).
+            qty:        Remaining shares to exit.
+            time_key:   Closed bar time_key (for logging).
+            prev_phase: The PositionPhase the position was in BEFORE evaluate_close
+                        mutated it to CLOSED. Used to derive the true exit reason
+                        (ALERT-02): BREAKEVEN → "breakeven", TRAILING → "trail_stop",
+                        anything else (ACTIVE / PARTIAL_TAKEN) → "stop_out".
         """
+        # Record the true exit reason derived from the pre-close phase (ALERT-02).
+        # This annotation is in-memory only — never persisted to DB.
+        if prev_phase == PositionPhase.BREAKEVEN:
+            pos.pending_exit_reason = "breakeven"
+        elif prev_phase == PositionPhase.TRAILING:
+            pos.pending_exit_reason = "trail_stop"
+        else:
+            pos.pending_exit_reason = "stop_out"
+
         pos.updated_at = now_et()
         self._persist_position(pos, event="stop_out")
 

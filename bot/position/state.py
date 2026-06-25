@@ -116,6 +116,10 @@ class PositionState:
     avg_fill_price: Optional[float] = None
     opened_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # In-memory FSM exit cause (never persisted — DB upsert column list is fixed).
+    # Set at the FSM trigger point before the exit fill arrives so the alerter
+    # can pass the real reason (not a hardcoded constant) to on_exit_alert (ALERT-02).
+    pending_exit_reason: Optional[str] = None
 
     # ============================================================
     # Phase 4 FSM Methods
