@@ -35,7 +35,7 @@ import datetime as _dt
 import pandas as pd
 from collections import deque
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from bot.execution.events import FillEvent
 from bot.position.state import (
@@ -118,22 +118,41 @@ class PositionManager:
                   for tests that do not wire a live BarAggregator).
     """
 
-    def __init__(self, store, engine, cfg, strategy, bar_buffer=None) -> None:
+    def __init__(
+        self,
+        store,
+        engine,
+        cfg,
+        strategy,
+        bar_buffer=None,
+        on_entry_alert: Optional[Callable] = None,
+        on_exit_alert: Optional[Callable] = None,
+    ) -> None:
         """Initialise PositionManager.
 
         Args:
-            store:      StateStore (open).
-            engine:     ExecutionEngine (injected).
-            cfg:        StrategyConfig with FSM thresholds.
-            strategy:   TrendJoinLong with compute_swing_low_2_2().
-            bar_buffer: Optional Dict[str, deque] from BarAggregator._bar_buffer.
-                        Used to build the bars DataFrame for swing-low computation.
+            store:          StateStore (open).
+            engine:         ExecutionEngine (injected).
+            cfg:            StrategyConfig with FSM thresholds.
+            strategy:       TrendJoinLong with compute_swing_low_2_2().
+            bar_buffer:     Optional Dict[str, deque] from BarAggregator._bar_buffer.
+                            Used to build the bars DataFrame for swing-low computation.
+            on_entry_alert: Optional callable invoked after an entry fill is processed.
+                            Signature: on_entry_alert(code, qty, entry_price, initial_stop).
+                            None by default — backward compatible with existing call sites.
+                            Invocation failures are logged and never propagate (ALERT-04).
+            on_exit_alert:  Optional callable invoked after an exit fill closes a position.
+                            Signature: on_exit_alert(code, exit_reason, r_multiple).
+                            None by default — backward compatible with existing call sites.
+                            Invocation failures are logged and never propagate (ALERT-04).
         """
         self._store = store
         self._engine = engine
         self._cfg = cfg
         self._strategy = strategy
         self._bar_buffer: Optional[Dict[str, deque]] = bar_buffer
+        self._on_entry_alert: Optional[Callable] = on_entry_alert
+        self._on_exit_alert: Optional[Callable] = on_exit_alert
 
         # In-memory dict keyed by stock code (e.g. "US.AAPL" → PositionState).
         # Only one live position per code is supported at a time (EXEC-04 guard).
@@ -435,6 +454,19 @@ class PositionManager:
             avg_fill_price=fill.avg_fill_price,
         )
 
+        # Fire optional entry alert callback (ALERT-04: isolation — callback failure
+        # must never propagate into fill processing).
+        if self._on_entry_alert is not None:
+            try:
+                self._on_entry_alert(
+                    pos.code,
+                    pos.remaining_quantity,
+                    pos.avg_fill_price or pos.entry_price,
+                    pos.initial_stop,
+                )
+            except Exception:
+                _logger.warning("on_entry_alert_error", code=pos.code, exc_info=True)
+
     def _on_exit_fill(self, fill: FillEvent) -> None:
         """Handle an exit fill: decrement remaining_quantity; close only when qty == 0.
 
@@ -479,6 +511,24 @@ class PositionManager:
             new_remaining=pos.remaining_quantity,
             phase=pos.phase.value,
         )
+
+        # Fire optional exit alert callback when position is fully closed
+        # (ALERT-04: isolation — callback failure must never propagate).
+        if pos.remaining_quantity == 0 and self._on_exit_alert is not None:
+            try:
+                # Compute R-multiple: (exit_price - entry) / (entry - initial_stop)
+                entry = pos.entry_price or 0.0
+                stop = pos.initial_stop or 0.0
+                exit_price = fill.avg_fill_price or entry
+                risk = entry - stop
+                r_multiple = (exit_price - entry) / risk if risk != 0 else 0.0
+                self._on_exit_alert(
+                    pos.code,
+                    "exit_fill",
+                    round(r_multiple, 2),
+                )
+            except Exception:
+                _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
 
     # ============================================================
     # Internal — FSM transition handlers (called by on_bar)

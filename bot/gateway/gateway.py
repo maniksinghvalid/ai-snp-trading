@@ -492,6 +492,49 @@ class MoomooGateway:
         await loop.run_in_executor(None, _unsubscribe_blocking)
         _logger.info("unsubscribed_k5m", codes=codes, count=len(codes))
 
+    async def get_global_state(self) -> dict:
+        """Return a health-check dict from the OpenD global state (SVC-02).
+
+        Calls quote_ctx.get_global_state() in a thread executor (blocking SDK
+        call — Anti-Pattern 5 from ARCHITECTURE.md). Returns a plain dict with
+        connected/qot_logined/trd_logined/server_ver/market_us. Never raises.
+
+        Return dict:
+          connected (bool): True when both qot_logined and trd_logined are truthy.
+          qot_logined (bool): Quote context logged in to OpenD.
+          trd_logined (bool): Trade context logged in to OpenD.
+          server_ver (str): OpenD server version string (may be empty on failure).
+          market_us (str): US market state string (may be empty on failure).
+
+        Falls back to {"connected": False, "qot_logined": False, "trd_logined": False}
+        on non-RET_OK, empty data, or any exception — never raises (WR-03).
+        """
+        _FALLBACK = {"connected": False, "qot_logined": False, "trd_logined": False}
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _blocking():
+                return self._quote_ctx.get_global_state()
+
+            ret, data = await loop.run_in_executor(None, _blocking)
+
+            if ret != RET_OK or not data:
+                _logger.warning("get_global_state_failed", ret=ret)
+                return _FALLBACK
+
+            qot = bool(data.get("qot_logined"))
+            trd = bool(data.get("trd_logined"))
+            return {
+                "connected": qot and trd,
+                "qot_logined": qot,
+                "trd_logined": trd,
+                "server_ver": str(data.get("server_ver", "") or ""),
+                "market_us": str(data.get("market_us", "") or ""),
+            }
+        except Exception:
+            _logger.warning("get_global_state_exception", exc_info=True)
+            return _FALLBACK
+
     # --------------------------------------------------------
     # Order Methods (EXEC-01/EXEC-02/EXEC-03/EXEC-05)
     # --------------------------------------------------------
