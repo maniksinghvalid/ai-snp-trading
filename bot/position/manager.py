@@ -1032,6 +1032,71 @@ class PositionManager:
             phase=pos.phase.value,
         )
 
+    def adopt_orphan(
+        self,
+        code: str,
+        qty: int,
+        avg_cost: float,
+        stop: float,
+        position_id: Optional[str] = None,
+    ) -> PositionState:
+        """Build and register an adopted broker orphan position in-memory + DB (CR-03).
+
+        Co-locates the in-memory/DB registration with the manager's invariants so the
+        adopted position is immediately reachable by on_bar the same cycle (SAFE-03
+        'adopt-and-protect'). The gateway owns feed subscription (separation of
+        concerns) — this method ONLY owns state registration.
+
+        DB-first write: _persist_position commits the row before the in-memory
+        assignment, honouring Pitfall G. If _persist_position raises, the
+        in-memory registration is skipped and the exception propagates.
+
+        Args:
+            code:        Moomoo-format stock code (e.g. "US.AAPL").
+            qty:         Broker-reported quantity (both full_quantity and
+                         remaining_quantity — orphan has no partial exits yet).
+            avg_cost:    Broker-reported average cost (used as entry_price and
+                         avg_fill_price — best available at adoption time).
+            stop:        Derived orphan stop price (initial_stop == trail_stop).
+            position_id: Optional position ID; a new uuid4 string is generated
+                         when None.
+
+        Returns:
+            The registered PositionState (phase=ACTIVE, registered in _positions).
+        """
+        import uuid as _uuid
+
+        pid = position_id or str(_uuid.uuid4())
+        now = now_et()
+
+        pos = PositionState(
+            position_id=pid,
+            code=code,
+            phase=PositionPhase.ACTIVE,
+            entry_price=avg_cost,
+            initial_stop=stop,
+            trail_stop=stop,
+            full_quantity=qty,
+            remaining_quantity=qty,
+            entry_order_id="",
+            avg_fill_price=avg_cost,
+            opened_at=now,
+            updated_at=now,
+        )
+
+        # DB-first (Pitfall G): persist before in-memory write
+        self._persist_position(pos, event="orphan_adopted")
+        self._positions[code] = pos
+
+        _logger.info(
+            "orphan_adopted_in_memory",
+            code=code,
+            qty=qty,
+            stop=stop,
+            position_id=pid,
+        )
+        return pos
+
 
 # ============================================================
 # Helper — reconstruct PositionState from a DB row dict
