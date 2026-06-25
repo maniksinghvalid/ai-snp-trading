@@ -2190,3 +2190,120 @@ def test_exit_alert_fires_after_manage_exit(tmp_state_db):
         assert code == "US.AAPL", f"Expected code='US.AAPL', got {code!r}"
     finally:
         store.close()
+
+
+# ============================================================
+# Test: manager.adopt_orphan() — CR-03 in-memory registration
+# ============================================================
+
+class TestAdoptOrphan:
+    """Tests for PositionManager.adopt_orphan() — CR-03 gap closure.
+
+    An orphan adopted mid-session must be registered in manager._positions AND
+    immediately reachable by on_bar (stop/trail/exit the same cycle — SAFE-03
+    'adopt-and-protect').
+    """
+
+    def test_adopt_orphan_registers_in_positions(
+        self, manager, open_store, mock_engine, mock_strategy
+    ):
+        """adopt_orphan writes PositionState to _positions with correct fields.
+
+        After adopt_orphan(code="US.AAPL", qty=200, avg_cost=150.0, stop=148.5,
+        position_id="P1"), manager._positions["US.AAPL"] must exist with:
+          - phase == PositionPhase.ACTIVE
+          - remaining_quantity == 200
+          - full_quantity == 200
+          - entry_price == 150.0
+          - initial_stop == 148.5
+          - trail_stop == 148.5
+        The row must also be persisted to DB (get_open_positions returns it).
+        """
+        result = manager.adopt_orphan(
+            code="US.AAPL",
+            qty=200,
+            avg_cost=150.0,
+            stop=148.5,
+            position_id="P1",
+        )
+
+        # In-memory registration
+        assert "US.AAPL" in manager._positions, (
+            "adopt_orphan must register position in manager._positions"
+        )
+        pos = manager._positions["US.AAPL"]
+        assert pos.phase == PositionPhase.ACTIVE, (
+            f"Expected ACTIVE, got {pos.phase}"
+        )
+        assert pos.remaining_quantity == 200, (
+            f"Expected remaining_quantity=200, got {pos.remaining_quantity}"
+        )
+        assert pos.full_quantity == 200, (
+            f"Expected full_quantity=200, got {pos.full_quantity}"
+        )
+        assert pos.entry_price == 150.0, (
+            f"Expected entry_price=150.0, got {pos.entry_price}"
+        )
+        assert pos.initial_stop == 148.5, (
+            f"Expected initial_stop=148.5, got {pos.initial_stop}"
+        )
+        assert pos.trail_stop == 148.5, (
+            f"Expected trail_stop=148.5, got {pos.trail_stop}"
+        )
+        assert pos.entry_order_id == "", (
+            f"Expected entry_order_id='', got {pos.entry_order_id!r}"
+        )
+        assert result is pos, "adopt_orphan must return the registered PositionState"
+
+        # DB persistence — get_open_positions must include it
+        rows = open_store.get_open_positions()
+        codes_in_db = [r["code"] for r in rows]
+        assert "US.AAPL" in codes_in_db, (
+            "adopt_orphan must persist the position to DB (get_open_positions)"
+        )
+
+    def test_adopt_orphan_position_is_managed_by_on_bar(
+        self, open_store, mock_strategy
+    ):
+        """After adopt_orphan, on_bar with close <= trail_stop triggers STOP_OUT.
+
+        Proves the adopted position is reachable by on_bar the same cycle —
+        the 'protect' half of adopt-and-protect (CR-03 / SAFE-03).
+        """
+        stop_out_calls = []
+
+        # Wire manage_exit to return 200 (full fill) so the STOP_OUT path completes
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=200)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        # Adopt the orphan into the manager
+        mgr.adopt_orphan(
+            code="US.AAPL",
+            qty=200,
+            avg_cost=150.0,
+            stop=148.5,
+        )
+
+        # Confirm it is registered
+        assert "US.AAPL" in mgr._positions, (
+            "Position must be in _positions before on_bar test"
+        )
+
+        # bar.close <= trail_stop (148.5) → must trigger STOP_OUT
+        bar = _make_bar(close=147.0)
+        asyncio.run(mgr.on_bar(bar))
+
+        pos = mgr._positions.get("US.AAPL")
+        # After a full fill, the position should be CLOSED (STOP_OUT path closes it)
+        assert pos is None or pos.phase == PositionPhase.CLOSED, (
+            f"Expected CLOSED after stop-out on adopted position, got "
+            f"{pos.phase if pos else 'None (removed)'}"
+        )
