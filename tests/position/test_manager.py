@@ -1713,3 +1713,76 @@ class TestExitAlertRealReason:
         # Partial exit still happened despite callback failure
         assert pos.phase == PositionPhase.PARTIAL_TAKEN
         assert call_count[0] == 1, "Callback must have been attempted once"
+
+
+# ============================================================
+# Test: exit alert fires after manage_exit() returns filled_qty (D-01/D-02 / WARNING-01)
+# ============================================================
+
+def test_exit_alert_fires_after_manage_exit(tmp_state_db):
+    """After D-01/D-02 fix: manage_exit() return value drives on_exit_alert (WARNING-01).
+
+    With engine.manage_exit mocked to return filled_qty=10, a stop-out (bar.close
+    below trail_stop) must fire the on_exit_alert callback with (code, reason,
+    r_multiple). The test asserts the D-01/D-02 contract: alert driven by the
+    manage_exit() return value, not by exit_order_id push-match.
+
+    RED today: _place_exit_order() returns None and call sites set pos.exit_order_id
+    instead of applying filled_qty. The on_exit_alert callback is never called.
+    Turns GREEN when Plan 06.1-03 fixes _place_exit_order and its call sites.
+    """
+    from collections import deque
+    from bot.state.store import StateStore
+
+    # Build mock engine whose manage_exit returns filled_qty=10 (simulates sell fill)
+    mock_engine = MagicMock()
+    mock_engine.manage_exit = AsyncMock(return_value=10)
+
+    mock_strategy = MagicMock()
+    mock_strategy.compute_swing_low_2_2 = MagicMock(return_value=99.0)
+
+    # Track on_exit_alert calls
+    alert_calls = []
+
+    def on_exit_alert_cb(code, reason, r_multiple):
+        alert_calls.append((code, reason, r_multiple))
+
+    store = StateStore(db_path=tmp_state_db).open()
+    try:
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=on_exit_alert_cb,
+        )
+
+        # Position in ACTIVE phase; trail_stop=98.0 → bar.close=97.0 triggers stop-out
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            avg_fill_price=100.0,
+            full_quantity=100,
+            remaining_quantity=100,
+        )
+        mgr._positions["US.AAPL"] = pos
+        store.upsert_position(pos)
+
+        # bar.close=97.0 is below trail_stop=98.0 — triggers stop-out path
+        bar = _make_bar(close=97.0)
+
+        # INTENDED RED: manage_exit() returns 10 but _place_exit_order() returns None
+        # today, so the stop-out block sets pos.exit_order_id=None and never calls
+        # on_exit_alert. The assertion below will fail until Plan 06.1-03 lands.
+        asyncio.run(mgr.on_bar(bar))
+
+        assert len(alert_calls) == 1, (
+            f"on_exit_alert must be called once after stop-out fill; calls={alert_calls}"
+        )
+        code, reason, r_multiple = alert_calls[0]
+        assert code == "US.AAPL", f"Expected code='US.AAPL', got {code!r}"
+    finally:
+        store.close()
