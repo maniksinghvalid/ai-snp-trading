@@ -643,3 +643,86 @@ class TestGetMarketSnapshot:
 
         asyncio.run(_run())
         gw._quote_ctx.get_market_snapshot.assert_called_once_with(codes)
+
+
+# ============================================================
+# MoomooGateway.get_global_state() — health check (SVC-02)
+# Added in Phase 5 Plan 00, Task 3
+# ============================================================
+
+class TestGetGlobalState:
+    """get_global_state() returns a health-check dict and never raises."""
+
+    def test_get_global_state_returns_dict_on_ret_ok(self):
+        """RET_OK + both logined=True → connected:True dict."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_global_state.return_value = (
+            0,
+            {"qot_logined": True, "trd_logined": True, "server_ver": "10.4", "market_us": "1"},
+        )
+
+        async def _run():
+            return await gw.get_global_state()
+
+        result = asyncio.run(_run())
+        assert isinstance(result, dict)
+        assert result["connected"] is True
+        assert result["qot_logined"] is True
+        assert result["trd_logined"] is True
+
+    def test_get_global_state_connected_false_when_only_qot_logined(self):
+        """connected:False when trd_logined is False even if qot_logined is True."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_global_state.return_value = (
+            0,
+            {"qot_logined": True, "trd_logined": False, "server_ver": "", "market_us": ""},
+        )
+
+        async def _run():
+            return await gw.get_global_state()
+
+        result = asyncio.run(_run())
+        assert result["connected"] is False
+
+    def test_get_global_state_connected_false_on_non_ret_ok(self):
+        """Non-RET_OK → connected:False without raising."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_global_state.return_value = (1, {})
+
+        async def _run():
+            return await gw.get_global_state()
+
+        result = asyncio.run(_run())
+        assert isinstance(result, dict)
+        assert result["connected"] is False
+        assert result["qot_logined"] is False
+        assert result["trd_logined"] is False
+
+    def test_get_global_state_never_raises_on_exception(self):
+        """SDK raises → get_global_state returns fallback dict (never raises)."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_global_state.side_effect = RuntimeError("connection lost")
+
+        async def _run():
+            return await gw.get_global_state()
+
+        # Must NOT raise — returns safe fallback
+        result = asyncio.run(_run())
+        assert isinstance(result, dict)
+        assert result["connected"] is False
+
+    def test_get_global_state_dict_has_required_keys(self):
+        """Return dict always has connected, qot_logined, trd_logined keys."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_global_state.return_value = (
+            0,
+            {"qot_logined": True, "trd_logined": True, "server_ver": "10.4", "market_us": "1"},
+        )
+
+        async def _run():
+            return await gw.get_global_state()
+
+        result = asyncio.run(_run())
+        assert "connected" in result
+        assert "qot_logined" in result
+        assert "trd_logined" in result
