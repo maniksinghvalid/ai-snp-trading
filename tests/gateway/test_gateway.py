@@ -241,24 +241,43 @@ class TestReconciliation:
     def test_reconcile_once_returns_dict(self):
         """reconcile_once must return a dict (broker truth payload)."""
         gw = _make_gateway_with_mocks()
+        gw.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_store = MagicMock()
+        mock_store.conn = MagicMock()
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
 
         async def _run():
-            return await gw.reconcile_once()
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
 
         result = asyncio.run(_run())
         assert isinstance(result, dict)
 
     def test_reconcile_once_dict_has_required_keys(self):
-        """reconcile_once dict must have 'positions', 'accounts', 'drift' keys."""
+        """reconcile_once dict must have 'closed' and 'adopted' keys (SAFE-03 drift result)."""
         gw = _make_gateway_with_mocks()
+        gw.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_store = MagicMock()
+        mock_store.conn = MagicMock()
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
 
         async def _run():
-            return await gw.reconcile_once()
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
 
         result = asyncio.run(_run())
-        assert "positions" in result
-        assert "accounts" in result
-        assert "drift" in result
+        assert "closed" in result
+        assert "adopted" in result
 
     def test_reconciliation_loop_default_interval_in_range(self):
         """reconciliation_loop default interval_s must be between 60 and 90 seconds."""
@@ -277,19 +296,29 @@ class TestReconciliation:
         """
         gw = _make_gateway_with_mocks()
         calls = {"n": 0}
+        mock_store = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_alerter = MagicMock()
 
-        async def flaky_reconcile():
+        async def flaky_reconcile(**kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("simulated broker blip")
-            return {"positions": None, "accounts": None, "drift": {}}
+            return {"closed": [], "adopted": []}
 
         gw.reconcile_once = flaky_reconcile
 
         async def _run():
             # Tiny interval so the loop iterates quickly; cancel once it has
             # survived the first (raising) iteration and done a second one.
-            task = asyncio.ensure_future(gw.reconciliation_loop(interval_s=0.001))
+            task = asyncio.ensure_future(
+                gw.reconciliation_loop(
+                    store=mock_store, manager=mock_manager, alerter=mock_alerter,
+                    interval_s=0.001,
+                )
+            )
             # Wait until at least 2 calls (1 failure + 1 success) happened
             for _ in range(1000):
                 await asyncio.sleep(0.001)
@@ -310,15 +339,23 @@ class TestReconciliation:
         so the loop shuts down cleanly (not swallowed as a transient error).
         """
         gw = _make_gateway_with_mocks()
+        mock_store = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_alerter = MagicMock()
 
-        async def cancelling_reconcile():
+        async def cancelling_reconcile(**kwargs):
             raise asyncio.CancelledError()
 
         gw.reconcile_once = cancelling_reconcile
 
         async def _run():
             with pytest.raises(asyncio.CancelledError):
-                await gw.reconciliation_loop(interval_s=0.001)
+                await gw.reconciliation_loop(
+                    store=mock_store, manager=mock_manager, alerter=mock_alerter,
+                    interval_s=0.001,
+                )
 
         asyncio.run(_run())
 
