@@ -453,14 +453,22 @@ class TradingBot:
           1. _readiness_gate() — D-08 gate: connect + reconcile + reconstruct + entries_enabled
           2. _register_jobs() — add five cron/interval jobs to the scheduler
           3. scheduler.start() — begin dispatching jobs on the asyncio loop
-          4. while not kill_switch.triggered: check_file + asyncio.sleep(1)  (D-01 always-on)
-          5. finally: _shutdown()  — D-07 graceful shutdown (flush already ran via callback)
+          4. watchdog.run() launched via asyncio.create_task (SVC-02, Pitfall 3 single-loop)
+          5. while not kill_switch.triggered: check_file + asyncio.sleep(1)  (D-01 always-on)
+          6. finally: cancel watchdog task + _shutdown()  — D-07 graceful shutdown
         """
+        self._watchdog_task = None
         try:
             await self._readiness_gate()
             self._register_jobs()
             self._scheduler.start()
             _logger.info("bot_started")
+
+            # Launch watchdog coroutine on the shared event loop (SVC-02, D-02)
+            # Starts AFTER the D-08 readiness gate (connection already confirmed)
+            if self._watchdog is not None:
+                self._watchdog_task = asyncio.create_task(self._watchdog.run())
+                _logger.info("watchdog_started")
 
             # Always-on loop (D-01) — polls kill-switch sentinel file and triggered flag
             while not self._kill_switch.triggered:
@@ -474,4 +482,13 @@ class TradingBot:
             _logger.error("bot_run_error", exc_info=True)
             raise
         finally:
+            # Cancel the watchdog task cleanly alongside scheduler shutdown (D-07)
+            if self._watchdog_task is not None:
+                self._watchdog_task.cancel()
+                try:
+                    await self._watchdog_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             await self._shutdown()

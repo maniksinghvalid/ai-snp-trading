@@ -9,7 +9,8 @@ is only reached when main() is called (from bot/__main__.py).
 Note: KillSwitch.register_flush(position_manager.flush_all) is wired INSIDE
 TradingBot._readiness_gate() and TradingBot._register_jobs() — not here (R-04-01).
 D-07 graceful shutdown (flush + audit + gateway.close + bot-stopped alert) runs
-in TradingBot.run()'s finally block.
+in TradingBot.run()'s finally block. OpenDWatchdog (SVC-02) is constructed here and
+injected into the bot after construction (watchdog needs bot ref for _entries_enabled).
 
 Exports: main
 """
@@ -25,6 +26,7 @@ from bot.safety.kill_switch import KillSwitch
 from bot.safety.logger import configure_logging, get_logger
 from bot.service.alerter import TelegramAlerter
 from bot.service.bot import TradingBot
+from bot.service.watchdog import OpenDWatchdog
 from bot.state.store import StateStore
 from bot.strategy.trend_join_long import TrendJoinLong
 
@@ -46,7 +48,7 @@ def main() -> None:
       5. Construct PositionManager with on_entry_alert/on_exit_alert lambdas that
          dispatch via asyncio.create_task (fire-and-forget, ALERT-04)
       6. Construct KillSwitch
-      7. Construct TradingBot — watchdog=None here (05-02 wires the real OpenDWatchdog)
+      7. Construct TradingBot then OpenDWatchdog (watchdog needs bot ref) — inject via bot._watchdog
       8. asyncio.run(bot.run())
     """
     # Step 1: Configure structured logging before any component is constructed
@@ -97,7 +99,7 @@ def main() -> None:
     # Step 6: Construct KillSwitch (flush registration happens inside TradingBot)
     kill_switch = KillSwitch()
 
-    # Step 7: Construct TradingBot — watchdog=None (05-02 wires the real OpenDWatchdog)
+    # Step 7a: Construct TradingBot (watchdog injected after construction — needs bot ref)
     bot = TradingBot(
         cfg=cfg,
         gateway=gateway,
@@ -107,8 +109,17 @@ def main() -> None:
         execution_engine=engine,
         kill_switch=kill_switch,
         alerter=alerter,
-        watchdog=None,
+        watchdog=None,  # set below after watchdog construction
     )
+
+    # Step 7b: Construct OpenDWatchdog with bot reference (SVC-02)
+    watchdog = OpenDWatchdog(
+        gateway=gateway,
+        bot=bot,
+        alerter=alerter,
+        cfg=cfg,
+    )
+    bot._watchdog = watchdog
 
     # Step 8: Run the bot's async lifecycle (blocks until kill-switch triggered)
     asyncio.run(bot.run())
