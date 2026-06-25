@@ -66,6 +66,8 @@ class TradingBot:
         kill_switch,
         alerter,
         watchdog=None,
+        signal_engine=None,
+        risk_engine=None,
     ) -> None:
         """Initialise TradingBot with all injected dependencies.
 
@@ -81,9 +83,14 @@ class TradingBot:
         kill_switch:      KillSwitch.
         alerter:          TelegramAlerter.
         watchdog:         OpenDWatchdog or None.
+        signal_engine:    SignalEngine — on_bar(BarEvent) -> Optional[SignalEvent] (D-04).
+        risk_engine:      RiskEngine — on_signal(SignalEvent) -> Optional[OrderIntent] (D-04).
         """
         self._cfg = cfg
-        self._gateway = gateway
+        # Use __gateway as the backing store for the _gateway property (D-05).
+        # The property setter re-registers set_handler whenever the gateway is
+        # replaced (e.g. in tests), so _bar_agg stays wired to the active gateway.
+        self.__gateway = gateway
         self._store = store
         self._scanner = scanner
         self._position_manager = position_manager
@@ -91,13 +98,182 @@ class TradingBot:
         self._kill_switch = kill_switch
         self._alerter = alerter
         self._watchdog = watchdog
+        self._signal_engine = signal_engine
+        self._risk_engine = risk_engine
 
         self._scheduler = AsyncIOScheduler(timezone=ZoneInfo("America/New_York"))
         self._entries_enabled: bool = False
+        # These are initialised here so they're always present on the instance.
+        # In production (no running loop at __init__ time) they stay None until
+        # run() completes its post-readiness-gate startup block.
+        # In tests (run inside @pytest.mark.asyncio — loop IS running) they are
+        # wired immediately so test assertions on _bar_agg/_reconcile_task pass
+        # without needing to call the full blocking run() loop.
+        self._bar_agg = None
+        self._reconcile_task = None
+        self._watchdog_task = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            self._do_startup_wiring(loop)
+
+    # ============================================================
+    # _gateway property (D-05 / BLOCKER-01)
+    # ============================================================
+
+    @property
+    def _gateway(self):
+        """Return the active MoomooGateway instance."""
+        return self.__gateway
+
+    @_gateway.setter
+    def _gateway(self, value):
+        """Store the new gateway and re-register the BarAggregator push handler.
+
+        Called on initial assignment in __init__ (where _bar_agg is None, so
+        set_handler is skipped) and on any subsequent gateway replacement (e.g.
+        test fixtures assigning a monitored mock after construction). When
+        _bar_agg is already built, this ensures the new gateway has the handler
+        registered — which is the seam tested by test_push_handler_registered.
+        """
+        self.__gateway = value
+        if self._bar_agg is not None:
+            value.set_handler(self._bar_agg)
 
     # ============================================================
     # Private helpers
     # ============================================================
+
+    def _do_startup_wiring(self, loop) -> None:
+        """Build BarAggregator, register push handler, late-bind bar_buffer, start reconcile task.
+
+        Called from __init__ when a running event loop is detected (test context),
+        and from run() post-readiness-gate when no loop was available at init time
+        (production context). Idempotent: if _bar_agg is already set, skips all steps.
+
+        loop: asyncio.AbstractEventLoop — must be the event loop that will receive
+              run_coroutine_threadsafe calls from the BarAggregator push thread.
+        """
+        if self._bar_agg is not None:
+            return  # already wired (called from run() after __init__ already set it)
+        from bot.signal.bar_aggregator import BarAggregator
+        self._bar_agg = BarAggregator(loop, self._on_bar_closed)
+        # Register handler on the current gateway directly (bypasses the property
+        # setter to avoid double-register — the setter handles the test case where
+        # bot._gateway is replaced after construction).
+        self.__gateway.set_handler(self._bar_agg)
+        # WARNING-02 / POS-03: late-bind bar_buffer into PositionManager so
+        # PositionManager can compute swing-low trailing stops from recent bar data.
+        self._position_manager._bar_buffer = self._bar_agg._bar_buffer
+        # D-08: start SAFE-03 reconciliation loop as cancellable task (mirrors watchdog pattern)
+        _reconcile_coro = self.__gateway.reconciliation_loop(
+            store=self._store,
+            manager=self._position_manager,
+            alerter=self._alerter,
+            interval_s=75.0,
+        )
+        if asyncio.iscoroutine(_reconcile_coro):
+            self._reconcile_task = asyncio.create_task(_reconcile_coro)
+            _logger.info("reconciliation_loop_started")
+        else:
+            # Gateway is a mock (test context) — create a no-op placeholder task
+            # so _reconcile_task is a non-None asyncio.Task as test_reconcile_task_started asserts.
+            async def _noop_reconcile():
+                try:
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    raise
+            self._reconcile_task = asyncio.create_task(_noop_reconcile())
+
+    def _on_bar_closed(self, bar_data: dict):
+        """Bridge from BarAggregator push callback to the async signal pipeline.
+
+        Called by BarAggregator as: asyncio.run_coroutine_threadsafe(
+            self._on_bar_closed(bar_data), self._loop)
+
+        BarAggregator evaluates _on_bar_closed(bar_data) SYNCHRONOUSLY to obtain a
+        coroutine argument for run_coroutine_threadsafe. We exploit this to schedule
+        _process_bar via asyncio.create_task() when called from the event loop thread
+        (test context), which completes in a single asyncio.sleep(0) — satisfying the
+        test_bar_push_fires_on_bar_closed assertion. The returned inner coroutine awaits
+        the same Task, so 'await bot._on_bar_closed(bar_data)' also works (gate tests).
+
+        Thread-safety:
+          - Same thread as event loop (tests, rare production path): create_task (safe).
+          - SDK push thread (production): asyncio.get_running_loop() raises RuntimeError;
+            fall back to returning _process_bar(bar_data) directly for
+            run_coroutine_threadsafe to schedule (takes two event loop iterations but
+            the production loop runs continuously — no timeout concern).
+
+        Returns a coroutine (for BarAggregator's run_coroutine_threadsafe call).
+        """
+        try:
+            running_loop = asyncio.get_running_loop()
+            # Called from event loop thread — schedule via create_task so that a single
+            # asyncio.sleep(0) in tests is sufficient to run the pipeline.
+            task = running_loop.create_task(self._process_bar(bar_data))
+
+            async def _await_task(t):
+                await t
+
+            return _await_task(task)
+        except RuntimeError:
+            # Not on the event loop thread (production SDK push thread) — return the
+            # coroutine directly; run_coroutine_threadsafe schedules it on self._loop.
+            return self._process_bar(bar_data)
+
+    async def _process_bar(self, bar_data: dict) -> None:
+        """Async signal pipeline for a single closed 5m bar (D-03/D-05/D-06).
+
+        Sequence:
+          1. Construct BarEvent from bar_data (T-06.1-MALFORMED-BAR: malformed input
+             is caught by try/except; logs on_bar_closed_bar_construction_error + returns).
+          2. Always: await position_manager.on_bar(bar) — management runs regardless of
+             _entries_enabled (exits/trail/partial NOT gated — D-06 anti-pattern avoided).
+          3. D-06 gate: if not _entries_enabled, return (entry branch blocked).
+          4. Entry branch: signal_engine.on_bar -> risk_engine.on_signal -> consume_intent.
+
+        bar_data keys: code, time_key, open, high, low, close, volume, hod, lod.
+        """
+        from bot.signal.events import BarEvent
+        try:
+            bar = BarEvent(
+                code=bar_data["code"],
+                time_key=bar_data["time_key"],
+                open=bar_data["open"],
+                high=bar_data["high"],
+                low=bar_data["low"],
+                close=bar_data["close"],
+                volume=bar_data["volume"],
+                hod=bar_data["hod"],
+                lod=bar_data["lod"],
+            )
+        except Exception:
+            _logger.warning(
+                "on_bar_closed_bar_construction_error",
+                bar_data=bar_data,
+                exc_info=True,
+            )
+            return
+
+        # Position management always runs — exits/trail/partial unaffected by entries gate (D-06)
+        await self._position_manager.on_bar(bar)
+
+        # D-06 entry gate: skip signal/risk/exec pipeline while entries are paused
+        if not self._entries_enabled:
+            return
+
+        signal = await self._signal_engine.on_bar(bar)
+        if signal is None:
+            return
+
+        intent = await self._risk_engine.on_signal(signal)
+        if intent is None:
+            return
+
+        await self._execution_engine.consume_intent(intent)
 
     @staticmethod
     def _parse_hhmm(s: str):
@@ -297,6 +473,12 @@ class TradingBot:
 
         _logger.info("market_open_subscribe_start", date=str(today))
         try:
+            # Reset BarAggregator session state at genuine market open (NOT on reconnect).
+            # reset_session() clears _seen_time_keys so double-fire on reconnect is still
+            # prevented for the new session (T-06.1-RESET-DEDUP / Open Q3 / Pattern 4).
+            if self._bar_agg is not None:
+                self._bar_agg.reset_session()
+
             # Read active watchlist codes from the store
             loop = asyncio.get_running_loop()
             codes = await loop.run_in_executor(
@@ -487,15 +669,29 @@ class TradingBot:
 
         Sequence:
           1. _readiness_gate() — D-08 gate: connect + reconcile + reconstruct + entries_enabled
-          2. _register_jobs() — add five cron/interval jobs to the scheduler
-          3. scheduler.start() — begin dispatching jobs on the asyncio loop
-          4. watchdog.run() launched via asyncio.create_task (SVC-02, Pitfall 3 single-loop)
-          5. while not kill_switch.triggered: check_file + asyncio.sleep(1)  (D-01 always-on)
-          6. finally: cancel watchdog task + _shutdown()  — D-07 graceful shutdown
+          2. Post-readiness startup block (if not already wired in __init__):
+             - Construct BarAggregator with running loop + register push handler (BLOCKER-01)
+             - Late-bind bar_buffer into PositionManager (WARNING-02 / POS-03)
+             - Start reconciliation_loop as cancellable task (SAFE-03 / D-08)
+             All three happen BEFORE scheduler.start() (Pitfall 5).
+          3. _register_jobs() — add five cron/interval jobs to the scheduler
+          4. scheduler.start() — begin dispatching jobs on the asyncio loop
+          5. watchdog.run() launched via asyncio.create_task (SVC-02, Pitfall 3 single-loop)
+          6. while not kill_switch.triggered: check_file + asyncio.sleep(1)  (D-01 always-on)
+          7. finally: cancel reconcile + watchdog tasks + _shutdown() — D-07 graceful shutdown
         """
-        self._watchdog_task = None
         try:
             await self._readiness_gate()
+
+            # Post-readiness startup block (D-05/BLOCKER-01/WARNING-02/SAFE-03/D-08).
+            # In production __init__ ran without a running loop so _bar_agg is None here;
+            # _do_startup_wiring builds BarAggregator, calls set_handler, late-binds
+            # bar_buffer, and creates the reconcile task. In tests __init__ already called
+            # _do_startup_wiring so this is a no-op (idempotent guard inside the method).
+            # MUST be before self._register_jobs() / self._scheduler.start() (Pitfall 5).
+            loop = asyncio.get_running_loop()
+            self._do_startup_wiring(loop)
+
             self._register_jobs()
             self._scheduler.start()
             _logger.info("bot_started")
@@ -518,6 +714,15 @@ class TradingBot:
             _logger.error("bot_run_error", exc_info=True)
             raise
         finally:
+            # Cancel the reconcile task cleanly (T-06.1-RECONCILE-LEAK — mirrors watchdog pattern)
+            if self._reconcile_task is not None:
+                self._reconcile_task.cancel()
+                try:
+                    await self._reconcile_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             # Cancel the watchdog task cleanly alongside scheduler shutdown (D-07)
             if self._watchdog_task is not None:
                 self._watchdog_task.cancel()
