@@ -158,6 +158,11 @@ class PositionManager:
         # Only one live position per code is supported at a time (EXEC-04 guard).
         self._positions: Dict[str, PositionState] = {}
 
+        # Codes with an active manage_exit in flight (D-07 / Pitfall 6).
+        # Populated before _place_exit_order call, discarded in finally.
+        # SAFE-03 reconcile_once reads this via getattr to skip mid-exit positions.
+        self._exiting: set = set()
+
     # ============================================================
     # Public API — fill processing
     # ============================================================
@@ -801,25 +806,18 @@ class PositionManager:
             )
             return None
 
-    async def _place_exit_order(self, code: str, qty: int) -> Optional[str]:
-        """Ask ExecutionEngine to place a marketable-limit exit for qty shares.
+    async def _place_exit_order(self, code: str, qty: int) -> int:
+        """Ask ExecutionEngine to place a marketable-limit exit; return total filled qty.
 
-        Delegates entirely to engine.manage_exit() with the configured exit
-        escalation parameters (D-07 / CFG-01). Returns the initial order_id
-        placed, or None if the engine raises.
+        D-01: returns int (total filled qty, 0 on failure) — never None.
+        D-02: callers apply the exit (decrement remaining_quantity, mark CLOSED,
+              fire on_exit_alert) from this return value directly. exit_order_id is
+              no longer the exit-alert delivery path (Pitfall 4: exit_order_id is
+              preserved only for the entry-fill matching path in _on_exit_fill).
 
-        This method is a thin bridge — the engine owns all retry-until-flat logic.
-        The returned order_id is stored on pos.exit_order_id so exit fills can be
-        reconciled back by order_id (EXEC-05).
-
-        For partial-profit exits, the engine escalates independently. For stop-out
-        exits, the engine will retry until flat (Pitfall E).
-
-        Note: manage_exit returns total filled qty, not an order_id.  To get the
-        initial order_id we track it separately via gateway.place_order if needed.
-        For now, manage_exit is fire-and-forget; the exit fill reconciliation
-        (on_exit_fill) matches fills via exit_order_id set here.
-        Returns None here to remain decoupled from the order_id returned by engine.
+        Delegates to engine.manage_exit() which owns all retry-until-flat logic
+        (D-07 / CFG-01). Returns int(filled_qty) on success, 0 on exception
+        (Assumption A2: manage_exit returning 0 is valid — no fill occurred).
         """
         try:
             from moomoo import TrdSide
@@ -829,7 +827,7 @@ class PositionManager:
             sell_side = None
 
         try:
-            await self._engine.manage_exit(
+            filled_qty = await self._engine.manage_exit(
                 code=code,
                 qty=qty,
                 side=sell_side,
@@ -837,10 +835,10 @@ class PositionManager:
                 escalation_cadence=self._cfg.exit_escalation_cadence_seconds,
                 ttl=self._cfg.exit_ttl_seconds,
             )
+            return int(filled_qty)
         except Exception:
             _logger.warning("place_exit_order_error", code=code, qty=qty, exc_info=True)
-        # Return None — exit_order_id tracking is done via engine's emitted FillEvent
-        return None
+            return 0
 
     def _increment_daily_filled_count(self, fill_time: datetime) -> None:
         """Increment daily_trade_count.filled_count for the fill's session date (D-08).
