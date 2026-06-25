@@ -175,21 +175,28 @@ async def test_eod_report_job_writes_reports_and_dispatches_summary(tmp_path):
 # Regression: premarket-high-not-seeded (D-01/D-03 seam lock)
 #
 # _job_market_open_subscribe must call signal_engine.fetch_premarket_highs(codes)
-# after gateway.subscribe(codes) so Gate 1 of on_bar is satisfied before bars flow.
-# Without this call, _premarket_highs stays empty and no entry signal can ever fire.
+# BEFORE gateway.subscribe(codes) so Gate 1 of on_bar is satisfied before any bar
+# can flow. subscribe() arms the push handler; if it ran first, bars arriving during
+# the snapshot RTT (~100-500ms) would hit Gate 1 with an empty _premarket_highs dict
+# and be dropped (race). Seeding first eliminates the window.
+# Without the seed call at all, _premarket_highs stays empty and no entry can fire.
 # ============================================================
 
 @pytest.mark.asyncio
 async def test_market_open_subscribe_seeds_premarket_highs():
-    """_job_market_open_subscribe must call signal_engine.fetch_premarket_highs(codes).
+    """_job_market_open_subscribe must call fetch_premarket_highs(codes) BEFORE subscribe(codes).
 
     Regression for premarket-high-not-seeded (2026-06-25): the market-open job
     subscribed feeds but never called fetch_premarket_highs(), leaving Gate 1 of
     on_bar permanently blocking every bar with signal_skipped_no_premarket_high.
 
-    After the fix, _job_market_open_subscribe calls fetch_premarket_highs(codes)
-    immediately after gateway.subscribe(codes), so _premarket_highs is populated
-    before any bar can flow through the signal pipeline.
+    Race follow-up (ordering lock): even with the seed call present, running it
+    AFTER subscribe leaves a ~100-500ms window (the snapshot RTT) during which
+    subscribe()'s armed push handler can deliver bars that hit an empty
+    _premarket_highs dict and are dropped. The fix moves fetch_premarket_highs
+    to run BEFORE gateway.subscribe so _premarket_highs is frozen before the
+    push handler can deliver any bar. This test locks that ordering via a shared
+    call-recorder parent mock so the sequence cannot silently regress.
     """
     from bot.service.bot import TradingBot
     from datetime import date
@@ -206,14 +213,23 @@ async def test_market_open_subscribe_seeds_premarket_highs():
     mock_cfg.misfire_grace_rescan_s = 600
     mock_cfg.force_close_misfire_grace_s = 300
 
+    # Shared parent mock as a call recorder: attaching both async children to it
+    # records their invocations on a single ordered `parent.mock_calls` list, so
+    # we can assert fetch_premarket_highs happens strictly BEFORE subscribe.
+    call_recorder = MagicMock()
+    call_recorder.fetch_premarket_highs = AsyncMock(
+        return_value={"US.AAPL": 150.0, "US.MSFT": 300.0}
+    )
+    call_recorder.subscribe = AsyncMock()
+
     mock_gateway = MagicMock()
-    mock_gateway.subscribe = AsyncMock()
+    mock_gateway.subscribe = call_recorder.subscribe
     mock_store = MagicMock()
     mock_store.get_watchlist_codes.return_value = ["US.AAPL", "US.MSFT"]
 
     # The critical mock: fetch_premarket_highs must be called by the job
     mock_signal_engine = MagicMock()
-    mock_signal_engine.fetch_premarket_highs = AsyncMock(return_value={"US.AAPL": 150.0, "US.MSFT": 300.0})
+    mock_signal_engine.fetch_premarket_highs = call_recorder.fetch_premarket_highs
 
     bot = TradingBot(
         cfg=mock_cfg,
@@ -238,10 +254,19 @@ async def test_market_open_subscribe_seeds_premarket_highs():
     mock_gateway.subscribe.assert_called_once_with(["US.AAPL", "US.MSFT"])
 
     # Assert fetch_premarket_highs was called with the same codes (the regression seam)
-    mock_signal_engine.fetch_premarket_highs.assert_called_once_with(["US.AAPL", "US.MSFT"]), (
+    mock_signal_engine.fetch_premarket_highs.assert_called_once_with(["US.AAPL", "US.MSFT"])
+
+    # ---- Ordering lock (race fix): fetch_premarket_highs MUST precede subscribe ----
+    # Build the ordered sequence of method names recorded on the shared parent.
+    recorded_order = [c[0] for c in call_recorder.mock_calls if c[0]]
+    assert "fetch_premarket_highs" in recorded_order, "seed call must occur"
+    assert "subscribe" in recorded_order, "subscribe call must occur"
+    assert recorded_order.index("fetch_premarket_highs") < recorded_order.index("subscribe"), (
         "_job_market_open_subscribe must call signal_engine.fetch_premarket_highs(codes) "
-        "after subscribe so Gate 1 of on_bar is satisfied before bars flow (D-01/D-03). "
-        "Regression: omitting this call leaves _premarket_highs empty all session."
+        "BEFORE gateway.subscribe(codes) so _premarket_highs is frozen before the push "
+        "handler is armed — otherwise bars arriving during the snapshot RTT hit an empty "
+        "Gate 1 and are dropped (premarket-high-not-seeded race follow-up, D-01/D-03). "
+        f"Recorded order was: {recorded_order}"
     )
 
 

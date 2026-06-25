@@ -464,11 +464,28 @@ class TradingBot:
             _logger.error("premarket_scan_error", exc_info=True)
 
     async def _job_market_open_subscribe(self) -> None:
-        """Market-open subscribe job — subscribes the active watchlist and seeds premarket highs (D-01 guard).
+        """Market-open subscribe job — seeds premarket highs, THEN subscribes the watchlist (D-01 guard).
 
-        Gets the current watchlist from the store, subscribes those codes, then
-        seeds SignalEngine._premarket_highs via fetch_premarket_highs() (D-01/D-03).
-        Seeding happens AFTER subscribe so bars cannot flow before Gate 1 is populated.
+        Gets the current watchlist from the store, seeds SignalEngine._premarket_highs
+        via fetch_premarket_highs() FIRST, then subscribes those codes (D-01/D-03).
+
+        Ordering rationale (race fix): gateway.subscribe(codes) arms the BarAggregator
+        push handler immediately (is_first_push=True/subscribe_push=True), after which
+        a closed 5m bar can be delivered at any moment. fetch_premarket_highs only
+        freezes _premarket_highs at the END of its snapshot round-trip (~100-500ms).
+        If subscribe ran first, bars arriving during that RTT would hit Gate 1 of
+        on_bar with an empty _premarket_highs dict and be dropped — the original
+        failure mode, narrowed to the first-snapshot window (the most critical bars
+        right at the open). Seeding BEFORE subscribe freezes the highs before any bar
+        can flow, so Gate 1 is satisfied from the very first push — no race window.
+
+        This swap is safe because get_market_snapshot is subscription-independent: the
+        moomoo snapshot call (and gateway.get_market_snapshot) require no prior
+        subscribe (verified — moomoo get_snapshot.py: "no subscription required";
+        gateway.py: pre_high_price "available for US stocks without an extended-hours
+        subscription"). The push handler / bar flow is gated on subscribe(), not on
+        snapshot, so fetching highs before subscribe works fully.
+
         No-ops on non-trading days.
         """
         today = now_et().date()
@@ -493,15 +510,18 @@ class TradingBot:
 
             codes = await loop.run_in_executor(None, _get_watchlist_worker)
             if codes:
-                await self._gateway.subscribe(codes)
-                _logger.info("market_open_subscribe_done", codes=codes, count=len(codes))
-
-                # D-01/D-03: Seed premarket highs via one batched snapshot call.
-                # fetch_premarket_highs() calls set_premarket_highs() internally, freezing
-                # _premarket_highs for the session so Gate 1 of on_bar can pass.
-                # Must run AFTER subscribe so the wiring seam is: subscribe → seed → bars flow.
+                # D-01/D-03: Seed premarket highs via one batched snapshot call BEFORE
+                # subscribing. fetch_premarket_highs() calls set_premarket_highs()
+                # internally, freezing _premarket_highs for the session so Gate 1 of
+                # on_bar can pass. Seeding runs FIRST so the wiring seam is:
+                # seed → subscribe → bars flow. This closes the market-open race where
+                # a bar could arrive during the snapshot RTT and hit an empty Gate 1.
+                # Snapshot is subscription-independent, so this ordering is safe.
                 if self._signal_engine is not None:
                     await self._signal_engine.fetch_premarket_highs(codes)
+
+                await self._gateway.subscribe(codes)
+                _logger.info("market_open_subscribe_done", codes=codes, count=len(codes))
             else:
                 _logger.info("market_open_subscribe_empty_watchlist", date=str(today))
         except asyncio.CancelledError:
