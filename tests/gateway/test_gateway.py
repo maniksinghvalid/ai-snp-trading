@@ -726,3 +726,68 @@ class TestGetGlobalState:
         assert "connected" in result
         assert "qot_logined" in result
         assert "trd_logined" in result
+
+
+# ============================================================
+# BLOCKER-01: set_handler delegates to quote context (SIG-01)
+# ============================================================
+
+def test_set_handler_delegates_to_quote_ctx():
+    """set_handler() must call _quote_ctx.set_handler(handler) exactly once (BLOCKER-01).
+
+    RED today: MoomooGateway has no set_handler method (AttributeError).
+    Turns GREEN when Plan 06.1-02 adds the thin set_handler wrapper to MoomooGateway.
+    """
+    gw = _make_gateway_with_mocks()
+    mock_handler = MagicMock()
+    # INTENDED RED: gw.set_handler does not exist today (AttributeError)
+    gw.set_handler(mock_handler)
+    gw._quote_ctx.set_handler.assert_called_once_with(mock_handler)
+
+
+# ============================================================
+# SAFE-03: reconcile_once detects externally-closed position
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_reconcile_once_externally_closed():
+    """reconcile_once() marks externally-closed position CLOSED and fires alert (SAFE-03).
+
+    When broker returns empty positions while manager._positions has one ACTIVE code
+    not in manager._exiting, reconcile_once must:
+      - mark position CLOSED via store.conn.execute (DB update)
+      - remove code from manager._positions
+      - fire alerter.send (Telegram alert)
+      - return the code in result["closed"]
+
+    RED today: reconcile_once() is a no-op returning {"drift": {}} and its signature
+    takes no store/manager/alerter args (TypeError on the call below).
+    Turns GREEN when Plan 06.1-02 implements the drift logic and updates the signature.
+    """
+    gw = _make_gateway_with_mocks()
+    # broker returns empty positions (externally closed)
+    gw.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+    # manager has one active position for US.AAPL
+    mock_pos = MagicMock()
+    mock_pos.position_id = "pos-001"
+    mock_pos.phase = "ACTIVE"
+    mock_manager = MagicMock()
+    mock_manager._positions = {"US.AAPL": mock_pos}
+    mock_manager._exiting = set()
+
+    mock_store = MagicMock()
+    mock_store.conn = MagicMock()
+
+    mock_alerter = MagicMock()
+    mock_alerter.send = AsyncMock()
+
+    # INTENDED RED: TypeError — reconcile_once() today takes no store/manager/alerter args
+    result = await gw.reconcile_once(
+        store=mock_store, manager=mock_manager, alerter=mock_alerter
+    )
+
+    assert "US.AAPL" in result["closed"], (
+        f"US.AAPL must be in result['closed'], got: {result}"
+    )
+    mock_store.conn.execute.assert_called()  # DB update issued
