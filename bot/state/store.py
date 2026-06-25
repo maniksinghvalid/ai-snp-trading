@@ -6,10 +6,19 @@ Provides:
   DEFAULT_DB_PATH   — default SQLite path (./data/bot_state.db)
   resolve_db_path() — returns BOT_STATE_DB env var or DEFAULT_DB_PATH
   StateStore        — opens a SQLite connection, runs migrations on open,
-                      exposes close() and the raw conn for later phases
+                      and exposes all DB operations as guarded methods
   atomic_write_json — temp-file + os.replace snapshot writer (D-10/PITFALLS #10)
 
 All I/O is synchronous stdlib only (no third-party deps).
+
+Enforced invariant (T-06.1-09-01/02, IN-01):
+  ALL database access is routed through guarded StateStore methods.  Each method
+  acquires ``with self._lock:`` around a short, purely-synchronous block
+  (conn.execute + commit, plus any row_factory flip/reset).  The raw ``conn``
+  property is DEPRECATED for external callers — use a guarded method instead.
+  The lock is NEVER held across an async yield; the reconcile_once /
+  startup_reconcile broker I/O (async subscribe / _derive_lod_for_orphan calls)
+  sits OUTSIDE any guarded method call (CR-02; zero async tokens in this module).
 """
 
 import json
@@ -169,7 +178,15 @@ class StateStore:
 
     @property
     def conn(self) -> sqlite3.Connection:
-        """Return the active sqlite3.Connection.
+        """DEPRECATED — internal/read-debug only.
+
+        MUST NOT be used for ``.execute``, ``.commit``, or ``.row_factory``
+        by any caller OUTSIDE ``bot/state/store.py``.  Use a guarded StateStore
+        method instead (WR-02, T-06.1-09-04).
+
+        Retained for backward compatibility and test/inspection use only.
+        All production paths MUST route through a guarded method so the
+        ``self._lock`` is always held around the DB operation.
 
         Raises:
             RuntimeError: If open() has not been called yet.
@@ -199,9 +216,19 @@ class StateStore:
 
         # Disable the same-thread check: the connection is intentionally shared
         # across the asyncio event-loop thread AND ThreadPoolExecutor worker
-        # threads (the four scheduled executor jobs). All access is serialized
-        # by self._lock so concurrent use is safe (T-06.1-08-01/02).
+        # threads (the four scheduled executor jobs).
+        #
+        # Enforced invariant (IN-01 / T-06.1-09-01/02):
+        #   ALL DB access is routed through guarded StateStore methods.  Each
+        #   method acquires ``with self._lock:`` around a short synchronous
+        #   block (conn.execute + commit, plus any row_factory flip/reset).
+        #   The raw ``conn`` is NOT mutated outside this module.  The lock is
+        #   NEVER held across an async yield — reconcile_once / startup_reconcile
+        #   broker I/O sits between guarded calls, never inside one (CR-02).
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        # WR-03: busy_timeout so contended writes wait ~5s instead of raising
+        # OperationalError: database is locked (defense-in-depth atop serialization).
+        self._conn.execute("PRAGMA busy_timeout=5000")
         # Enable WAL mode for better concurrency (non-breaking for tests)
         self._conn.execute("PRAGMA journal_mode=WAL")
         run_migrations(self._conn)
@@ -356,3 +383,367 @@ class StateStore:
             # Reset row_factory so subsequent queries return plain tuples (default)
             self._conn.row_factory = None
         return [dict(r) for r in rows]
+
+    # ============================================================
+    # Position-row mutation methods (CR-01 / T-06.1-09-01)
+    # ============================================================
+
+    def mark_position_closed(self, position_id: str, updated_at: str) -> None:
+        """Mark a position row as CLOSED in the DB (guarded write).
+
+        Replaces gateway.py raw UPDATE sites (reconcile_once line ~840-844 and
+        startup_reconcile line ~1030-1033).  Each call acquires self._lock and
+        commits immediately so the DB reflects the CLOSED state before the
+        caller continues (CR-01).
+
+        Args:
+            position_id: The position_id UUID string to close.
+            updated_at:  ISO-8601 timestamp string (ET) for updated_at column.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET phase='CLOSED', updated_at=? WHERE position_id=?",
+                (updated_at, position_id),
+            )
+            self._conn.commit()
+
+    def update_position_qty_phase(
+        self, position_id: str, remaining_quantity: int, phase: str, updated_at: str
+    ) -> None:
+        """Update remaining_quantity AND phase on a position row (guarded write).
+
+        Replaces gateway.py raw UPDATE at reconcile_once line ~878-883 (qty/phase
+        drift re-arm path).
+
+        Args:
+            position_id:        The position_id UUID string.
+            remaining_quantity: New remaining quantity (broker truth).
+            phase:              New phase string (e.g. 'ACTIVE').
+            updated_at:         ISO-8601 timestamp string (ET).
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET remaining_quantity=?, phase=?, updated_at=? "
+                "WHERE position_id=?",
+                (remaining_quantity, phase, updated_at, position_id),
+            )
+            self._conn.commit()
+
+    def update_position_qty(
+        self, position_id: str, remaining_quantity: int, updated_at: str
+    ) -> None:
+        """Update remaining_quantity on a position row (guarded write).
+
+        Replaces gateway.py raw UPDATE at startup_reconcile line ~1050-1054
+        (startup qty adopt path).
+
+        Args:
+            position_id:        The position_id UUID string.
+            remaining_quantity: New remaining quantity (broker truth).
+            updated_at:         ISO-8601 timestamp string (ET).
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET remaining_quantity=?, updated_at=? "
+                "WHERE position_id=?",
+                (remaining_quantity, updated_at, position_id),
+            )
+            self._conn.commit()
+
+    def insert_orphan_position(
+        self,
+        position_id: str,
+        code: str,
+        avg_cost: float,
+        stop: float,
+        qty: int,
+        now_ts: str,
+    ) -> int:
+        """INSERT OR IGNORE an orphan broker position row (guarded write).
+
+        Replaces the raw INSERT at gateway.py reconcile_once ~917-926 and
+        startup_reconcile ~1084-1101.  Returns cursor.rowcount so the caller
+        can detect the WR-04 INSERT OR IGNORE no-op (rowcount == 0 means the
+        row already existed; caller skips audit).
+
+        Args:
+            position_id: New UUID for the orphan position.
+            code:        Moomoo-format stock code (e.g. "US.AAPL").
+            avg_cost:    Broker average cost (used as entry_price and avg_fill_price).
+            stop:        Derived stop from LOD (initial_stop and trail_stop).
+            qty:         Broker-reported quantity (full_quantity and remaining_quantity).
+            now_ts:      ISO-8601 timestamp string (ET) for opened_at and updated_at.
+
+        Returns:
+            int: cursor.rowcount (1 if inserted, 0 if the INSERT OR IGNORE was a no-op).
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                """INSERT OR IGNORE INTO positions
+                   (position_id, code, phase, entry_price, initial_stop, trail_stop,
+                    full_quantity, remaining_quantity, entry_order_id,
+                    avg_fill_price, opened_at, updated_at)
+                   VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                (position_id, code, avg_cost, stop, stop, qty, qty, avg_cost, now_ts, now_ts),
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
+    # ============================================================
+    # Row_factory-flipping read methods (CR-01 / T-06.1-09-01)
+    # ============================================================
+
+    def get_pending_intent_codes(self, status: str = "PENDING") -> list:
+        """Return list of dicts [{"intent_id":..., "code":...}] for pending intents.
+
+        Replaces the dangerous unguarded row_factory flip at gateway.py
+        startup_reconcile ~1129-1133.  The flip → fetch → reset is done INSIDE
+        the lock so no concurrent thread can observe or clobber the factory
+        setting (T-06.1-09-01 / CR-01).
+
+        Args:
+            status: Intent status to filter on (default "PENDING").
+
+        Returns:
+            list: List of dicts with keys ``intent_id`` and ``code``.
+                  Empty list if no matching rows.
+        """
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            rows = self._conn.execute(
+                "SELECT intent_id, code FROM pending_intents WHERE status=?",
+                (status,),
+            ).fetchall()
+            self._conn.row_factory = None
+        return [{"intent_id": r["intent_id"], "code": r["code"]} for r in rows]
+
+    def get_filled_count(self, session_date: str) -> int:
+        """Return filled_count for the given session date from daily_trade_count.
+
+        Replaces signal_engine.py _get_filled_count body (~267-271).  Uses a
+        plain tuple fetch (no row_factory flip needed for a single scalar).
+
+        Args:
+            session_date: ISO date string (e.g. "2026-06-24").
+
+        Returns:
+            int: filled_count, or 0 if no row exists yet.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT filled_count FROM daily_trade_count WHERE session_date=?",
+                (session_date,),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def has_pending_intent(self, code: str) -> bool:
+        """Return True if a live PENDING intent exists for the given code (D-10).
+
+        Replaces signal_engine.py has_pending_intent body (~286-290).  Uses a
+        plain 1-column fetch (no row_factory flip).
+
+        Args:
+            code: Moomoo-format stock code (e.g. "US.AAPL").
+
+        Returns:
+            bool: True if a PENDING row exists for this code.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM pending_intents WHERE code=? AND status='PENDING' LIMIT 1",
+                (code,),
+            ).fetchone()
+        return row is not None
+
+    def get_rvol_baseline(self, scan_date: str, code: str) -> float:
+        """Return rvol_baseline from daily_scan for the given scan date and code.
+
+        Replaces signal_engine.py rvol read at ~346-351.  Uses a plain scalar
+        fetch (no row_factory flip).
+
+        Args:
+            scan_date: ISO date string (e.g. "2026-06-24").
+            code:      Moomoo-format stock code (e.g. "US.AAPL").
+
+        Returns:
+            float: rvol_baseline, or 0.0 if no row exists.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT rvol_baseline FROM daily_scan WHERE scan_date=? AND code=?",
+                (scan_date, code),
+            ).fetchone()
+        return float(row[0]) if row is not None else 0.0
+
+    def get_watchlist_codes(self, scan_date) -> list:
+        """Return ordered list of codes from daily_scan for the given scan date.
+
+        Replaces the hasattr-guarded stub in bot.py _job_market_open_subscribe
+        (@493) that always returned [].  Reads daily_scan ordered by rank ASC
+        so callers receive the canonical scan ordering.
+
+        scan_date: date object or ISO date string.
+
+        Returns:
+            list: List of Moomoo-format code strings, ordered by rank ASC.
+                  Empty list if no rows exist for that date.
+        """
+        if hasattr(scan_date, "isoformat"):
+            scan_date_str = scan_date.isoformat()
+        else:
+            scan_date_str = str(scan_date)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT code FROM daily_scan WHERE scan_date=? ORDER BY rank ASC",
+                (scan_date_str,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    # ============================================================
+    # Intent / counter mutation methods (CR-01 / T-06.1-09-01)
+    # ============================================================
+
+    def increment_daily_filled_count(self, session_date: str, updated_at: str) -> None:
+        """Increment the daily filled-trade counter for session_date (guarded write).
+
+        Uses INSERT ... ON CONFLICT(session_date) DO UPDATE so the first fill of
+        the day inserts a row with filled_count=1 and subsequent fills increment.
+
+        Replaces manager.py _increment_daily_filled_count body (~965-973).
+
+        Args:
+            session_date: ISO date string for the trading session (ET date).
+            updated_at:   ISO-8601 timestamp string (ET).
+        """
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO daily_trade_count (session_date, filled_count, updated_at)
+                   VALUES (?, 1, ?)
+                   ON CONFLICT(session_date) DO UPDATE SET
+                     filled_count = filled_count + 1,
+                     updated_at = excluded.updated_at""",
+                (session_date, updated_at),
+            )
+            self._conn.commit()
+
+    def resolve_pending_intent(self, intent_id: str, resolved_at: str) -> None:
+        """Mark a pending_intents row as RESOLVED (guarded write).
+
+        Replaces manager.py _resolve_pending_intent body (~998-1003).
+
+        Args:
+            intent_id:   pending_intents.intent_id UUID string.
+            resolved_at: ISO-8601 timestamp string (ET fill time).
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pending_intents SET status='RESOLVED', resolved_at=? "
+                "WHERE intent_id=? AND status='PENDING'",
+                (resolved_at, intent_id),
+            )
+            self._conn.commit()
+
+    def insert_pending_intent(
+        self,
+        intent_id: str,
+        code: str,
+        entry_price: float,
+        stop_price: float,
+        quantity: int,
+        emitted_at: str,
+    ) -> None:
+        """Insert a new pending_intents row with status='PENDING' (guarded write).
+
+        Replaces risk_engine.py ~161-174.
+
+        Args:
+            intent_id:   UUID string for the new intent.
+            code:        Moomoo-format stock code (e.g. "US.AAPL").
+            entry_price: Limit entry price for the intent.
+            stop_price:  Initial stop price for the intent.
+            quantity:    Share quantity.
+            emitted_at:  ISO-8601 timestamp string (ET) when the intent was emitted.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO pending_intents "
+                "(intent_id, code, status, entry_price, stop_price, quantity, emitted_at) "
+                "VALUES (?, ?, 'PENDING', ?, ?, ?, ?)",
+                (intent_id, code, entry_price, stop_price, quantity, emitted_at),
+            )
+            self._conn.commit()
+
+    def expire_pending_intent(self, intent_id: str, resolved_at: str) -> None:
+        """Mark a pending_intents row as EXPIRED (guarded write).
+
+        Replaces execution/engine.py _resolve_intent_expired body (~462-467).
+
+        Args:
+            intent_id:   pending_intents.intent_id UUID string.
+            resolved_at: ISO-8601 timestamp string (ET) when expiry was detected.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pending_intents SET status='EXPIRED', resolved_at=? "
+                "WHERE intent_id=?",
+                (resolved_at, intent_id),
+            )
+            self._conn.commit()
+
+    def persist_watchlist(
+        self, scan_date, candidates: list, scan_pass: str
+    ) -> None:
+        """Idempotent upsert of the scan candidate list to daily_scan (guarded write).
+
+        Moves the body of scanner.py _persist_watchlist into the store so the
+        lock lives here, not at the external caller (SCAN-05 / CR-01).  The
+        per-candidate INSERT...ON CONFLICT loop and final commit are wrapped in
+        a single ``with self._lock:`` block.
+
+        Uses INSERT ... ON CONFLICT(scan_date, code) DO UPDATE so re-running
+        the same scan day is idempotent (D-05 / SCAN-05).  created_at is
+        intentionally excluded from the UPDATE clause — first-seen timestamp
+        is preserved across re-scans.
+
+        scan_date:  date object or ISO date string (isoformat() is called if
+                    the object exposes it, matching the existing helper convention).
+        candidates: List of candidate dicts (code, gap_pct, rank, prior_day_high,
+                    prior_close, sma200, rvol_baseline); rank assigned by caller.
+        scan_pass:  Label for the originating scan pass (e.g. "premarket").
+        """
+        from bot.safety.et_helpers import now_et
+        created_at = now_et().isoformat()
+        scan_date_str = (
+            scan_date.isoformat() if hasattr(scan_date, "isoformat") else str(scan_date)
+        )
+        with self._lock:
+            for c in candidates:
+                self._conn.execute(
+                    """
+                    INSERT INTO daily_scan
+                        (scan_date, code, gap_pct, rank, created_at,
+                         prior_day_high, prior_close, sma200, rvol_baseline, scan_pass)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_date, code) DO UPDATE SET
+                        gap_pct        = excluded.gap_pct,
+                        rank           = excluded.rank,
+                        prior_day_high = excluded.prior_day_high,
+                        prior_close    = excluded.prior_close,
+                        sma200         = excluded.sma200,
+                        rvol_baseline  = excluded.rvol_baseline,
+                        scan_pass      = excluded.scan_pass
+                    """,
+                    (
+                        scan_date_str,
+                        c["code"],
+                        c["gap_pct"],
+                        c["rank"],
+                        created_at,
+                        c.get("prior_day_high"),
+                        c.get("prior_close"),
+                        c.get("sma200"),
+                        c.get("rvol_baseline"),
+                        scan_pass,
+                    ),
+                )
+            self._conn.commit()
