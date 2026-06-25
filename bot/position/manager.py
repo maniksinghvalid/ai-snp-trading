@@ -397,6 +397,23 @@ class PositionManager:
                         pos.pending_exit_reason = "force_close"
                         self._persist_position(pos, event="force_close")
                         _logger.info("force_close_filled", code=code, qty=qty)
+                        # Fire exit alert from the filled return (D-01/D-02 / POS-04 / ALERT-04).
+                        if self._on_exit_alert is not None:
+                            try:
+                                entry = pos.entry_price or 0.0
+                                stop = pos.initial_stop or 0.0
+                                exit_proxy = pos.avg_fill_price or entry
+                                risk = entry - stop
+                                r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
+                                self._on_exit_alert(
+                                    pos.code,
+                                    "force_close",
+                                    round(r_multiple, 2),
+                                )
+                            except Exception:
+                                _logger.warning(
+                                    "on_exit_alert_error", code=code, exc_info=True
+                                )
             except Exception:
                 _logger.warning(
                     "force_close_exit_error",
@@ -556,7 +573,12 @@ class PositionManager:
 
         evaluate_close() has already decremented pos.remaining_quantity and set
         pos.phase to PARTIAL_TAKEN. We call _persist_position (DB-first), then
-        ask the engine to place the exit order and record the resulting exit_order_id.
+        ask the engine to place the exit order.
+
+        D-01/D-02: filled_qty from _place_exit_order drives remaining_quantity decrement
+        and partial_profit_filled persist. Alert fires from the existing alert block
+        below (do NOT duplicate it here — T-06.1-EXIT-ALERT-DUP). exit_order_id is
+        NOT set here (Pitfall 4 / D-02).
 
         Args:
             pos:      PositionState (phase already PARTIAL_TAKEN by evaluate_close).
@@ -570,16 +592,15 @@ class PositionManager:
         self._persist_position(pos, event="partial_profit")
 
         if self._engine is not None:
+            self._exiting.add(pos.code)
             try:
-                order_id = await self._place_exit_order(pos.code, qty)
-                if order_id:
-                    pos.exit_order_id = order_id
-                    # Update exit_order_id in DB after setting in memory
-                    self._store.upsert_position(pos)
-            except Exception:
-                _logger.warning(
-                    "partial_profit_exit_error", code=pos.code, qty=qty, exc_info=True
-                )
+                filled_qty = await self._place_exit_order(pos.code, qty)
+            finally:
+                self._exiting.discard(pos.code)
+            if filled_qty > 0:
+                pos.remaining_quantity = max(0, pos.remaining_quantity - filled_qty)
+                pos.updated_at = now_et()
+                self._persist_position(pos, event="partial_profit_filled")
 
         # Fire optional exit alert for the partial scale-out (ALERT-02).
         # Partials leave remaining_quantity > 0 so _on_exit_fill's full-close gate
@@ -661,15 +682,33 @@ class PositionManager:
         self._persist_position(pos, event="stop_out")
 
         if self._engine is not None:
+            self._exiting.add(pos.code)
             try:
-                order_id = await self._place_exit_order(pos.code, qty)
-                if order_id:
-                    pos.exit_order_id = order_id
-                    self._store.upsert_position(pos)
-            except Exception:
-                _logger.warning(
-                    "stop_out_exit_error", code=pos.code, qty=qty, exc_info=True
-                )
+                filled_qty = await self._place_exit_order(pos.code, qty)
+            finally:
+                self._exiting.discard(pos.code)
+            # D-01/D-02: apply exit from the manage_exit return value (not exit_order_id).
+            if filled_qty > 0:
+                pos.remaining_quantity = max(0, pos.remaining_quantity - filled_qty)
+                if pos.remaining_quantity == 0:
+                    pos.phase = PositionPhase.CLOSED
+                pos.updated_at = now_et()
+                self._persist_position(pos, event="stop_out_filled")
+                # Fire exit alert synchronously from the filled return (ALERT-02 / ALERT-04).
+                if self._on_exit_alert is not None:
+                    try:
+                        entry = pos.entry_price or 0.0
+                        stop = pos.initial_stop or 0.0
+                        exit_proxy = pos.avg_fill_price or entry
+                        risk = entry - stop
+                        r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
+                        self._on_exit_alert(
+                            pos.code,
+                            pos.pending_exit_reason or "stop_out",
+                            round(r_multiple, 2),
+                        )
+                    except Exception:
+                        _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
 
         _logger.info(
             "fsm_stop_out",
