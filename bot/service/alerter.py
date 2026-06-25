@@ -31,6 +31,7 @@ _EXIT_REASON_LABELS = {
     "partial": "Partial Exit",
     "breakeven": "Breakeven Stop",
     "trail": "Trail Stop",
+    "trail_stop": "Trail Stop",   # reconciled with manager emitted vocabulary (ALERT-02)
     "trail_up": "Trail Stop Up",
     "stop_out": "Stop Out",
     "force_close": "Force Close",

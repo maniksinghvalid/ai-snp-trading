@@ -529,9 +529,12 @@ class PositionManager:
                 exit_price = fill.avg_fill_price or entry
                 risk = entry - stop
                 r_multiple = (exit_price - entry) / risk if risk != 0 else 0.0
+                # Use the real exit reason recorded at the FSM trigger point (ALERT-02).
+                # Falls back to "exit_fill" only as a defensive sentinel for in-flight
+                # exits that arrive after a restart (no reason was recorded).
                 self._on_exit_alert(
                     pos.code,
-                    "exit_fill",
+                    pos.pending_exit_reason or "exit_fill",
                     round(r_multiple, 2),
                 )
             except Exception:
@@ -572,6 +575,27 @@ class PositionManager:
                 _logger.warning(
                     "partial_profit_exit_error", code=pos.code, qty=qty, exc_info=True
                 )
+
+        # Fire optional exit alert for the partial scale-out (ALERT-02).
+        # Partials leave remaining_quantity > 0 so _on_exit_fill's full-close gate
+        # never covers them — we fire here at the trigger point instead.
+        # R-multiple is approximate (uses entry_price as exit proxy since the broker
+        # fill hasn't arrived yet) — acceptable for partial alert semantics.
+        # ALERT-04: wrapped in try/except so a callback failure never breaks the trade loop.
+        if self._on_exit_alert is not None:
+            try:
+                entry = pos.entry_price or 0.0
+                stop = pos.initial_stop or 0.0
+                exit_proxy = pos.avg_fill_price or entry  # approximate at trigger time
+                risk = entry - stop
+                r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
+                self._on_exit_alert(
+                    pos.code,
+                    "partial",
+                    round(r_multiple, 2),
+                )
+            except Exception:
+                _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
 
         _logger.info(
             "fsm_partial_profit",
