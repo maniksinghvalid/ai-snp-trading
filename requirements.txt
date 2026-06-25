@@ -13,3 +13,4 @@ lxml
 
 # Phase 5: Service Orchestration
 apscheduler==3.11.2
+pytest-asyncio==1.4.0
