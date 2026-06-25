@@ -2,6 +2,12 @@
 # Data directory (SQLite state DB, scan caches, bar caches — D-09)
 data/
 
+# EOD HTML reports (D-16: generated at runtime, not committed)
+reports/
+
+# Launchd StandardOut/StandardError logs (D-06)
+logs/
+
 # Python bytecode
 __pycache__/
 *.pyc
