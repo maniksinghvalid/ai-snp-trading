@@ -801,6 +801,18 @@ class TradingBot:
             # Gate 1 is satisfied before any bar can flow through the pipeline.
             await self._seed_premarket_highs_on_startup()
 
+            # One-time startup warning when Telegram alerter is disabled.
+            # The alerter only logs at DEBUG level when it no-ops a send() call, which
+            # is invisible at the INFO default. Surface the disabled state once here so
+            # the operator can confirm alert delivery intent at startup without having to
+            # look for a send failure. Uses alerter._enabled so we do not re-read env
+            # vars and stay consistent with however the alerter was constructed (D-12/D-13).
+            if not self._alerter._enabled:
+                _logger.warning(
+                    "alerter_disabled_at_startup",
+                    reason="TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured",
+                )
+
             self._register_jobs()
             self._scheduler.start()
             _logger.info("bot_started")
