@@ -1428,3 +1428,288 @@ class TestPendingExitReason:
         assert pos.pending_exit_reason == "force_close", (
             f"Expected 'force_close' after force_close_all, got {pos.pending_exit_reason!r}"
         )
+
+
+# ============================================================
+# Test: Task 2 — real reason threaded to on_exit_alert + partial fires alert (ALERT-02/04)
+# ============================================================
+
+class TestExitAlertRealReason:
+    """Verify on_exit_alert receives the real exit reason (not hardcoded 'exit_fill').
+
+    Also verifies: partial scale-out fires exactly one alert while remaining_quantity > 0,
+    no double-fire on later full close, and callback exceptions are swallowed (ALERT-04).
+    """
+
+    def test_full_exit_fill_alerts_real_reason(self, open_store, mock_engine, mock_strategy):
+        """Exit fill with pending_exit_reason set passes the real reason to on_exit_alert."""
+        captured = []
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: captured.append((code, reason, r)),
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=100,
+            exit_order_id="ORDER-EXIT-001",
+        )
+        # Simulate that a stop_out was triggered — reason pre-recorded on pos
+        pos.pending_exit_reason = "stop_out"
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        fill = _make_fill(
+            order_id="ORDER-EXIT-001",
+            intent_id="",
+            filled_qty=100,
+            avg_fill_price=97.5,
+            is_entry=False,
+        )
+        mgr.on_fill(fill)
+
+        assert pos.remaining_quantity == 0
+        assert len(captured) == 1, f"Expected 1 alert call, got {len(captured)}"
+        code, reason, r = captured[0]
+        assert reason == "stop_out", (
+            f"Expected 'stop_out' passed to on_exit_alert, got {reason!r}"
+        )
+        assert reason != "exit_fill", "on_exit_alert must NOT receive hardcoded 'exit_fill'"
+
+    def test_full_exit_fill_falls_back_to_exit_fill_when_no_reason(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """Exit fill with pending_exit_reason=None falls back to 'exit_fill' (defensive)."""
+        captured = []
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: captured.append((code, reason, r)),
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=100,
+            exit_order_id="ORDER-EXIT-002",
+        )
+        # No pending_exit_reason — defensive fallback expected
+        assert pos.pending_exit_reason is None
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        fill = _make_fill(
+            order_id="ORDER-EXIT-002",
+            intent_id="",
+            filled_qty=100,
+            avg_fill_price=100.0,
+            is_entry=False,
+        )
+        mgr.on_fill(fill)
+
+        assert len(captured) == 1
+        _, reason, _ = captured[0]
+        assert reason == "exit_fill", (
+            f"Expected fallback to 'exit_fill' when no reason recorded, got {reason!r}"
+        )
+
+    def test_partial_scaleout_fires_exit_alert(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """A partial scale-out via on_bar fires exactly one 'partial' alert while remaining > 0."""
+        captured = []
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: captured.append((code, reason, r)),
+        )
+
+        # entry=100, initial_stop=98 → R=2; 0.75R=1.5 → threshold=101.5
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+        asyncio.run(mgr.on_bar(bar))
+
+        # Position is PARTIAL_TAKEN (remaining_quantity > 0)
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        assert pos.remaining_quantity > 0
+
+        # Alert must have fired exactly once with reason "partial"
+        assert len(captured) == 1, (
+            f"Expected 1 partial alert, got {len(captured)}: {captured}"
+        )
+        code, reason, r = captured[0]
+        assert reason == "partial", (
+            f"Expected 'partial' reason for scale-out alert, got {reason!r}"
+        )
+
+    def test_partial_does_not_double_alert_on_later_full_close(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """Partial alert fires once at scale-out; later full-close fires its own single alert."""
+        captured = []
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: captured.append((code, reason, r)),
+        )
+
+        # entry=100, initial_stop=98, R=2
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        # Step 1: partial at 0.75R → fires 1 "partial" alert
+        bar_partial = _make_bar(close=101.5)
+        asyncio.run(mgr.on_bar(bar_partial))
+
+        assert len(captured) == 1
+        assert captured[0][1] == "partial"
+
+        # Step 2: simulate the full-close fill (remaining shares)
+        remaining = pos.remaining_quantity  # should be 201 after partial
+        assert remaining > 0, "remaining_quantity must be > 0 after partial"
+
+        pos.exit_order_id = "ORDER-EXIT-FULL"
+        open_store.upsert_position(pos)
+
+        # Set the reason the stop-out would have recorded
+        pos.pending_exit_reason = "stop_out"
+
+        fill = _make_fill(
+            order_id="ORDER-EXIT-FULL",
+            intent_id="",
+            filled_qty=remaining,
+            avg_fill_price=97.5,
+            is_entry=False,
+        )
+        mgr.on_fill(fill)
+
+        # Must have exactly 2 total alerts: partial + stop_out (no double-fire)
+        assert len(captured) == 2, (
+            f"Expected 2 total alerts (partial + stop_out), got {len(captured)}: {captured}"
+        )
+        assert captured[1][1] == "stop_out", (
+            f"Second alert reason should be 'stop_out', got {captured[1][1]!r}"
+        )
+
+    def test_exit_alert_callback_exception_is_swallowed_full_close(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """on_exit_alert raising on full-close must not propagate — ALERT-04."""
+        def _raising_callback(code, reason, r):
+            raise RuntimeError("Telegram down!")
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=_raising_callback,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=100,
+            exit_order_id="ORDER-EXIT-003",
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        fill = _make_fill(
+            order_id="ORDER-EXIT-003",
+            intent_id="",
+            filled_qty=100,
+            is_entry=False,
+        )
+
+        # Must NOT raise even though the callback throws
+        try:
+            mgr.on_fill(fill)
+        except Exception as exc:
+            pytest.fail(
+                f"on_exit_alert exception propagated from on_fill: {exc} — ALERT-04 violated"
+            )
+
+        # Position was still closed despite the callback failure
+        assert pos.remaining_quantity == 0
+        assert pos.phase == PositionPhase.CLOSED
+
+    def test_exit_alert_callback_exception_is_swallowed_on_partial(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """on_exit_alert raising on partial scale-out must not propagate — ALERT-04."""
+        call_count = [0]
+
+        def _raising_callback(code, reason, r):
+            call_count[0] += 1
+            raise RuntimeError("Telegram down!")
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=_raising_callback,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+
+        # Must NOT raise even though the callback throws
+        try:
+            asyncio.run(mgr.on_bar(bar))
+        except Exception as exc:
+            pytest.fail(
+                f"on_exit_alert exception propagated from partial on_bar: {exc} — ALERT-04 violated"
+            )
+
+        # Partial exit still happened despite callback failure
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        assert call_count[0] == 1, "Callback must have been attempted once"

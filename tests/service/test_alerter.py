@@ -73,9 +73,21 @@ async def test_entry_alert_content():
 
 @pytest.mark.asyncio
 async def test_exit_alert_for_all_reasons():
-    """Exit alert must be sendable for each exit_reason value (ALERT-02)."""
+    """Exit alert must be sendable for each exit_reason value (ALERT-02).
+
+    Covers all five spec reasons (partial/breakeven/trail_stop/stop_out/force_close)
+    plus legacy values (trail_up/exit_fill). Each must produce a non-raw human label
+    (no reason key rendered as its own raw string in the Telegram body).
+    """
+    from bot.service.alerter import TelegramAlerter
     alerter = _make_alerter_with_token()
-    reasons = ["stop_out", "partial", "breakeven", "trail_up", "force_close", "exit_fill"]
+    # Five spec reasons + trail_stop (the newly-required label) + legacy values
+    reasons = [
+        "stop_out", "partial", "breakeven", "trail_stop", "trail_up",
+        "force_close", "exit_fill",
+    ]
+
+    captured_bodies = []
 
     with patch("urllib.request.urlopen") as mock_url:
         mock_url.return_value.__enter__ = lambda s: s
@@ -88,10 +100,42 @@ async def test_exit_alert_for_all_reasons():
                 exit_reason=reason,
                 r_multiple=1.5,
             )
+            # Capture the POST body for label-rendering assertions
+            if mock_url.call_args is not None:
+                req_obj = mock_url.call_args[0][0]
+                body = req_obj.data.decode("utf-8") if hasattr(req_obj, "data") else str(req_obj)
+                captured_bodies.append((reason, body))
 
     # All reason values must have produced a urlopen call (one per reason)
     assert mock_url.call_count == len(reasons), (
         f"Expected {len(reasons)} calls (one per reason), got {mock_url.call_count}"
+    )
+
+    # Each reason must render a human label, NOT the raw reason string, in the bold header
+    # (trail_stop must NOT appear as "trail_stop" — must render as "Trail Stop" or similar)
+    for reason, body in captured_bodies:
+        assert f"<b>{reason}</b>" not in body, (
+            f"Reason '{reason}' was rendered as raw string in alert body — "
+            "must use a human label from _EXIT_REASON_LABELS"
+        )
+
+
+@pytest.mark.asyncio
+async def test_trail_stop_label_not_raw_string():
+    """trail_stop must render a human label (not the raw key string) in format_exit_alert.
+
+    This is the ALERT-02 gap: _EXIT_REASON_LABELS was missing 'trail_stop' so a
+    trail-stop exit would fall back to the raw string 'trail_stop' in the Telegram bold header.
+    """
+    alerter = _make_alerter_with_token()
+    text = alerter.format_exit_alert("US.AAPL", "trail_stop", 1.5)
+    # The human label must be present (not the raw key)
+    assert "trail_stop" not in text or "Trail Stop" in text, (
+        f"'trail_stop' rendered as raw string in exit alert: {text!r}. "
+        "Must have a human label in _EXIT_REASON_LABELS."
+    )
+    assert "<b>trail_stop</b>" not in text, (
+        f"Raw reason key 'trail_stop' appeared as bold header: {text!r}"
     )
 
 
