@@ -760,27 +760,107 @@ class MoomooGateway:
     # Reconciliation Skeletons (SAFE-02 / SAFE-03)
     # --------------------------------------------------------
 
-    async def reconcile_once(self) -> dict:
-        """Reconcile bot state against broker truth (SAFE-02 skeleton).
+    async def reconcile_once(self, store, manager, alerter) -> dict:
+        """Broker-truth-wins drift reconciliation (SAFE-03 / D-07).
 
-        Reads broker positions and account state, then returns a diff dict.
-        Broker truth wins in all conflict cases.
+        Three cases:
+          - Externally-closed (in memory, flat at broker, NOT in manager._exiting):
+            mark CLOSED in DB, remove from manager._positions, fire Telegram alert.
+          - Orphan (broker has it, not in memory): adopt-and-protect (same as startup).
+          - In-flight (code in manager._exiting): skip to avoid racing manage_exit().
+
+        Args:
+            store:   StateStore instance (open).
+            manager: PositionManager instance.
+            alerter: TelegramAlerter for drift alerts.
 
         Returns:
-            dict with keys 'positions', 'accounts', and 'drift' describing
-            any discrepancy between local state and broker truth.
+            dict with keys 'closed' and 'adopted' listing affected codes.
         """
-        ret_pos, positions = await self.get_positions(refresh_cache=True)
-        ret_acc, accounts = await self.get_acc_list()
+        from bot.safety.audit_log import append_audit
+        from bot.safety.et_helpers import now_et
 
-        # Compare StateStore open positions against broker positions
-        # Apply broker-truth corrections (ghost position cleanup, fill matching)
-        # Drift detail logged to structlog for operator visibility
-        return {
-            "positions": positions if ret_pos == RET_OK else None,
-            "accounts": accounts if ret_acc == RET_OK else None,
-            "drift": {},
-        }
+        ret_pos, broker_data = await self.get_positions(refresh_cache=True)
+        broker_map = {}
+        if ret_pos == RET_OK and broker_data is not None and len(broker_data) > 0:
+            for _, row in broker_data.iterrows():
+                code = str(row.get("code", "") or "")
+                if not code:
+                    continue
+                broker_map[code] = {
+                    "qty": int(float(row.get("qty", 0) or 0)),
+                    "avg_cost": float(row.get("average_cost", 0) or 0),
+                }
+
+        now_ts = now_et().isoformat()
+        closed_codes = []
+        adopted_codes = []
+
+        # --- Check in-memory positions vs broker truth ---
+        in_memory_codes = list(manager._positions.keys()) if hasattr(manager, "_positions") else []
+        exiting_codes = getattr(manager, "_exiting", set())
+
+        for code in in_memory_codes:
+            if code in exiting_codes:
+                _logger.debug("reconcile_skip_in_flight_exit", code=code)
+                continue
+            if code not in broker_map:
+                # Externally closed (manual UI close or unknown fill) — D-07
+                _logger.warning("reconcile_externally_closed", code=code)
+                pos = manager._positions.get(code)
+                if pos is not None:
+                    store.conn.execute(
+                        "UPDATE positions SET phase='CLOSED', updated_at=? WHERE position_id=?",
+                        (now_ts, pos.position_id),
+                    )
+                    store.conn.commit()
+                    from bot.position.state import PositionPhase
+                    pos.phase = PositionPhase.CLOSED
+                    del manager._positions[code]
+                    append_audit({"event": "drift_closed_by_broker", "code": code})
+                    # Fire Telegram alert (best-effort, fire-and-forget — ALERT-04)
+                    asyncio.create_task(
+                        alerter.send(f"<b>DRIFT:</b> {code} closed externally — stopped managing.")
+                    )
+                    closed_codes.append(code)
+
+        # --- Adopt orphan broker positions ---
+        state_codes = set(in_memory_codes)
+        for code, bp in broker_map.items():
+            if code in state_codes:
+                continue
+            if code in exiting_codes:
+                continue
+            _logger.warning("reconcile_orphan_adopting", code=code, broker_qty=bp["qty"])
+            lod = await self._derive_lod_for_orphan(code)
+            stop = self._compute_orphan_stop(lod)
+            import uuid
+            position_id = str(uuid.uuid4())
+            store.conn.execute(
+                """INSERT OR IGNORE INTO positions
+                   (position_id, code, phase, entry_price, initial_stop, trail_stop,
+                    full_quantity, remaining_quantity, entry_order_id,
+                    avg_fill_price, opened_at, updated_at)
+                   VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                (position_id, code, bp["avg_cost"], stop, stop,
+                 bp["qty"], bp["qty"], bp["avg_cost"], now_ts, now_ts),
+            )
+            store.conn.commit()
+            append_audit({"event": "drift_orphan_adopted", "code": code})
+            if manager is not None:
+                try:
+                    await self.subscribe([code])
+                except Exception:
+                    _logger.warning("drift_orphan_subscribe_failed", code=code, exc_info=True)
+            adopted_codes.append(code)
+
+        _logger.info(
+            "reconcile_once_done",
+            broker_positions=len(broker_map),
+            closed=closed_codes,
+            adopted=adopted_codes,
+        )
+        return {"closed": closed_codes, "adopted": adopted_codes}
 
     async def startup_reconcile(self, store, manager=None) -> None:
         """Reconcile StateStore positions against broker truth before any signal processing.
@@ -1007,15 +1087,19 @@ class MoomooGateway:
             return 0.0
         return float(lod * 0.99)  # lod_minus_1pct — same as compute_initial_stop
 
-    async def reconciliation_loop(self, interval_s: float = 75.0) -> None:
-        """Run reconcile_once() on a 60-90s loop (SAFE-03 skeleton).
+    async def reconciliation_loop(
+        self,
+        store,
+        manager,
+        alerter,
+        interval_s: float = 75.0,
+    ) -> None:
+        """Run reconcile_once() on a 60-90s loop (SAFE-03).
 
-        interval_s: sleep interval in seconds between reconciliation cycles.
-            Default 75.0 is within the 60-90s range specified by SAFE-03.
-
-        Note:
-            # Phase 4: full reconciliation logic
-            The loop itself is wired; the reconcile_once() payload grows in Phase 4.
+        store:     StateStore instance.
+        manager:   PositionManager instance.
+        alerter:   TelegramAlerter for drift alerts.
+        interval_s: cycle cadence in seconds (default 75.0 within SAFE-03 60-90s window).
 
         A single reconcile_once() failure (network blip, SDK error) is logged
         and the loop continues — one broker error must never permanently kill
@@ -1025,7 +1109,7 @@ class MoomooGateway:
         while True:
             await asyncio.sleep(interval_s)
             try:
-                await self.reconcile_once()
+                await self.reconcile_once(store=store, manager=manager, alerter=alerter)
             except asyncio.CancelledError:
                 raise  # propagate cancellation for clean shutdown
             except Exception:
