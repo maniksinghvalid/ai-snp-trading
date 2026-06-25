@@ -650,6 +650,180 @@ class TestOnBarStopOut:
         # Should not raise
         asyncio.run(manager.on_bar(bar))
 
+    def test_zero_fill_stop_out_reprotects(
+        self, open_store, mock_strategy
+    ):
+        """CR-01: zero fill from manage_exit reverts position to managed phase, NOT CLOSED.
+
+        Stop triggers (close <= trail_stop). manage_exit returns 0 (broker reject).
+        After on_bar:
+          - remaining_quantity unchanged (> 0)
+          - phase reverted to a managed (non-CLOSED) phase (prev_phase)
+          - DB row NOT CLOSED
+          - stop_out_incomplete logged
+          - A SECOND on_bar with close still <= trail_stop calls manage_exit again (retry).
+        """
+        import structlog.testing as stl_testing
+
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=0)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            trail_stop=98.0,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=97.5)  # triggers stop-out
+
+        with stl_testing.capture_logs() as cap:
+            asyncio.run(mgr.on_bar(bar))
+
+        # remaining_quantity unchanged (broker didn't sell anything)
+        assert pos.remaining_quantity == 300, (
+            f"remaining_quantity must stay 300 on zero fill, got {pos.remaining_quantity}"
+        )
+        # phase must NOT be CLOSED — reverted to managed
+        assert pos.phase != PositionPhase.CLOSED, (
+            f"phase must not be CLOSED on zero fill stop-out, got {pos.phase}"
+        )
+        # DB must NOT show CLOSED
+        rows = open_store.conn.execute(
+            "SELECT phase FROM positions WHERE code='US.AAPL'"
+        ).fetchall()
+        assert not any(r[0] == "CLOSED" for r in rows), (
+            f"DB must not persist CLOSED on zero fill; got rows: {rows}"
+        )
+        # stop_out_incomplete must be logged
+        keys = [e.get("event") for e in cap]
+        assert "stop_out_incomplete" in keys, (
+            f"Expected 'stop_out_incomplete' log on zero fill, got: {keys}"
+        )
+
+        # Second bar still triggers — manage_exit called again (retry proof)
+        call_count_before = engine.manage_exit.call_count
+        asyncio.run(mgr.on_bar(bar))
+        assert engine.manage_exit.call_count > call_count_before, (
+            "manage_exit must be called again on the second triggering bar (retry)"
+        )
+
+    def test_short_fill_stop_out_reprotects(
+        self, open_store, mock_strategy
+    ):
+        """WR-02 + CR-01: short fill credits filled shares; remaining and phase reverted.
+
+        Stop triggers; manage_exit returns 120 (short of 300 requested).
+        After on_bar:
+          - remaining_quantity == 180 (300 - 120 credited)
+          - phase reverted to managed (not CLOSED)
+          - stop_out_incomplete logged
+          - A second triggering bar re-attempts exit of remaining 180.
+        """
+        import structlog.testing as stl_testing
+
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=120)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            trail_stop=98.0,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=97.5)
+
+        with stl_testing.capture_logs() as cap:
+            asyncio.run(mgr.on_bar(bar))
+
+        assert pos.remaining_quantity == 180, (
+            f"Expected 180 (300-120 credited), got {pos.remaining_quantity}"
+        )
+        assert pos.phase != PositionPhase.CLOSED, (
+            f"phase must not be CLOSED on short fill, got {pos.phase}"
+        )
+        keys = [e.get("event") for e in cap]
+        assert "stop_out_incomplete" in keys, (
+            f"Expected 'stop_out_incomplete' log on short fill, got: {keys}"
+        )
+
+        # Second bar re-attempts exit
+        call_count_before = engine.manage_exit.call_count
+        asyncio.run(mgr.on_bar(bar))
+        assert engine.manage_exit.call_count > call_count_before, (
+            "manage_exit must retry on next triggering bar after short fill"
+        )
+
+    def test_full_fill_stop_out_closes(
+        self, open_store, mock_strategy
+    ):
+        """Full fill: remaining_quantity == 0, phase == CLOSED, alert fires once.
+
+        stop triggers; manage_exit returns 300 (full fill). After on_bar:
+          - remaining_quantity == 0
+          - phase == CLOSED
+          - stop_out_filled persisted
+          - exactly one exit alert
+        """
+        alert_calls = []
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=300)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: alert_calls.append((code, reason, r)),
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            trail_stop=98.0,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=97.5)
+        asyncio.run(mgr.on_bar(bar))
+
+        assert pos.remaining_quantity == 0, (
+            f"Expected 0 after full fill, got {pos.remaining_quantity}"
+        )
+        assert pos.phase == PositionPhase.CLOSED, (
+            f"Expected CLOSED after full fill, got {pos.phase}"
+        )
+        assert len(alert_calls) == 1, (
+            f"Expected exactly 1 exit alert on full fill, got {len(alert_calls)}"
+        )
+
 
 # ============================================================
 # Test: on_bar partial-profit transition
@@ -661,7 +835,12 @@ class TestOnBarPartialProfit:
     def test_close_at_0_75R_triggers_partial_profit(
         self, manager, open_store, mock_engine
     ):
-        """A bar.close >= entry + 0.75R triggers PARTIAL_TAKEN; remaining_quantity decremented."""
+        """A bar.close >= entry + 0.75R triggers PARTIAL_TAKEN; remaining_quantity decremented.
+
+        With mock manage_exit returning 0 (no fill), remaining_quantity stays at 300.
+        The handler owns the decrement (handler-owns convention); with zero fill nothing
+        is decremented.
+        """
         # entry=100, initial_stop=98 → R=2; 0.75R threshold = 100 + 0.75*2 = 101.5
         pos = _make_pos(
             phase=PositionPhase.ACTIVE,
@@ -680,8 +859,174 @@ class TestOnBarPartialProfit:
         asyncio.run(manager.on_bar(bar))
 
         assert pos.phase == PositionPhase.PARTIAL_TAKEN
-        # partial_qty = floor(300 * 0.3333) = floor(99.99) = 99 → remaining = 300 - 99 = 201
-        assert pos.remaining_quantity == 201
+        # mock manage_exit returns 0 → handler decrement is 0 → remaining stays 300
+        assert pos.remaining_quantity == 300
+
+    def test_partial_fill_keeps_remaining_at_broker_truth(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """NON-ZERO fill: remaining_quantity == broker truth (300 - 99 = 201).
+
+        CR-02 regression test. entry=100, stop=98, R=2; partial_qty = floor(300*0.3333)=99.
+        manage_exit returns 99 (full requested qty filled). Handler applies exactly ONE
+        decrement of 99, leaving remaining_quantity == 201 (broker truth).
+        """
+        # Wire manage_exit to return 99 (non-zero real fill)
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=99)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+        asyncio.run(mgr.on_bar(bar))
+
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        # Broker sold 99 of 300 → broker holds 201; bot must agree
+        assert pos.remaining_quantity == 201, (
+            f"Expected 201 (broker truth), got {pos.remaining_quantity}"
+        )
+
+    def test_partial_short_fill_restores_shortfall(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """SHORT fill: remaining_quantity == 300 - 40 = 260; partial_short_fill logged.
+
+        manage_exit returns 40 (short of the requested 99). Handler credits only the 40
+        actually filled, leaving remaining_quantity == 260.
+        """
+        import structlog.testing as stl_testing
+
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=40)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+        with stl_testing.capture_logs() as cap:
+            asyncio.run(mgr.on_bar(bar))
+
+        assert pos.remaining_quantity == 260, (
+            f"Expected 260 (300 - 40 filled), got {pos.remaining_quantity}"
+        )
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        keys = [e.get("event") for e in cap]
+        assert "partial_short_fill" in keys, (
+            f"Expected 'partial_short_fill' log, got keys: {keys}"
+        )
+
+    def test_partial_zero_fill_keeps_full_remaining(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """ZERO fill: remaining_quantity stays at 300; phase is PARTIAL_TAKEN.
+
+        manage_exit returns 0 (broker reject). Handler decrement is 0, so remaining
+        stays at 300.
+        """
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=0)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+        asyncio.run(mgr.on_bar(bar))
+
+        assert pos.remaining_quantity == 300, (
+            f"Expected 300 (nothing sold on zero fill), got {pos.remaining_quantity}"
+        )
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+
+    def test_partial_drives_remaining_to_zero_marks_closed(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """WR-01: partial fill that zeroes remaining_quantity marks position CLOSED.
+
+        Position has remaining_quantity=99; partial_qty=floor(99*0.3333)=33.
+        But we inject a fill of 99 (full remaining) to drive remaining to 0.
+        """
+        engine = MagicMock()
+        # manage_exit returns the full remaining quantity
+        engine.manage_exit = AsyncMock(return_value=99)
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store,
+            engine=engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        # Use remaining_quantity=99 so a fill of 99 drives remaining to 0
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=99,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+        asyncio.run(mgr.on_bar(bar))
+
+        assert pos.remaining_quantity == 0, (
+            f"Expected 0 after full fill, got {pos.remaining_quantity}"
+        )
+        assert pos.phase == PositionPhase.CLOSED, (
+            f"Expected CLOSED when remaining hits 0, got {pos.phase}"
+        )
 
 
 # ============================================================
