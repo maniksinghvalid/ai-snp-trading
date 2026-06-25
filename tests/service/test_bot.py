@@ -137,3 +137,41 @@ def test_scheduler_has_required_jobs():
         assert any(pattern in jid for jid in job_ids), (
             f"No job with '{pattern}' in job id; jobs: {job_ids}"
         )
+
+
+# ============================================================
+# 05-04: EOD report job (DASH-01, ALERT-03)
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_eod_report_job_writes_reports_and_dispatches_summary(tmp_path):
+    """_job_eod_report must call write_reports and dispatch the daily summary (DASH-01, ALERT-03)."""
+    bot, _, _ = _make_bot_with_mocks()
+
+    # Configure mock_store to return known data
+    mock_trades = [
+        {"code": "US.AAPL", "r_multiple": 1.5, "entry_price": 190.0,
+         "exit_price": 195.0, "quantity": 10, "exit_reason": "trail",
+         "closed_at": "2026-06-24T15:00:00"},
+    ]
+    mock_positions = []
+    bot._store.get_closed_trades.return_value = mock_trades
+    bot._store.get_open_positions.return_value = mock_positions
+
+    # Patch write_reports and is_trading_day
+    with patch("bot.service.bot._write_reports") as mock_write, \
+         patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        from datetime import date
+        mock_now.return_value.date.return_value = date(2026, 6, 24)
+        mock_write.return_value = None
+        await bot._job_eod_report()
+
+    # write_reports must have been called once
+    assert mock_write.called, "_write_reports must be called by _job_eod_report"
+
+    # alerter.send must have been dispatched (create_task is fire-and-forget,
+    # so check format_daily_summary was called or send was called)
+    assert bot._alerter.send.called or bot._alerter.format_daily_summary.called, (
+        "Daily summary must be dispatched via alerter"
+    )

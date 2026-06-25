@@ -23,6 +23,7 @@ from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 from bot.scanner.calendar import is_trading_day
+from bot.service.report import build_daily_html as _build_daily_html, write_reports as _write_reports
 
 # ============================================================
 # Module-level logger
@@ -379,22 +380,57 @@ class TradingBot:
             _logger.error("force_close_error", exc_info=True)
 
     async def _job_eod_report(self) -> None:
-        """EOD report job — placeholder for 05-04 ReportBuilder injection.
+        """EOD report job — build HTML report after force-close + dispatch daily Telegram summary.
 
-        If a report hook is wired via _report_hook attribute, it is called.
-        Otherwise this job is a no-op — no TODO marker (05-04 wires it externally).
+        Sequence (DASH-01, D-15/D-16, ALERT-03, D-02, T-05-04-04):
+          1. Trading-day guard — no-op on non-trading days (D-01).
+          2. Fetch trades + open positions from the store (read-only; WAL-safe, T-05-04-03).
+          3. Build HTML report via ReportBuilder.build_daily_html (pure computation).
+          4. Write reports/{date}.html + reports/latest.html via run_in_executor (file I/O off
+             the event loop — T-05-04-04 denial-of-service mitigation).
+          5. Build daily summary text and dispatch via asyncio.create_task (fire-and-forget
+             ALERT-03; never blocks the loop — ALERT-04).
+          6. Append audit entry for report generation.
         """
-        report_hook = getattr(self, "_report_hook", None)
-        if report_hook is not None:
-            try:
-                result = report_hook()
-                if asyncio.iscoroutine(result):
-                    await result
-                _logger.info("eod_report_done")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _logger.error("eod_report_error", exc_info=True)
+        today = now_et().date()
+        if not is_trading_day(today):
+            _logger.debug("eod_report_skipped_not_trading_day", date=str(today))
+            return
+
+        _logger.info("eod_report_start", date=str(today))
+        try:
+            # Steps 2–4: Fetch data, build HTML, write reports (all file I/O off the loop)
+            loop = asyncio.get_running_loop()
+
+            def _fetch_build_write():
+                """Run in executor: fetch store data + build HTML + write reports (T-05-04-04)."""
+                trades_rows = self._store.get_closed_trades(today)
+                positions_rows = self._store.get_open_positions()
+                html_content = _build_daily_html(trades_rows, positions_rows, today)
+                _write_reports(html_content, today)
+                return trades_rows, positions_rows
+
+            trades_rows, positions_rows = await loop.run_in_executor(
+                None, _fetch_build_write
+            )
+            _logger.info("eod_report_written", date=str(today), trade_count=len(trades_rows))
+
+            # Step 5: Dispatch daily summary (ALERT-03, fire-and-forget)
+            summary = self._alerter.format_daily_summary(trades_rows, positions_rows)
+            asyncio.create_task(self._alerter.send(summary))
+
+            # Step 6: Audit entry for report generation
+            append_audit({
+                "event": "eod_report_generated",
+                "date": str(today),
+                "trade_count": len(trades_rows),
+            })
+
+            _logger.info("eod_report_done", date=str(today))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("eod_report_error", exc_info=True)
 
     # ============================================================
     # D-07 Graceful shutdown sequence
