@@ -464,9 +464,11 @@ class TradingBot:
             _logger.error("premarket_scan_error", exc_info=True)
 
     async def _job_market_open_subscribe(self) -> None:
-        """Market-open subscribe job — subscribes the active watchlist (D-01 guard).
+        """Market-open subscribe job — subscribes the active watchlist and seeds premarket highs (D-01 guard).
 
-        Gets the current watchlist from the store and subscribes those codes.
+        Gets the current watchlist from the store, subscribes those codes, then
+        seeds SignalEngine._premarket_highs via fetch_premarket_highs() (D-01/D-03).
+        Seeding happens AFTER subscribe so bars cannot flow before Gate 1 is populated.
         No-ops on non-trading days.
         """
         today = now_et().date()
@@ -493,12 +495,81 @@ class TradingBot:
             if codes:
                 await self._gateway.subscribe(codes)
                 _logger.info("market_open_subscribe_done", codes=codes, count=len(codes))
+
+                # D-01/D-03: Seed premarket highs via one batched snapshot call.
+                # fetch_premarket_highs() calls set_premarket_highs() internally, freezing
+                # _premarket_highs for the session so Gate 1 of on_bar can pass.
+                # Must run AFTER subscribe so the wiring seam is: subscribe → seed → bars flow.
+                if self._signal_engine is not None:
+                    await self._signal_engine.fetch_premarket_highs(codes)
             else:
                 _logger.info("market_open_subscribe_empty_watchlist", date=str(today))
         except asyncio.CancelledError:
             raise
         except Exception:
             _logger.error("market_open_subscribe_error", exc_info=True)
+
+    async def _seed_premarket_highs_on_startup(self) -> None:
+        """Seed premarket highs immediately on bot startup if the market is already open (D-01/D-03).
+
+        Handles the mid-session restart case: when the bot starts AFTER 09:30 ET but
+        BEFORE EOD (force_close_et), the 09:30 CronTrigger will NOT fire until next day,
+        so premarket highs would never be seeded — the bot would be dead-for-the-day.
+
+        Reads the watchlist and calls fetch_premarket_highs() if:
+          1. today is a trading day, AND
+          2. now_et() is between market_open_et (inclusive) and force_close_et (inclusive).
+
+        Called from run() after _do_startup_wiring() and before _register_jobs() so the
+        seeding is in place BEFORE the scheduler starts dispatching bars (Pitfall 5 order).
+        No-op on non-trading days or outside the session window.
+        """
+        today = now_et().date()
+        if not is_trading_day(today):
+            _logger.debug("startup_seed_skipped_not_trading_day", date=str(today))
+            return
+
+        # Check if now_et() is inside the session window [market_open_et, force_close_et]
+        now_time = now_et().time().replace(tzinfo=None)
+        open_h, open_m = self._parse_hhmm(self._cfg.market_open_et)
+        close_h, close_m = self._parse_hhmm(self._cfg.force_close_et)
+        market_open_time = _time(open_h, open_m)
+        force_close_time = _time(close_h, close_m)
+
+        if now_time < market_open_time or now_time > force_close_time:
+            _logger.debug(
+                "startup_seed_skipped_outside_session",
+                now=str(now_time),
+                market_open=str(market_open_time),
+                force_close=str(force_close_time),
+            )
+            return
+
+        if self._signal_engine is None:
+            return
+
+        _logger.info("startup_seed_premarket_highs_start", date=str(today))
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _get_watchlist_worker():
+                return self._store.get_watchlist_codes(today)
+
+            codes = await loop.run_in_executor(None, _get_watchlist_worker)
+            if codes:
+                await self._signal_engine.fetch_premarket_highs(codes)
+                _logger.info(
+                    "startup_seed_premarket_highs_done",
+                    date=str(today),
+                    codes=codes,
+                    count=len(codes),
+                )
+            else:
+                _logger.info("startup_seed_premarket_highs_empty_watchlist", date=str(today))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("startup_seed_premarket_highs_error", exc_info=True)
 
     async def _job_intraday_rescan(self) -> None:
         """Intraday re-scan job — honors 09:55-12:55 ET window and trading-day guard.
@@ -703,6 +774,12 @@ class TradingBot:
             # MUST be before self._register_jobs() / self._scheduler.start() (Pitfall 5).
             loop = asyncio.get_running_loop()
             self._do_startup_wiring(loop)
+
+            # D-01/D-03 mid-session restart: if the bot starts while the market is
+            # already open, seed premarket highs immediately so the bot is not
+            # dead-for-the-day. Called BEFORE _register_jobs/_scheduler.start() so
+            # Gate 1 is satisfied before any bar can flow through the pipeline.
+            await self._seed_premarket_highs_on_startup()
 
             self._register_jobs()
             self._scheduler.start()

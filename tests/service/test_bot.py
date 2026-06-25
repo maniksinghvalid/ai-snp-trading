@@ -169,3 +169,130 @@ async def test_eod_report_job_writes_reports_and_dispatches_summary(tmp_path):
     assert bot._alerter.send.called or bot._alerter.format_daily_summary.called, (
         "Daily summary must be dispatched via alerter"
     )
+
+
+# ============================================================
+# Regression: premarket-high-not-seeded (D-01/D-03 seam lock)
+#
+# _job_market_open_subscribe must call signal_engine.fetch_premarket_highs(codes)
+# after gateway.subscribe(codes) so Gate 1 of on_bar is satisfied before bars flow.
+# Without this call, _premarket_highs stays empty and no entry signal can ever fire.
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_market_open_subscribe_seeds_premarket_highs():
+    """_job_market_open_subscribe must call signal_engine.fetch_premarket_highs(codes).
+
+    Regression for premarket-high-not-seeded (2026-06-25): the market-open job
+    subscribed feeds but never called fetch_premarket_highs(), leaving Gate 1 of
+    on_bar permanently blocking every bar with signal_skipped_no_premarket_high.
+
+    After the fix, _job_market_open_subscribe calls fetch_premarket_highs(codes)
+    immediately after gateway.subscribe(codes), so _premarket_highs is populated
+    before any bar can flow through the signal pipeline.
+    """
+    from bot.service.bot import TradingBot
+    from datetime import date
+
+    mock_cfg = MagicMock()
+    mock_cfg.premarket_scan_et = "08:30"
+    mock_cfg.market_open_et = "09:30"
+    mock_cfg.intraday_rescan_interval_min = 30
+    mock_cfg.intraday_rescan_start_et = "09:55"
+    mock_cfg.intraday_rescan_end_et = "12:55"
+    mock_cfg.eod_report_et = "15:55"
+    mock_cfg.force_close_et = "15:51"
+    mock_cfg.misfire_grace_scan_s = 3600
+    mock_cfg.misfire_grace_rescan_s = 600
+    mock_cfg.force_close_misfire_grace_s = 300
+
+    mock_gateway = MagicMock()
+    mock_gateway.subscribe = AsyncMock()
+    mock_store = MagicMock()
+    mock_store.get_watchlist_codes.return_value = ["US.AAPL", "US.MSFT"]
+
+    # The critical mock: fetch_premarket_highs must be called by the job
+    mock_signal_engine = MagicMock()
+    mock_signal_engine.fetch_premarket_highs = AsyncMock(return_value={"US.AAPL": 150.0, "US.MSFT": 300.0})
+
+    bot = TradingBot(
+        cfg=mock_cfg,
+        gateway=mock_gateway,
+        store=mock_store,
+        scanner=MagicMock(),
+        position_manager=MagicMock(),
+        execution_engine=MagicMock(),
+        kill_switch=MagicMock(),
+        alerter=MagicMock(),
+        watchdog=None,
+        signal_engine=mock_signal_engine,
+        risk_engine=MagicMock(),
+    )
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 6, 24)
+        await bot._job_market_open_subscribe()
+
+    # Assert gateway.subscribe was called with the watchlist
+    mock_gateway.subscribe.assert_called_once_with(["US.AAPL", "US.MSFT"])
+
+    # Assert fetch_premarket_highs was called with the same codes (the regression seam)
+    mock_signal_engine.fetch_premarket_highs.assert_called_once_with(["US.AAPL", "US.MSFT"]), (
+        "_job_market_open_subscribe must call signal_engine.fetch_premarket_highs(codes) "
+        "after subscribe so Gate 1 of on_bar is satisfied before bars flow (D-01/D-03). "
+        "Regression: omitting this call leaves _premarket_highs empty all session."
+    )
+
+
+@pytest.mark.asyncio
+async def test_market_open_subscribe_skips_seed_when_signal_engine_none():
+    """_job_market_open_subscribe must not crash when signal_engine is None.
+
+    Defensive guard: if signal_engine is not injected (e.g. during early startup or
+    in test rigs that don't need it), the seeding step is silently skipped rather
+    than raising AttributeError. The subscribe still completes normally.
+    """
+    from bot.service.bot import TradingBot
+    from datetime import date
+
+    mock_cfg = MagicMock()
+    mock_cfg.premarket_scan_et = "08:30"
+    mock_cfg.market_open_et = "09:30"
+    mock_cfg.intraday_rescan_interval_min = 30
+    mock_cfg.intraday_rescan_start_et = "09:55"
+    mock_cfg.intraday_rescan_end_et = "12:55"
+    mock_cfg.eod_report_et = "15:55"
+    mock_cfg.force_close_et = "15:51"
+    mock_cfg.misfire_grace_scan_s = 3600
+    mock_cfg.misfire_grace_rescan_s = 600
+    mock_cfg.force_close_misfire_grace_s = 300
+
+    mock_gateway = MagicMock()
+    mock_gateway.subscribe = AsyncMock()
+    mock_store = MagicMock()
+    mock_store.get_watchlist_codes.return_value = ["US.AAPL"]
+
+    # signal_engine=None — the guard must prevent AttributeError
+    bot = TradingBot(
+        cfg=mock_cfg,
+        gateway=mock_gateway,
+        store=mock_store,
+        scanner=MagicMock(),
+        position_manager=MagicMock(),
+        execution_engine=MagicMock(),
+        kill_switch=MagicMock(),
+        alerter=MagicMock(),
+        watchdog=None,
+        signal_engine=None,
+        risk_engine=None,
+    )
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 6, 24)
+        # Must not raise even with signal_engine=None
+        await bot._job_market_open_subscribe()
+
+    # Subscribe still called
+    mock_gateway.subscribe.assert_called_once_with(["US.AAPL"])

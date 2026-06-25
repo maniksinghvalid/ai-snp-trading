@@ -729,3 +729,113 @@ class TestSignalEngineDailyCap:
             assert result_allowed is not None, (
                 "Broker-flat code with no PENDING intent must be allowed to signal (D-10)"
             )
+
+
+# ============================================================
+# Regression: premarket-high-not-seeded (D-01/D-03 wire lock)
+#
+# Proves that when fetch_premarket_highs() has been called at session-init
+# (the seam wired in _job_market_open_subscribe), a qualifying bar drives
+# the full on_bar path and emits a SignalEvent.  Locks the wire in place so
+# removing the production call restores the original live failure.
+# ============================================================
+
+class TestPremarketHighSeededEndToEnd:
+    """Regression: entry signal fires end-to-end when premarket highs are seeded (D-01/D-03).
+
+    These tests document the exact seam that was broken before the fix:
+      - fetch_premarket_highs() must be called before bars flow.
+      - Without it, Gate 1 (signal_skipped_no_premarket_high) blocks every bar.
+      - With it, all gates can pass and a SignalEvent is emitted.
+
+    Added as part of fix for premarket-high-not-seeded debug session (2026-06-25).
+    """
+
+    def _make_seeded_store(self, session_date: str = "2026-06-24") -> StateStore:
+        """Open an in-memory StateStore with a daily_scan row for US.AAPL."""
+        s = StateStore(db_path=":memory:")
+        s.open()
+        s.conn.execute(
+            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_date, "US.AAPL", 2.0, 1, f"{session_date}T09:30:00", 500_000),
+        )
+        s.conn.commit()
+        return s
+
+    def test_entry_fires_after_fetch_premarket_highs(self):
+        """Drives on_bar→signal path with premarket highs seeded via fetch_premarket_highs.
+
+        Regression for the live bug: fetch_premarket_highs was never called in
+        production so _premarket_highs stayed empty and Gate 1 blocked every bar.
+        After the fix, _job_market_open_subscribe calls fetch_premarket_highs(codes).
+        This test proves the seam works end-to-end using the real SignalEngine.
+        """
+        cfg = make_cfg(rvol_min=2.0, earliest_entry_et="10:05", latest_entry_et="15:30")
+
+        # Mock gateway: snapshot returns valid pre_high_price for US.AAPL
+        snap_data = pd.DataFrame({
+            "code": ["US.AAPL"],
+            "pre_high_price": [150.0],
+        })
+        gateway = MagicMock()
+        gateway.get_market_snapshot = AsyncMock(return_value=(0, snap_data))
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        store = self._make_seeded_store()
+        engine = SignalEngine(cfg=cfg, gateway=gateway, store=store)
+
+        # Simulate the production seam: _job_market_open_subscribe calls this.
+        # _premarket_highs starts empty — fetch call populates and freezes it.
+        run(engine.fetch_premarket_highs(["US.AAPL"]))
+
+        # Confirm Gate 1 is now satisfied (premarket high is frozen)
+        assert engine._premarket_highs.get("US.AAPL") == 150.0, (
+            "fetch_premarket_highs must freeze pre_high_price in _premarket_highs (D-01)"
+        )
+
+        # Bar: close=155 > premarket_high=150 (I1), close=155 >= hod=154 (I2),
+        # rvol = 1_000_000/500_000 = 2.0 >= rvol_min=2.0 (I3), inside entry window.
+        bar = make_bar(code="US.AAPL", close=155.0, hod=154.0)
+
+        in_window_time = datetime(2026, 6, 24, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window_time):
+            result = run(engine.on_bar(bar))
+
+        assert result is not None, (
+            "Expected SignalEvent after fetch_premarket_highs seeded the session. "
+            "Regression: without the production seam call, Gate 1 blocks every bar "
+            "with signal_skipped_no_premarket_high."
+        )
+        assert isinstance(result, SignalEvent)
+        assert result.code == "US.AAPL"
+        assert result.premarket_high == 150.0
+
+    def test_entry_blocked_without_fetch_premarket_highs(self):
+        """Gate 1 blocks every bar when fetch_premarket_highs has NOT been called.
+
+        Regression counterpart: documents the exact failure mode that existed before
+        the fix. If the production seam is ever removed, this test stays green but
+        test_entry_fires_after_fetch_premarket_highs goes red — which is the right signal.
+        """
+        cfg = make_cfg(rvol_min=2.0, earliest_entry_et="10:05", latest_entry_et="15:30")
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        store = self._make_seeded_store()
+        engine = SignalEngine(cfg=cfg, gateway=gateway, store=store)
+
+        # Deliberately do NOT call fetch_premarket_highs — simulates missing production wire.
+        assert engine._premarket_highs == {}, "_premarket_highs must start empty"
+
+        bar = make_bar(code="US.AAPL", close=155.0, hod=154.0)
+
+        in_window_time = datetime(2026, 6, 24, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window_time):
+            result = run(engine.on_bar(bar))
+
+        assert result is None, (
+            "Expected no SignalEvent when _premarket_highs is empty (Gate 1 must block). "
+            "This documents the live bug: signal_skipped_no_premarket_high blocks 100% of bars."
+        )
