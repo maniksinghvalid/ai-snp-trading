@@ -22,11 +22,13 @@ from bot.config.loader import ConfigError, load_strategy_config
 from bot.execution.engine import ExecutionEngine
 from bot.gateway.gateway import MoomooGateway, get_gateway_config
 from bot.position.manager import PositionManager
+from bot.risk.risk_engine import RiskEngine
 from bot.safety.kill_switch import KillSwitch
 from bot.safety.logger import configure_logging, get_logger
 from bot.service.alerter import TelegramAlerter
 from bot.service.bot import TradingBot
 from bot.service.watchdog import OpenDWatchdog
+from bot.signal.signal_engine import SignalEngine
 from bot.state.store import StateStore
 from bot.strategy.trend_join_long import TrendJoinLong
 
@@ -47,6 +49,9 @@ def main() -> None:
       4. Construct MoomooGateway, StateStore, TrendJoinLong, ExecutionEngine, TelegramAlerter
       5. Construct PositionManager with on_entry_alert/on_exit_alert lambdas that
          dispatch via asyncio.create_task (fire-and-forget, ALERT-04)
+      5d. Construct SignalEngine (loop-independent leaf; cfg/gateway/store only — D-04)
+      5e. Construct RiskEngine (loop-independent leaf; receives signal_engine ref for
+          the D-09 daily-cap burst guard — RISK-05 / Pitfall 7)
       6. Construct KillSwitch
       7. Construct TradingBot then OpenDWatchdog (watchdog needs bot ref) — inject via bot._watchdog
       8. asyncio.run(bot.run())
@@ -73,6 +78,15 @@ def main() -> None:
     # Step 5a: Construct strategy and execution engine
     strategy = TrendJoinLong(cfg)
     engine = ExecutionEngine(gateway=gateway, store=store, cfg=cfg)
+
+    # Step 5d: Construct SignalEngine — loop-independent leaf (D-04)
+    # Takes only cfg/gateway/store; the loop-dependent aggregator stays in TradingBot.run()
+    signal_engine = SignalEngine(cfg=cfg, gateway=gateway, store=store)
+
+    # Step 5e: Construct RiskEngine — loop-independent leaf (D-04)
+    # Receives signal_engine reference so note_intent_emitted() drives the D-09 daily-cap
+    # burst guard (RISK-05 / Pitfall 7). signal_engine MUST be constructed first.
+    risk_engine = RiskEngine(cfg=cfg, gateway=gateway, store=store, signal_engine=signal_engine)
 
     # Step 5b: Construct alerter
     alerter = TelegramAlerter(
@@ -110,6 +124,8 @@ def main() -> None:
         kill_switch=kill_switch,
         alerter=alerter,
         watchdog=None,  # set below after watchdog construction
+        signal_engine=signal_engine,
+        risk_engine=risk_engine,
     )
 
     # Step 7b: Construct OpenDWatchdog with bot reference (SVC-02)
