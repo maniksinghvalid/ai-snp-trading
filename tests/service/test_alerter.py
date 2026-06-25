@@ -36,7 +36,6 @@ def _make_alerter_with_token():
 # ALERT-01: Entry alert content
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-03 (TelegramAlerter not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_entry_alert_content():
     """Entry alert must include ticker, size, entry price, and stop (ALERT-01)."""
@@ -72,7 +71,6 @@ async def test_entry_alert_content():
 # ALERT-02: Exit alert for all exit reasons
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-03 (TelegramAlerter not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_exit_alert_for_all_reasons():
     """Exit alert must be sendable for each exit_reason value (ALERT-02)."""
@@ -101,7 +99,6 @@ async def test_exit_alert_for_all_reasons():
 # ALERT-03: Daily summary content
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-03 (TelegramAlerter not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_daily_summary_content():
     """Daily summary alert must include trades, wins, PnL, and open-risk (ALERT-03)."""
@@ -131,7 +128,6 @@ async def test_daily_summary_content():
 # ALERT-04: Failure isolation — send() must not raise
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-03 (TelegramAlerter not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_send_failure_does_not_raise():
     """urllib.request.urlopen raising OSError must not propagate from send() (ALERT-04)."""

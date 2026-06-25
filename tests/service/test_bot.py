@@ -69,7 +69,6 @@ def _make_bot_with_mocks():
 # SVC-01: Scheduler jobs (TradingBot)
 # ============================================================
 
-@pytest.mark.xfail(reason="implemented in 05-01 (TradingBot not yet created)", strict=False)
 def test_premarket_scan_job_called():
     """TradingBot must register a premarket scan job at cfg.premarket_scan_et (SVC-01)."""
     bot, _, _ = _make_bot_with_mocks()
@@ -81,7 +80,6 @@ def test_premarket_scan_job_called():
     )
 
 
-@pytest.mark.xfail(reason="implemented in 05-01 (TradingBot not yet created)", strict=False)
 def test_intraday_rescan_job_called():
     """Intraday rescan job must fire ~7× in the 09:55–12:55 window at 30min intervals (SCAN-07)."""
     bot, _, _ = _make_bot_with_mocks()
@@ -92,7 +90,6 @@ def test_intraday_rescan_job_called():
     )
 
 
-@pytest.mark.xfail(reason="implemented in 05-01 (TradingBot not yet created)", strict=False)
 def test_force_close_job_called():
     """TradingBot must register a force-close job at cfg.force_close_et (SVC-01, D-08)."""
     bot, _, _ = _make_bot_with_mocks()
@@ -103,7 +100,6 @@ def test_force_close_job_called():
     )
 
 
-@pytest.mark.xfail(reason="implemented in 05-01 (TradingBot not yet created)", strict=False)
 @pytest.mark.asyncio
 async def test_readiness_gate_blocks_entries():
     """_readiness_gate must set entries_enabled=False until reconcile completes (D-08, SVC-01)."""
@@ -117,7 +113,6 @@ async def test_readiness_gate_blocks_entries():
     )
 
 
-@pytest.mark.xfail(reason="implemented in 05-01 (TradingBot not yet created)", strict=False)
 def test_kill_switch_flush_registered():
     """KillSwitch.register_flush must be wired with position_manager.flush_all before run() (R-04-01)."""
     bot, ks_mock, pm_mock = _make_bot_with_mocks()
@@ -126,7 +121,6 @@ def test_kill_switch_flush_registered():
     ks_mock.register_flush.assert_called_once_with(pm_mock.flush_all)
 
 
-@pytest.mark.xfail(reason="implemented in 05-01 (TradingBot not yet created)", strict=False)
 def test_scheduler_has_required_jobs():
     """TradingBot._register_jobs must add premarket, market_open, rescan, force_close, eod_report jobs."""
     bot, _, _ = _make_bot_with_mocks()
