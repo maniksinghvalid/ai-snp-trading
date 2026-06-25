@@ -1286,3 +1286,145 @@ def test_force_close_half_day():
     assert len(closed_calls) == 0, (
         "POS-04: manage_exit must NOT be called for already-CLOSED positions"
     )
+
+
+# ============================================================
+# Test: Task 1 — pending_exit_reason recorded at FSM trigger points (ALERT-02)
+# ============================================================
+
+class TestPendingExitReason:
+    """Verify pending_exit_reason is recorded on PositionState at FSM trigger points.
+
+    These tests assert the FIELD value set by the manager's trigger methods.
+    Alert-dispatch assertions are in TestExitAlertRealReason (Task 2).
+    """
+
+    def test_stop_out_records_stop_out_reason(
+        self, manager, open_store, mock_engine
+    ):
+        """ACTIVE phase → close <= trail_stop → pending_exit_reason == 'stop_out'."""
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+        )
+        manager._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        # Close below trail_stop triggers stop_out from ACTIVE phase
+        bar = _make_bar(close=97.0)
+        asyncio.run(manager.on_bar(bar))
+
+        assert pos.phase == PositionPhase.CLOSED
+        assert pos.pending_exit_reason == "stop_out", (
+            f"Expected 'stop_out' from ACTIVE phase stop, got {pos.pending_exit_reason!r}"
+        )
+
+    def test_trailing_stop_records_trail_stop_reason(
+        self, manager, open_store, mock_engine
+    ):
+        """TRAILING phase → close <= trail_stop → pending_exit_reason == 'trail_stop'."""
+        pos = _make_pos(
+            phase=PositionPhase.TRAILING,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=99.5,
+        )
+        manager._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        # Close below trail_stop from TRAILING phase → trail_stop reason
+        bar = _make_bar(close=99.0)
+        asyncio.run(manager.on_bar(bar))
+
+        assert pos.phase == PositionPhase.CLOSED
+        assert pos.pending_exit_reason == "trail_stop", (
+            f"Expected 'trail_stop' from TRAILING phase stop, got {pos.pending_exit_reason!r}"
+        )
+
+    def test_breakeven_stop_records_breakeven_reason(
+        self, manager, open_store, mock_engine
+    ):
+        """BREAKEVEN phase → close <= trail_stop → pending_exit_reason == 'breakeven'."""
+        pos = _make_pos(
+            phase=PositionPhase.BREAKEVEN,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=100.0,  # stop at entry (breakeven)
+        )
+        manager._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        # Close at entry price (which is the trail_stop) → stop_out from BREAKEVEN
+        bar = _make_bar(close=99.8)
+        asyncio.run(manager.on_bar(bar))
+
+        assert pos.phase == PositionPhase.CLOSED
+        assert pos.pending_exit_reason == "breakeven", (
+            f"Expected 'breakeven' from BREAKEVEN phase stop, got {pos.pending_exit_reason!r}"
+        )
+
+    def test_partial_records_partial_reason(
+        self, manager, open_store, mock_engine
+    ):
+        """ACTIVE phase → close >= 0.75R → pending_exit_reason == 'partial'."""
+        # entry=100, initial_stop=98 → R=2; 0.75R = 1.5 → threshold = 101.5
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            full_quantity=300,
+            remaining_quantity=300,
+        )
+        manager._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)
+        asyncio.run(manager.on_bar(bar))
+
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        assert pos.pending_exit_reason == "partial", (
+            f"Expected 'partial' after scale-out trigger, got {pos.pending_exit_reason!r}"
+        )
+
+    def test_force_close_records_force_close_reason(
+        self, open_store, mock_engine, mock_strategy
+    ):
+        """force_close_all on an open position records pending_exit_reason == 'force_close'."""
+        import datetime
+        from unittest.mock import patch
+
+        cfg = _minimal_cfg()
+        cfg.force_close_escalation_step_usd = 0.20
+        cfg.force_close_escalation_cadence_seconds = 0.01
+        cfg.exit_ttl_seconds = 10.0
+
+        # Engine fully fills the position
+        mock_engine.manage_exit = AsyncMock(return_value=100)
+
+        mgr = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=100,
+        )
+        mgr._positions["US.AAPL"] = pos
+        open_store.upsert_position(pos)
+
+        mock_now = datetime.datetime(
+            2026, 6, 24, 15, 52, 0, tzinfo=datetime.timezone.utc
+        )
+        with patch("bot.position.manager.get_market_close_et", return_value="16:00"), \
+             patch("bot.position.manager.now_et", return_value=mock_now):
+            asyncio.run(mgr.force_close_all(datetime.date(2026, 6, 24)))
+
+        assert pos.pending_exit_reason == "force_close", (
+            f"Expected 'force_close' after force_close_all, got {pos.pending_exit_reason!r}"
+        )
