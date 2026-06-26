@@ -428,3 +428,102 @@ class TestResolveTodayPrice:
         assert result.today_open == pytest.approx(101.0)
         assert result.today_price == pytest.approx(101.0)
         assert result.today_high == pytest.approx(102.0)
+
+
+# ============================================================
+# Task 2: download_intraday_1m batch fetcher (SCAN-06)
+# ============================================================
+
+class TestDownloadIntraday1m:
+    """SCAN-06: download_intraday_1m mirrors download_daily_bars contract on 1m prepost feed."""
+
+    def test_download_intraday_returns_per_ticker_frames(self):
+        """Mocked yf.download returns a dict of 1m frames keyed by ticker; calls yf.download
+        with the correct interval='1m', period='1d', prepost=True, group_by='ticker' params."""
+        symbols = ["AAPL", "MSFT", "GOOG"]
+        mock_data = _make_multi_ticker_data(symbols)
+
+        with patch("yfinance.download", return_value=mock_data) as mock_dl, \
+             patch("yfinance.shared._ERRORS", {}):
+            from bot.scanner.fetcher import download_intraday_1m
+            data, failed = download_intraday_1m(symbols)
+
+        assert failed == set()
+        assert "AAPL" in data
+        assert "MSFT" in data
+        assert "GOOG" in data
+
+        # Verify yf.download was called with the required 1m / prepost params
+        call_kwargs = mock_dl.call_args[1]
+        assert call_kwargs.get("interval") == "1m"
+        assert call_kwargs.get("period") == "1d"
+        assert call_kwargs.get("prepost") is True
+        assert call_kwargs.get("group_by") == "ticker"
+
+    def test_download_intraday_clears_shared_errors(self):
+        """yfinance.shared._ERRORS is cleared before each 1m download call to avoid stale state.
+
+        Pre-seed _ERRORS with a stale key; after download_intraday_1m returns it must be gone.
+        """
+        import yfinance.shared as yf_shared
+
+        symbols = ["AAPL"]
+        mock_data = _make_multi_ticker_data(symbols)
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS["STALE_INTRADAY"] = "stale error from previous 1m run"
+
+            with patch("yfinance.download", return_value=mock_data):
+                from bot.scanner.fetcher import download_intraday_1m
+                data, failed = download_intraday_1m(symbols)
+
+            # STALE_INTRADAY must be gone (cleared before download)
+            assert "STALE_INTRADAY" not in yf_shared._ERRORS, (
+                "shared._ERRORS.clear() must remove stale entries before 1m download"
+            )
+            assert failed == set(), "No failures expected with clean mock"
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+    def test_download_intraday_detects_failures(self):
+        """Some tickers returned all-NaN (real yfinance failure shape) appear in failed_set;
+        reuses _detect_failed/get_ticker_frame (no new ad-hoc failure detection).
+
+        Uses 100 symbols with 5 all-NaN failures (5% < 10% threshold) so the
+        degradation gate does NOT trip — this test validates failure detection,
+        not the degradation gate (that is tested separately in TestDegradationGate).
+        """
+        import yfinance.shared as yf_shared
+
+        total = 100
+        all_syms = [f"SYM{i:03d}" for i in range(total)]
+        fail_keys = [f"SYM{i:03d}" for i in range(5)]  # 5 failures = 5% < 10% threshold
+        ok = [s for s in all_syms if s not in fail_keys]
+        mock_data = _make_data_with_nan_failures(ok, fail_keys)
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()
+            with patch("yfinance.download", return_value=mock_data):
+                from bot.scanner.fetcher import download_intraday_1m
+                data, failed = download_intraday_1m(all_syms)
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+        assert set(fail_keys) == failed, "all-NaN tickers must be in failed_set"
+        for sym in ok[:5]:  # spot-check a few OK symbols are not in failed
+            assert sym not in failed
+
+    def test_download_intraday_empty_input(self):
+        """download_intraday_1m([]) returns ({}, set()) without calling yf.download."""
+        with patch("yfinance.download") as mock_dl:
+            from bot.scanner.fetcher import download_intraday_1m
+            data, failed = download_intraday_1m([])
+
+        assert data == {}
+        assert failed == set()
+        mock_dl.assert_not_called()
