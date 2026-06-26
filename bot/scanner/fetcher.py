@@ -312,26 +312,41 @@ def resolve_today_price(
     else:
         idx_et = idx.tz_convert(ET)
 
+    # WR-05: yf.download(period="1d", interval="1m") returns the most recent
+    # AVAILABLE trading session, which on a weekend/holiday/data-lag — or when run
+    # before any current-day 1m bar exists — may be a PRIOR day. Restrict to bars
+    # dated now_et.date() (ET) before computing open/price/high, and fail-closed if
+    # none match. Without this, stale prior-session bars would be resolved as
+    # "today's" numbers and ranked into the watchlist, defeating the no-look-ahead
+    # intent the daily path enforces via prior_mask. now_et is the injected ET clock
+    # (the same source that drives the phase decision), so date selection and phase
+    # selection stay coupled (IN-02).
+    today_date = now_et.date()
+    today_mask = [ts.date() == today_date for ts in idx_et]
+    if not any(today_mask):
+        # No 1m bar dated today — fail-closed (stale prior-session frame only).
+        return None
+    today_frame = frame_1m.loc[today_mask]
+    today_idx_et = [ts for ts in idx_et if ts.date() == today_date]
+
     if is_rth:
-        # Regular-session phase: select bars with ET bar-time >= 09:30
-        rth_mask = [ts.time() >= _RTH_OPEN for ts in idx_et]
-        rth_bars = frame_1m.loc[rth_mask]
+        # Regular-session phase: select today's bars with ET bar-time >= 09:30
+        rth_mask = [ts.time() >= _RTH_OPEN for ts in today_idx_et]
+        rth_bars = today_frame.loc[rth_mask]
         if rth_bars.empty:
             # No >=09:30 bar yet — fail-closed (e.g. data lag on open)
             return None
 
         # today_open: open of the FIRST regular-session bar (authoritative gap open)
         today_open = float(rth_bars["open"].iloc[0])
-        # today_price: close of the LATEST bar across the whole frame (current price)
-        today_price = float(frame_1m["close"].iloc[-1])
+        # today_price: close of the LATEST today-dated bar (current price)
+        today_price = float(today_frame["close"].iloc[-1])
         # today_high: max high of regular-session bars only
         today_high = float(rth_bars["high"].max())
 
     else:
-        # Premarket phase: use all bars in the frame (all are premarket in this phase)
-        premarket_bars = frame_1m  # frame_1m is non-empty (guarded above)
-        if premarket_bars.empty:
-            return None
+        # Premarket phase: use all of today's bars (all are premarket in this phase)
+        premarket_bars = today_frame  # non-empty (today_mask guarded above)
 
         # today_open == today_price == latest premarket close (provisional gap proxy)
         latest_close = float(premarket_bars["close"].iloc[-1])

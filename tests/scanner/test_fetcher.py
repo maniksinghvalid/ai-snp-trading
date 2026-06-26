@@ -500,6 +500,58 @@ class TestResolveTodayPrice:
 
         assert resolve_today_price(frame, now_et) is None
 
+    def test_resolve_prior_session_bars_return_none(self):
+        """Regression (WR-05, 02-REVIEW): a 1m frame containing ONLY bars dated a
+        prior session must fail closed (return None), never resolve stale bars as
+        "today's" open/price/high.
+
+        yf.download(period="1d", interval="1m") returns the most recent AVAILABLE
+        session, which on a weekend/holiday/data-lag may be a prior day. The
+        resolver must compare each bar's ET date against the injected now_et.date()
+        and return None when no bar matches today.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        # Bars dated 2026-06-25 (the prior session) ...
+        frame = _make_1m_frame([
+            {"ts": "2026-06-25 09:30", "open": 100.0, "high": 106.0, "low": 99.0, "close": 105.0},
+            {"ts": "2026-06-25 09:35", "open": 105.0, "high": 108.0, "low": 104.0, "close": 107.0},
+        ])
+        # ... but now_et says today is 2026-06-26 (RTH). No bar matches today.
+        now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+
+        assert resolve_today_price(frame, now_et) is None, (
+            "Stale prior-session 1m bars must not be resolved as today's price (WR-05)"
+        )
+
+    def test_resolve_mixed_dates_uses_only_today_bars(self):
+        """WR-05: a frame containing BOTH a prior-session bar and today's bars must
+        compute open/price/high from today's bars only, not the stale prior bar."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        # Prior-session premarket bar (should be ignored) + today's premarket bars.
+        frame = _make_1m_frame([
+            {"ts": "2026-06-25 08:00", "open": 50.0, "high": 999.0, "low": 49.0, "close": 51.0},
+            {"ts": "2026-06-26 08:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
+            {"ts": "2026-06-26 08:30", "open": 101.0, "high": 104.0, "low": 100.0, "close": 103.0},
+        ])
+        now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)  # premarket
+
+        result = resolve_today_price(frame, now_et)
+
+        assert result is not None
+        # Premarket: today_open == today_price == latest TODAY bar close (103.0).
+        assert result.today_open == pytest.approx(103.0)
+        assert result.today_price == pytest.approx(103.0)
+        # today_high must be max of TODAY's bars (104.0), NOT the stale 999.0 high.
+        assert result.today_high == pytest.approx(104.0)
+
 
 # ============================================================
 # Task 2: download_intraday_1m batch fetcher (SCAN-06)
