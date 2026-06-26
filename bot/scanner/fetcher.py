@@ -240,7 +240,6 @@ def get_ticker_frame(data: object, symbol: str) -> Optional[pd.DataFrame]:
 
 def resolve_today_price(
     frame_1m,
-    scan_ts,
     now_et,
 ) -> Optional[TodayPrice]:
     """Resolve today's open, current price, and HOD from a 1m yfinance frame.
@@ -273,11 +272,18 @@ def resolve_today_price(
       rules.json is the single source of STRATEGY parameters only; the RTH open
       time is a fixed market fact that never varies by strategy.
 
+    The scan-run timestamp is intentionally NOT a parameter (WR-03, 02-REVIEW):
+    it was previously threaded through as a dead `scan_ts` argument that the
+    function never read, and callers disagreed on its type (the scanner passed a
+    tz-naive midnight Timestamp while tests passed a tz-aware datetime) — a latent
+    tz-comparison trap. Phase selection depends ONLY on the injected `now_et`, so
+    the dead parameter was removed rather than left as an aspirational contract.
+
     frame_1m: pd.DataFrame | None — 1m OHLCV frame from get_ticker_frame() with a
               tz-aware DatetimeIndex (yfinance intraday carries tz info).
-    scan_ts:  datetime — the timestamp of this scan run (passed through; unused
-              internally but kept for caller context and future backtester use).
-    now_et:   datetime — the current ET time (injected; MUST be tz-aware).
+    now_et:   datetime — the current ET time (injected; MUST be tz-aware). This is
+              the SOLE clock/timestamp input — the Phase 6 backtest seam injects a
+              historical now_et to replay past 1m frames without touching live code.
     Returns TodayPrice on success, None on fail-closed.
     """
     # Fail-closed: None or empty frame → no price data

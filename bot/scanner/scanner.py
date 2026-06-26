@@ -208,7 +208,7 @@ def _compute_candidates(
       3. Download 1m intraday batch ONCE (download_intraday_1m) — today's live
          open/price/high sourced from the 1m feed (not the daily bar).
          Whole-universe 1m failure raises ScanDegradationError (T-02-18).
-      4. Per-symbol: resolve today_price via resolve_today_price(frame_1m, ...),
+      4. Per-symbol: resolve today_price via resolve_today_price(frame_1m, now_et),
          then pass into _evaluate_symbol. No intraday price → fail-closed skip.
       5. Return passing candidates (unsorted, unranked).
 
@@ -265,12 +265,14 @@ def _compute_candidates(
         )
 
     # Per-symbol evaluation
-    scan_ts = pd.Timestamp(scan_date)
     passing = []
     for sym in yf_symbols:
-        # Resolve today's price from the 1m batch (once fetched above, shared)
+        # Resolve today's price from the 1m batch (once fetched above, shared).
+        # WR-03: resolve_today_price takes only (frame_1m, now_et) — the dead
+        # scan_ts argument (a tz-naive Timestamp that disagreed with the tz-aware
+        # datetime callers in tests) was removed. now_et_value is the sole clock.
         frame_1m = get_ticker_frame(intraday, sym)
-        today_price = resolve_today_price(frame_1m, scan_ts, now_et_value)
+        today_price = resolve_today_price(frame_1m, now_et_value)
 
         # Pass today_price into _evaluate_symbol (may be None → fail-closed skip inside)
         candidate = _evaluate_symbol(sym, data, cfg, scan_date, today_price)

@@ -235,7 +235,7 @@ class TestDailyFilters:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: passing_frame if sym == "PASS" else failing_frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -267,7 +267,7 @@ class TestDailyFilters:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame_4pct), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result_low = run_daily_scan(store=store_low, gateway=None, cfg=cfg_low, scan_date=scan_date)
@@ -284,7 +284,7 @@ class TestDailyFilters:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame_4pct), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result_high = run_daily_scan(store=store_high, gateway=None, cfg=cfg_high, scan_date=scan_date)
@@ -332,7 +332,7 @@ class TestRvolNoLookahead:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=_make_cfg(), scan_date=scan_date)
@@ -381,7 +381,7 @@ class TestInsufficientHistory:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: short_frame if sym == "SHORT" else good_frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -420,7 +420,7 @@ class TestInsufficientHistory:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: no_sma_frame if sym == "NOSMA" else good_frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -603,7 +603,7 @@ class TestTop20Cap:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: _make_frame_for(sym)), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=_make_cfg(d3_min_gap_pct=0.5),
@@ -685,7 +685,7 @@ class TestIdempotency:
                  patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
                  patch("bot.scanner.scanner.get_ticker_frame", side_effect=_get_frame), \
                  patch("bot.scanner.scanner.resolve_today_price",
-                       side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                       side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
                  patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
                 run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -793,7 +793,7 @@ class TestSubscribeWiring:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: _make_frame_for(sym)), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(
@@ -862,7 +862,7 @@ class TestIntradayRescan:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
             run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
 
@@ -877,7 +877,7 @@ class TestIntradayRescan:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
             run_intraday_rescan(
                 store=store, gateway=None, cfg=cfg,
@@ -940,7 +940,7 @@ class TestIntradayRescan:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda d, s: _frame_for(s)), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_intraday_rescan(
@@ -986,7 +986,7 @@ class TestIntradayRescan:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             run_intraday_rescan(
@@ -1041,7 +1041,7 @@ class TestIntradayRescan:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda d, s: passing_frame if s == "KEEP" else collapsing_frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_intraday_rescan(
@@ -1090,7 +1090,7 @@ class TestIntradayRescan:
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda d, s: passing_frame if s == "KEEP" else collapsing_frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True), \
              patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
 
@@ -1137,7 +1137,7 @@ class TestPartialDataLoggedOnce:
              patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
              patch("bot.scanner.scanner.resolve_today_price",
-                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
              patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
 
             _compute_candidates(cfg, scan_date)
@@ -1179,7 +1179,7 @@ class TestRunFromRunningEventLoop:
                  patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
                  patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
                  patch("bot.scanner.scanner.resolve_today_price",
-                       side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
+                       side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
                  patch("bot.scanner.scanner.is_trading_day", return_value=True):
                 return run_daily_scan(store=store, gateway=gw, cfg=_make_cfg(), scan_date=scan_date)
 
@@ -1433,7 +1433,7 @@ class TestComputeCandidates1mBatch:
         # resolve_today_price is called once per symbol in order (PASS first, FAIL second)
         resolve_returns = [pass_today, None]
 
-        def _resolve_ordered(frame_1m, scan_ts, now_et_val):
+        def _resolve_ordered(frame_1m, now_et_val):
             return resolve_returns.pop(0) if resolve_returns else None
 
         import datetime as _dt

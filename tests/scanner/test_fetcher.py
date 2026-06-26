@@ -319,7 +319,7 @@ class TestResolveTodayPrice:
         scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
         now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
 
-        result = resolve_today_price(frame, scan_ts, now_et)
+        result = resolve_today_price(frame, now_et)
 
         assert result is not None
         # today_open == today_price == latest premarket close (08:30 bar close = 103.0)
@@ -347,7 +347,7 @@ class TestResolveTodayPrice:
         scan_ts = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
         now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
 
-        result = resolve_today_price(frame, scan_ts, now_et)
+        result = resolve_today_price(frame, now_et)
 
         assert result is not None
         # today_open == first regular-session bar open (09:30 bar open = 102.0, NOT 100.0 premarket)
@@ -369,11 +369,11 @@ class TestResolveTodayPrice:
         now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
 
         # None frame
-        assert resolve_today_price(None, scan_ts, now_et) is None
+        assert resolve_today_price(None, now_et) is None
 
         # Empty DataFrame
         empty_frame = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        assert resolve_today_price(empty_frame, scan_ts, now_et) is None
+        assert resolve_today_price(empty_frame, now_et) is None
 
     def test_resolve_after_open_but_no_regular_bar_returns_none(self):
         """now_et >= 09:30 ET but frame has ONLY premarket bars → returns None (fail-closed)."""
@@ -390,7 +390,7 @@ class TestResolveTodayPrice:
         scan_ts = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
         now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
 
-        result = resolve_today_price(frame, scan_ts, now_et)
+        result = resolve_today_price(frame, now_et)
 
         assert result is None
 
@@ -421,7 +421,7 @@ class TestResolveTodayPrice:
         with patch.object(fetcher_module, "now_et", _sentinel_clock, create=True):
             # Should complete without raising AssertionError
             from bot.scanner.fetcher import resolve_today_price
-            result = resolve_today_price(frame, scan_ts, now_et)
+            result = resolve_today_price(frame, now_et)
 
         # Premarket case: result should be valid
         assert result is not None
@@ -467,7 +467,7 @@ class TestResolveTodayPrice:
         scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
 
         # Must not raise; tz-naive bars are treated as UTC → ET (premarket here).
-        result = resolve_today_price(frame, scan_ts, now_et)
+        result = resolve_today_price(frame, now_et)
 
         assert result is not None
         # Premarket: today_open == today_price == latest premarket close (103.0)
@@ -498,7 +498,7 @@ class TestResolveTodayPrice:
         now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
         scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
 
-        assert resolve_today_price(frame, scan_ts, now_et) is None
+        assert resolve_today_price(frame, now_et) is None
 
 
 # ============================================================
