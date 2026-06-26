@@ -66,22 +66,30 @@ class ScanDegradationError(Exception):
 # Public API
 # ============================================================
 
-def download_daily_bars(
+def _download_batch(
     yf_symbols: list,
-    threads: int = 5,
-    degradation_threshold: float = 0.10,
+    threads: int,
+    degradation_threshold: float,
+    download_kwargs: dict,
+    abort_event: str,
+    partial_event: str,
+    degradation_message: str,
 ) -> Tuple[object, Set[str]]:
-    """Download 1-year daily OHLCV bars for a batch of yfinance symbols.
+    """Shared batch-download kernel for daily and intraday yfinance fetches (WR-02).
 
-    Clears yfinance.shared._ERRORS before downloading (Pitfall #2 — shared
-    module-level state from previous calls must not inflate the failure count).
-    Uses threads=5 (Pitfall #1 — integer, not True, to honour bounded-
-    concurrency constraint D-01; avoids cpu_count*2 default).
+    Both download_daily_bars and download_intraday_1m delegate here so the
+    empty-guard, shared._ERRORS clearing (Pitfall #2), data-derived failure
+    detection (_detect_failed/get_ticker_frame, SCAN-06), failure-rate math,
+    D-06 degradation gate, D-07 durable audit surfacing, and partial-data
+    warning structure live in exactly ONE place. Previously this logic was
+    duplicated almost verbatim across the two public functions, so any change
+    (a threshold tweak, an audit-shape fix) had to be made twice and could
+    silently drift — a CLAUDE.md anti-pattern (duplicated logic).
 
-    On partial failure < degradation_threshold: logs "scan_partial_data" warning,
-    returns (data, failed_set).
-    On failure >= degradation_threshold: logs "scan_aborted_data_degradation",
-    surfaces a durable audit entry (D-07), raises ScanDegradationError.
+    The event names differ between the two callers and are passed in verbatim
+    (daily: scan_aborted_data_degradation / scan_partial_data; intraday:
+    intraday_scan_aborted_data_degradation / intraday_partial_data) so the
+    refactor preserves the exact emitted log/audit strings.
 
     Failure detection is data-derived (UAT Test 2 / SCAN-06): yfinance 1.4.1 no
     longer populates ``shared._ERRORS`` reliably — a failed ticker is returned
@@ -91,11 +99,17 @@ def download_daily_bars(
     (missing or all-NaN), unioned with any ``shared._ERRORS`` keys older
     yfinance versions still record.
 
-    yf_symbols: list of str — yfinance-format symbols (e.g. ["AAPL", "BRK-B"]).
-    threads: int — number of download threads (default 5, bounded concurrency).
-    degradation_threshold: float — fraction of failures that triggers abort.
-    Returns (data, failed_set): data is the yf.download result; failed_set is the
-        set of ticker strings with no usable data.
+    yf_symbols:            list of str — yfinance-format symbols.
+    threads:               int — download threads (bounded concurrency, Pitfall #1).
+    degradation_threshold: float — failure fraction that triggers abort (D-06).
+    download_kwargs:       dict — interval-specific yf.download kwargs (period,
+                           interval, and optionally prepost).
+    abort_event:           str — log/audit event name emitted on the >= threshold
+                           abort path.
+    partial_event:         str — log event name emitted on the < threshold
+                           partial-data path.
+    degradation_message:   str — leading text for the ScanDegradationError message.
+    Returns (data, failed_set).
     Raises ScanDegradationError when failure_rate >= degradation_threshold.
     """
     if not yf_symbols:
@@ -106,12 +120,11 @@ def download_daily_bars(
 
     data = yf.download(
         tickers=yf_symbols,
-        period="1y",
-        interval="1d",
         group_by="ticker",
         auto_adjust=True,
         threads=threads,   # Pitfall #1: integer, not True
         progress=False,
+        **download_kwargs,
     )
 
     failed = _detect_failed(data, yf_symbols)
@@ -119,31 +132,66 @@ def download_daily_bars(
 
     if failure_rate >= degradation_threshold:
         _logger.error(
-            "scan_aborted_data_degradation",
+            abort_event,
             failed_count=len(failed),
             total=len(yf_symbols),
             failure_rate_pct=round(failure_rate * 100, 1),
         )
         # D-07: durable surfacing via audit log (not Telegram — that is Phase 5)
         append_audit({
-            "event": "scan_aborted_data_degradation",
+            "event": abort_event,
             "failed_count": len(failed),
             "total": len(yf_symbols),
             "failure_rate_pct": round(failure_rate * 100, 1),
         })
         raise ScanDegradationError(
-            f"Data degradation: {len(failed)}/{len(yf_symbols)} symbols failed "
+            f"{degradation_message}: {len(failed)}/{len(yf_symbols)} symbols failed "
             f"({round(failure_rate * 100, 1)}% >= {degradation_threshold * 100:.0f}% threshold)"
         )
 
     if failed:
         _logger.warning(
-            "scan_partial_data",
+            partial_event,
             failed_count=len(failed),
             total=len(yf_symbols),
         )
 
     return data, failed
+
+
+def download_daily_bars(
+    yf_symbols: list,
+    threads: int = 5,
+    degradation_threshold: float = 0.10,
+) -> Tuple[object, Set[str]]:
+    """Download 1-year daily OHLCV bars for a batch of yfinance symbols.
+
+    Thin wrapper over _download_batch (WR-02) with the daily-bar kwargs
+    (period="1y", interval="1d") and the "scan" event prefix. All failure
+    detection, the D-06 degradation gate, D-07 audit surfacing, and the
+    scan_partial_data warning live in the shared kernel.
+
+    On partial failure < degradation_threshold: logs "scan_partial_data" warning,
+    returns (data, failed_set).
+    On failure >= degradation_threshold: logs "scan_aborted_data_degradation",
+    surfaces a durable audit entry (D-07), raises ScanDegradationError.
+
+    yf_symbols: list of str — yfinance-format symbols (e.g. ["AAPL", "BRK-B"]).
+    threads: int — number of download threads (default 5, bounded concurrency).
+    degradation_threshold: float — fraction of failures that triggers abort.
+    Returns (data, failed_set): data is the yf.download result; failed_set is the
+        set of ticker strings with no usable data.
+    Raises ScanDegradationError when failure_rate >= degradation_threshold.
+    """
+    return _download_batch(
+        yf_symbols,
+        threads=threads,
+        degradation_threshold=degradation_threshold,
+        download_kwargs={"period": "1y", "interval": "1d"},
+        abort_event="scan_aborted_data_degradation",
+        partial_event="scan_partial_data",
+        degradation_message="Data degradation",
+    )
 
 
 def _detect_failed(data: object, yf_symbols: list) -> Set[str]:
@@ -321,50 +369,12 @@ def download_intraday_1m(
         set of ticker strings with no usable 1m data.
     Raises ScanDegradationError when failure_rate >= degradation_threshold.
     """
-    if not yf_symbols:
-        return {}, set()
-
-    # Pitfall #2: clear shared module-level state before download
-    shared._ERRORS.clear()
-
-    data = yf.download(
-        tickers=yf_symbols,
-        period="1d",
-        interval="1m",
-        prepost=True,
-        group_by="ticker",
-        auto_adjust=True,
-        threads=threads,   # Pitfall #1: integer, not True
-        progress=False,
+    return _download_batch(
+        yf_symbols,
+        threads=threads,
+        degradation_threshold=degradation_threshold,
+        download_kwargs={"period": "1d", "interval": "1m", "prepost": True},
+        abort_event="intraday_scan_aborted_data_degradation",
+        partial_event="intraday_partial_data",
+        degradation_message="Intraday data degradation",
     )
-
-    failed = _detect_failed(data, yf_symbols)
-    failure_rate = len(failed) / len(yf_symbols) if yf_symbols else 0.0
-
-    if failure_rate >= degradation_threshold:
-        _logger.error(
-            "intraday_scan_aborted_data_degradation",
-            failed_count=len(failed),
-            total=len(yf_symbols),
-            failure_rate_pct=round(failure_rate * 100, 1),
-        )
-        # D-07: durable surfacing via audit log (not Telegram — that is Phase 5)
-        append_audit({
-            "event": "intraday_scan_aborted_data_degradation",
-            "failed_count": len(failed),
-            "total": len(yf_symbols),
-            "failure_rate_pct": round(failure_rate * 100, 1),
-        })
-        raise ScanDegradationError(
-            f"Intraday data degradation: {len(failed)}/{len(yf_symbols)} symbols failed "
-            f"({round(failure_rate * 100, 1)}% >= {degradation_threshold * 100:.0f}% threshold)"
-        )
-
-    if failed:
-        _logger.warning(
-            "intraday_partial_data",
-            failed_count=len(failed),
-            total=len(yf_symbols),
-        )
-
-    return data, failed
