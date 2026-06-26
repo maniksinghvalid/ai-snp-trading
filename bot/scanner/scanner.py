@@ -194,21 +194,41 @@ def _evaluate_symbol(
 def _compute_candidates(
     cfg: StrategyConfig,
     scan_date: date,
+    now_et_value=None,
 ) -> List[dict]:
-    """Fetch universe, download bars, and evaluate each symbol for D1/D2/D3 filters.
+    """Fetch universe, download bars + 1m intraday, and evaluate each symbol.
 
     This is the shared compute kernel used by both run_daily_scan and
     run_intraday_rescan. It does NOT persist or subscribe — callers handle that.
 
-    cfg:       StrategyConfig — all thresholds config-driven (D-12).
-    scan_date: Date to evaluate (no-look-ahead cutoff for RVOL/SMA).
+    Sequence (02-05):
+      1. Fetch S&P 500 universe (fetch_sp500_symbols).
+      2. Download daily bars (download_daily_bars) — slow inputs: prior close,
+         prior high, SMA200, RVOL baseline (date < scan_date, no look-ahead).
+      3. Download 1m intraday batch ONCE (download_intraday_1m) — today's live
+         open/price/high sourced from the 1m feed (not the daily bar).
+         Whole-universe 1m failure raises ScanDegradationError (T-02-18).
+      4. Per-symbol: resolve today_price via resolve_today_price(frame_1m, ...),
+         then pass into _evaluate_symbol. No intraday price → fail-closed skip.
+      5. Return passing candidates (unsorted, unranked).
+
+    cfg:           StrategyConfig — all thresholds config-driven (D-12).
+    scan_date:     Date to evaluate (no-look-ahead cutoff for RVOL/SMA).
+    now_et_value:  The current ET datetime (injected for testability/purity;
+                   defaults to now_et() at call time if None). Threaded to
+                   resolve_today_price for premarket vs RTH phase detection.
 
     Returns a list of candidate dicts (unsorted, unranked) for all symbols
     that pass D1/D2/D3. Each dict contains: code, gap_pct, prior_day_high,
     prior_close, sma200, rvol_baseline.
 
-    Raises ScanDegradationError if >= 10% of symbols fail to download (D-06).
+    Raises ScanDegradationError if:
+      - >= 10% of symbols fail to download daily bars (D-06, via download_daily_bars)
+      - download_intraday_1m yields nothing for the entire universe (T-02-18)
     """
+    if now_et_value is None:
+        now_et_value = now_et()
+
     # Fetch S&P 500 symbol list
     yf_symbols = fetch_sp500_symbols()
 
@@ -217,12 +237,36 @@ def _compute_candidates(
     # scan_partial_data event — it already logs it when `failed` is non-empty. Do
     # NOT re-log it here, which previously produced two identical warnings per
     # degraded scan (audit noise / double-counting risk downstream).
-    data, failed = download_daily_bars(yf_symbols)
+    data, _daily_failed = download_daily_bars(yf_symbols)
 
-    # Evaluate each symbol
+    # Download 1m intraday batch ONCE per scan (02-05, T-02-18 / SCAN-06).
+    # The result is shared across all per-symbol resolve calls (not per-symbol download).
+    # WR-04: the fetcher (download_intraday_1m) is the single source of the
+    # intraday_partial_data event — do NOT re-log degradation here.
+    intraday, _intraday_failed = download_intraday_1m(yf_symbols)
+
+    # T-02-18: whole-universe 1m outage — raise a distinct ScanDegradationError so
+    # the scan fails loudly rather than silently emptying the watchlist.
+    # Criterion: 1m fetch yielded nothing useful for ANY symbol in the universe.
+    # We detect this when len(failed) == len(universe) (all symbols failed) OR
+    # the returned data object is empty/falsy. A partial 1m failure is NOT raised
+    # here — symbols with no 1m data are simply skipped (symbol_skipped_no_intraday_price).
+    if len(_intraday_failed) == len(yf_symbols):
+        raise ScanDegradationError(
+            f"Intraday 1m whole-universe outage: all {len(yf_symbols)} symbols failed "
+            "to download intraday data — scan aborted (T-02-18)"
+        )
+
+    # Per-symbol evaluation
+    scan_ts = pd.Timestamp(scan_date)
     passing = []
     for sym in yf_symbols:
-        candidate = _evaluate_symbol(sym, data, cfg, scan_date)
+        # Resolve today's price from the 1m batch (once fetched above, shared)
+        frame_1m = get_ticker_frame(intraday, sym)
+        today_price = resolve_today_price(frame_1m, scan_ts, now_et_value)
+
+        # Pass today_price into _evaluate_symbol (may be None → fail-closed skip inside)
+        candidate = _evaluate_symbol(sym, data, cfg, scan_date, today_price)
         if candidate is not None:
             passing.append(candidate)
 
@@ -331,9 +375,10 @@ def run_daily_scan(
 
     Raises ScanDegradationError if >= 10% of symbols fail to download (D-06).
     """
-    # Step 1: resolve scan_date (ET-correct)
+    # Step 1: resolve scan_date and ET clock (ET-correct)
+    current_et = now_et()
     if scan_date is None:
-        scan_date = now_et().date()
+        scan_date = current_et.date()
 
     # Step 2: non-trading-day guard
     if not is_trading_day(scan_date):
@@ -341,7 +386,9 @@ def run_daily_scan(
         return []
 
     # Step 3: compute candidates (shared with run_intraday_rescan)
-    passing = _compute_candidates(cfg, scan_date)
+    # Thread the resolved ET clock so resolve_today_price gets a consistent clock
+    # for all per-symbol evaluations in this scan pass.
+    passing = _compute_candidates(cfg, scan_date, now_et_value=current_et)
 
     # Step 4: sort by gap_pct DESC, cap at top-20 (SCAN-08)
     passing.sort(key=lambda c: c["gap_pct"], reverse=True)
@@ -403,9 +450,10 @@ def run_intraday_rescan(
 
     Raises ScanDegradationError if >= 10% of symbols fail to download (D-06).
     """
-    # Step 1: resolve scan_date (ET-correct)
+    # Step 1: resolve scan_date and ET clock (ET-correct)
+    current_et = now_et()
     if scan_date is None:
-        scan_date = now_et().date()
+        scan_date = current_et.date()
 
     # Step 2: non-trading-day guard
     if not is_trading_day(scan_date):
@@ -413,7 +461,9 @@ def run_intraday_rescan(
         return []
 
     # Step 3: compute candidates (shared path with run_daily_scan — no filter duplication)
-    passing = _compute_candidates(cfg, scan_date)
+    # Thread the resolved ET clock so resolve_today_price gets a consistent clock
+    # for all per-symbol evaluations in this rescan pass.
+    passing = _compute_candidates(cfg, scan_date, now_et_value=current_et)
 
     # Step 4: sort all passing candidates by gap_pct DESC
     passing.sort(key=lambda c: c["gap_pct"], reverse=True)

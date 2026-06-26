@@ -11,9 +11,11 @@ Covers:
   Test upsert updates rank on re-persist
 """
 import asyncio
+import datetime as _dt
 import sqlite3
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -21,6 +23,36 @@ import pytest
 from bot.config.loader import StrategyConfig
 from bot.state.migrations import run_migrations
 from bot.state.store import StateStore
+
+# ============================================================
+# 02-05 migration helpers
+# ============================================================
+
+# Sentinel non-empty 1m data returned by patched download_intraday_1m.
+# Non-empty so the whole-universe-degradation guard (len(failed)==len(universe))
+# is not tripped when tests don't care about the intraday path.
+_SENTINEL_1M = {"__sentinel__": True}
+_INTRADAY_OK = (_SENTINEL_1M, set())
+
+# Fixed premarket ET time used in tests that patch now_et (08:30 ET)
+_ET = ZoneInfo("America/New_York")
+_PREMARKET_ET = _dt.datetime(2026, 6, 23, 8, 30, tzinfo=_ET)
+
+
+def _make_today_price(frame: pd.DataFrame):
+    """Return TodayPrice from the last row of a daily frame (used to patch resolve_today_price).
+
+    This allows patched tests to supply today's gap/D1/D3 numbers via the 1m
+    path while still using the existing _make_daily_frame helper for the daily
+    slow inputs (SMA200, RVOL baseline, prior close/high).
+    """
+    from bot.scanner.fetcher import TodayPrice
+    last = frame.iloc[-1]
+    return TodayPrice(
+        today_open=float(last["open"]),
+        today_price=float(last["close"]),
+        today_high=float(last["high"]),
+    )
 
 
 # ============================================================
@@ -199,8 +231,11 @@ class TestDailyFilters:
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["PASS", "FAIL"]), \
              patch("bot.scanner.scanner.download_daily_bars",
                    return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: passing_frame if sym == "PASS" else failing_frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -229,7 +264,10 @@ class TestDailyFilters:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame_4pct), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result_low = run_daily_scan(store=store_low, gateway=None, cfg=cfg_low, scan_date=scan_date)
@@ -243,7 +281,10 @@ class TestDailyFilters:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame_4pct), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result_high = run_daily_scan(store=store_high, gateway=None, cfg=cfg_high, scan_date=scan_date)
@@ -288,7 +329,10 @@ class TestRvolNoLookahead:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=_make_cfg(), scan_date=scan_date)
@@ -333,8 +377,11 @@ class TestInsufficientHistory:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["SHORT", "GOOD"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: short_frame if sym == "SHORT" else good_frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -369,8 +416,11 @@ class TestInsufficientHistory:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["NOSMA", "GOOD"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: no_sma_frame if sym == "NOSMA" else good_frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -426,7 +476,9 @@ class TestTodayRowAlignment:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["PREMKT"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=no_today_frame), \
+             patch("bot.scanner.scanner.resolve_today_price", return_value=None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -434,8 +486,8 @@ class TestTodayRowAlignment:
         store.close()
 
         assert result == [], (
-            "A symbol whose latest bar predates scan_date must be skipped — the "
-            "scanner must not rank the wrong session (CR-02 no-look-ahead)"
+            "When no intraday price is available (resolve_today_price returns None), "
+            "the symbol must be skipped fail-closed (CR-02 / symbol_skipped_no_intraday_price)"
         )
 
     def test_gap_uses_scan_date_row_not_last_positional(self, tmp_state_db):
@@ -480,9 +532,13 @@ class TestTodayRowAlignment:
         store = StateStore()
         store.open()
 
+        from bot.scanner.fetcher import TodayPrice as _TodayPrice
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["ALIGN"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   return_value=_TodayPrice(today_open=104.0, today_price=106.0, today_high=107.0)), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -543,8 +599,11 @@ class TestTop20Cap:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=symbols), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: _make_frame_for(sym)), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(store=store, gateway=None, cfg=_make_cfg(d3_min_gap_pct=0.5),
@@ -623,7 +682,10 @@ class TestIdempotency:
         for _ in range(2):
             with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
                  patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+                 patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
                  patch("bot.scanner.scanner.get_ticker_frame", side_effect=_get_frame), \
+                 patch("bot.scanner.scanner.resolve_today_price",
+                       side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
                  patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
                 run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
@@ -727,8 +789,11 @@ class TestSubscribeWiring:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=symbols), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda data, sym: _make_frame_for(sym)), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_daily_scan(
@@ -794,7 +859,10 @@ class TestIntradayRescan:
         # Initial daily scan
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
             run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
 
@@ -806,7 +874,10 @@ class TestIntradayRescan:
         # Re-scan with same symbols
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
             run_intraday_rescan(
                 store=store, gateway=None, cfg=cfg,
@@ -865,8 +936,11 @@ class TestIntradayRescan:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=all_symbols), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda d, s: _frame_for(s)), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_intraday_rescan(
@@ -909,7 +983,10 @@ class TestIntradayRescan:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             run_intraday_rescan(
@@ -960,8 +1037,11 @@ class TestIntradayRescan:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["KEEP", "DROP"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda d, s: passing_frame if s == "KEEP" else collapsing_frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True):
 
             result = run_intraday_rescan(
@@ -1006,8 +1086,11 @@ class TestIntradayRescan:
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["KEEP", "DROP"]), \
              patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame",
                    side_effect=lambda d, s: passing_frame if s == "KEEP" else collapsing_frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch("bot.scanner.scanner.is_trading_day", return_value=True), \
              patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
 
@@ -1051,7 +1134,10 @@ class TestPartialDataLoggedOnce:
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
              patch("bot.scanner.scanner.download_daily_bars",
                    return_value=({}, {"BADSYM"})), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
              patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
              patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
 
             _compute_candidates(cfg, scan_date)
@@ -1090,7 +1176,10 @@ class TestRunFromRunningEventLoop:
             # We are now inside a running event loop.
             with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
                  patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+                 patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
                  patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+                 patch("bot.scanner.scanner.resolve_today_price",
+                       side_effect=lambda f, ts, net: _make_today_price(f) if f is not None else None), \
                  patch("bot.scanner.scanner.is_trading_day", return_value=True):
                 return run_daily_scan(store=store, gateway=gw, cfg=_make_cfg(), scan_date=scan_date)
 
@@ -1290,4 +1379,136 @@ class TestEvaluateSymbolTodayPrice:
         assert result["sma200"] < 95.0, (
             f"sma200={result['sma200']} must be near 90 (prior closes), not 999 "
             "(scan_date close must be excluded from SMA)"
+        )
+
+
+# ============================================================
+# Task 2 (02-05): _compute_candidates batches download_intraday_1m
+# ============================================================
+
+def _today_price_from_frame(frame: pd.DataFrame):
+    """Helper: build a TodayPrice from the last row of a daily frame.
+
+    Simulates what resolve_today_price returns for a frame whose last row
+    is a gap-up trading day (used to patch resolve_today_price in tests).
+    Returns TodayPrice(today_open=last open, today_price=last close, today_high=last high).
+    """
+    from bot.scanner.fetcher import TodayPrice
+    last = frame.iloc[-1]
+    return TodayPrice(
+        today_open=float(last["open"]),
+        today_price=float(last["close"]),
+        today_high=float(last["high"]),
+    )
+
+
+class TestComputeCandidates1mBatch:
+    """Task 2 (02-05): _compute_candidates batches download_intraday_1m once per scan."""
+
+    def test_compute_candidates_resolves_today_price_per_symbol(self, tmp_state_db):
+        """PASS gets a gap-up TodayPrice; FAIL gets None → only PASS passes, FAIL is skipped.
+
+        Strategy: patch resolve_today_price with a side_effect keyed by the SYMBOL
+        (order-of-call tracking). PASS is first in the universe → resolve call 0 returns
+        a gap-up TodayPrice. FAIL is second → resolve call 1 returns None.
+        The _evaluate_symbol fail-closed guard then skips FAIL.
+        """
+        from bot.scanner.scanner import _compute_candidates
+        from bot.scanner.fetcher import TodayPrice
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        pass_frame = _make_daily_frame(
+            n_days=220, prior_close=100.0, today_open=104.0, today_close=106.0,
+            prior_high=105.0, scan_date=scan_date,
+        )
+        fail_frame = _make_daily_frame(
+            n_days=220, prior_close=100.0, today_open=104.0, today_close=106.0,
+            prior_high=105.0, scan_date=scan_date,
+        )
+
+        pass_today = TodayPrice(today_open=104.0, today_price=106.0, today_high=107.0)
+
+        # resolve_today_price is called once per symbol in order (PASS first, FAIL second)
+        resolve_returns = [pass_today, None]
+
+        def _resolve_ordered(frame_1m, scan_ts, now_et_val):
+            return resolve_returns.pop(0) if resolve_returns else None
+
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        fixed_now_et = _dt.datetime(2026, 6, 23, 8, 30, tzinfo=_ET)
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["PASS", "FAIL"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=({"sentinel": True}, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=lambda data, sym: pass_frame if sym == "PASS" else fail_frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=_resolve_ordered), \
+             patch("bot.scanner.scanner.now_et", return_value=fixed_now_et):
+
+            candidates = _compute_candidates(cfg, scan_date)
+
+        assert len(candidates) == 1, (
+            f"Only PASS (with gap-up TodayPrice) must be a candidate; got {len(candidates)}"
+        )
+        assert candidates[0]["code"] == "US.PASS"
+
+    def test_compute_candidates_whole_universe_degradation(self, tmp_state_db):
+        """When download_intraday_1m yields nothing for the entire universe, ScanDegradationError is raised."""
+        from bot.scanner.scanner import _compute_candidates
+        from bot.scanner.fetcher import ScanDegradationError
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        fixed_now_et = _dt.datetime(2026, 6, 23, 8, 30, tzinfo=_ET)
+
+        # Whole universe fails: empty data + all symbols in failed set
+        symbols = ["AAPL", "MSFT"]
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=symbols), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m",
+                   return_value=({}, set(symbols))), \
+             patch("bot.scanner.scanner.now_et", return_value=fixed_now_et):
+
+            with pytest.raises(ScanDegradationError):
+                _compute_candidates(cfg, scan_date)
+
+    def test_intraday_fetched_once_per_scan(self, tmp_state_db):
+        """download_intraday_1m must be called exactly ONCE per _compute_candidates invocation."""
+        from bot.scanner.scanner import _compute_candidates
+        from bot.scanner.fetcher import TodayPrice
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=0.5)
+        frame = _make_daily_frame(scan_date=scan_date)
+
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+        fixed_now_et = _dt.datetime(2026, 6, 23, 8, 30, tzinfo=_ET)
+
+        pass_today = TodayPrice(today_open=104.0, today_price=106.0, today_high=107.0)
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols",
+                   return_value=["AAPL", "MSFT", "GOOG"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m",
+                   return_value=({"sentinel": True}, set())) as mock_1m, \
+             patch("bot.scanner.scanner.get_ticker_frame", return_value=frame), \
+             patch("bot.scanner.scanner.resolve_today_price", return_value=pass_today), \
+             patch("bot.scanner.scanner.now_et", return_value=fixed_now_et):
+
+            _compute_candidates(cfg, scan_date)
+
+        mock_1m.assert_called_once(), (
+            f"download_intraday_1m must be called exactly once per scan, "
+            f"got {mock_1m.call_count} calls"
         )
