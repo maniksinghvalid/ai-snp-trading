@@ -245,8 +245,18 @@ def resolve_today_price(
     is_rth = now_et.time() >= _RTH_OPEN
 
     # Convert each 1m bar's index timestamp to ET for bar-clock comparison.
-    # yfinance intraday frames carry tz info on the DatetimeIndex; tz_convert is safe.
-    idx_et = frame_1m.index.tz_convert(ET)
+    # yfinance intraday frames USUALLY carry tz info, but some yfinance/pandas
+    # combinations return a tz-naive (UTC) DatetimeIndex. Localize-or-convert
+    # defensively and fail-closed on a non-datetime index — an unconditional
+    # tz_convert here would raise and abort the ENTIRE scan (CR-01, 02-REVIEW).
+    idx = frame_1m.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        return None
+    if idx.tz is None:
+        # yfinance sometimes returns tz-naive intraday timestamps in UTC.
+        idx_et = idx.tz_localize("UTC").tz_convert(ET)
+    else:
+        idx_et = idx.tz_convert(ET)
 
     if is_rth:
         # Regular-session phase: select bars with ET bar-time >= 09:30

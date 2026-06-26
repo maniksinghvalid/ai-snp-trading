@@ -429,6 +429,77 @@ class TestResolveTodayPrice:
         assert result.today_price == pytest.approx(101.0)
         assert result.today_high == pytest.approx(102.0)
 
+    def test_resolve_tz_naive_index_does_not_crash_scan(self):
+        """Regression (CR-01, 02-REVIEW): a tz-NAIVE 1m DatetimeIndex must NOT raise.
+
+        yfinance returns tz-naive intraday timestamps (in UTC) under some
+        yfinance/pandas combinations. The resolver previously called
+        index.tz_convert(ET) unconditionally, which raises TypeError on a
+        tz-naive index and aborts the ENTIRE scan for every symbol — a fail-OPEN
+        crash worse than the empty-watchlist bug this phase fixes. The resolver
+        must localize tz-naive timestamps as UTC, convert to ET, and return a
+        valid TodayPrice (or None) — never raise.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+        import pandas as pd
+
+        ET = ZoneInfo("America/New_York")
+        # tz-NAIVE timestamps interpreted as UTC. 2026-06-26 is EDT (UTC-4), so
+        # 12:00/12:30 UTC == 08:00/08:30 ET (premarket).
+        naive_idx = pd.DatetimeIndex(
+            [pd.Timestamp("2026-06-26 12:00"), pd.Timestamp("2026-06-26 12:30")],
+            name="Datetime",
+        )
+        assert naive_idx.tz is None  # guard: this frame really is tz-naive
+        frame = pd.DataFrame(
+            {
+                "open": [100.0, 101.0],
+                "high": [102.0, 104.0],
+                "low": [99.0, 100.0],
+                "close": [101.0, 103.0],
+                "volume": [1_000_000, 1_000_000],
+            },
+            index=naive_idx,
+        )
+        now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)  # premarket
+        scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+
+        # Must not raise; tz-naive bars are treated as UTC → ET (premarket here).
+        result = resolve_today_price(frame, scan_ts, now_et)
+
+        assert result is not None
+        # Premarket: today_open == today_price == latest premarket close (103.0)
+        assert result.today_open == pytest.approx(103.0)
+        assert result.today_price == pytest.approx(103.0)
+        assert result.today_high == pytest.approx(104.0)
+
+    def test_resolve_non_datetime_index_returns_none(self):
+        """Regression (CR-01): a frame whose index is not a DatetimeIndex must
+        fail closed (return None), not raise, so one malformed frame cannot abort
+        the whole scan."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+        import pandas as pd
+
+        ET = ZoneInfo("America/New_York")
+        frame = pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [102.0],
+                "low": [99.0],
+                "close": [101.0],
+                "volume": [1_000_000],
+            },
+            index=pd.RangeIndex(1),  # not a DatetimeIndex
+        )
+        now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+        scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+
+        assert resolve_today_price(frame, scan_ts, now_et) is None
+
 
 # ============================================================
 # Task 2: download_intraday_1m batch fetcher (SCAN-06)
