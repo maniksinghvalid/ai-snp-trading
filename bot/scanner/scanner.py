@@ -245,13 +245,20 @@ def _compute_candidates(
     # intraday_partial_data event — do NOT re-log degradation here.
     intraday, _intraday_failed = download_intraday_1m(yf_symbols)
 
-    # T-02-18: whole-universe 1m outage — raise a distinct ScanDegradationError so
-    # the scan fails loudly rather than silently emptying the watchlist.
-    # Criterion: 1m fetch yielded nothing useful for ANY symbol in the universe.
-    # We detect this when len(failed) == len(universe) (all symbols failed) OR
-    # the returned data object is empty/falsy. A partial 1m failure is NOT raised
-    # here — symbols with no 1m data are simply skipped (symbol_skipped_no_intraday_price).
-    if len(_intraday_failed) == len(yf_symbols):
+    # T-02-18: whole-universe 1m outage backstop (WR-01).
+    #
+    # This is a DEFENSIVE backstop, not the primary degradation gate. With the
+    # default 10% threshold, download_intraday_1m itself raises
+    # ScanDegradationError long before a 100%-failure universe reaches here, so
+    # this branch does not fire on the normal production path — the fetcher's
+    # gate owns that decision. The check is retained intentionally so the scanner
+    # still fails loudly (rather than silently emptying the watchlist) if a future
+    # caller passes a high/disabled degradation_threshold to download_intraday_1m,
+    # making the scanner the owner of the whole-universe decision. It triggers
+    # only when EVERY universe symbol is in the failed set. A partial 1m failure
+    # is NOT raised here — those symbols are simply skipped
+    # (symbol_skipped_no_intraday_price).
+    if yf_symbols and len(_intraday_failed) == len(yf_symbols):
         raise ScanDegradationError(
             f"Intraday 1m whole-universe outage: all {len(yf_symbols)} symbols failed "
             "to download intraday data — scan aborted (T-02-18)"
