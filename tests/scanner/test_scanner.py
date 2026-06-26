@@ -1512,3 +1512,218 @@ class TestComputeCandidates1mBatch:
             f"download_intraday_1m must be called exactly once per scan, "
             f"got {mock_1m.call_count} calls"
         )
+
+
+# ============================================================
+# Task 3 (02-05): Premarket non-empty-watchlist regression test
+# Regression lock for the live UAT bug: premarket scan + gap-up 1m data
+# → NON-EMPTY watchlist even when no daily today-bar has published.
+# ============================================================
+
+class TestPremarketNonEmptyWatchlist:
+    """Task 3 (02-05): Live UAT bug regression — premarket scan with gap-up 1m data
+    must yield a non-empty watchlist even when the daily today-bar has not yet published."""
+
+    def _make_prior_only_frame(
+        self,
+        scan_date: date,
+        n_days: int = 220,
+        prior_close: float = 100.0,
+        prior_high: float = 105.0,
+    ) -> pd.DataFrame:
+        """Daily frame with NO row for scan_date (all rows are dated < scan_date).
+
+        This mirrors the live premarket condition: yfinance has not yet published
+        the current day's daily bar (published ~11:00 ET; premarket scan at 08:30 ET).
+        """
+        prior_day = pd.Timestamp(scan_date) - pd.tseries.offsets.BDay(1)
+        dates = pd.date_range(end=prior_day, periods=n_days, freq="B")
+        sma_base = prior_close * 0.90
+        closes = [sma_base] * n_days
+        closes[-1] = prior_close        # last prior session close
+        highs = [sma_base * 1.02] * n_days
+        highs[-1] = prior_high
+        lows = [sma_base * 0.98] * n_days
+        opens = [sma_base * 0.99] * n_days
+        volumes = [1_000_000.0] * n_days
+        return pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=dates,
+        )
+
+    def _make_premarket_1m_frame(
+        self,
+        scan_date: date,
+        latest_price: float = 104.0,
+        high: float = 105.0,
+    ) -> pd.DataFrame:
+        """Build a realistic tz-aware premarket 1m DataFrame for scan_date.
+
+        Returns a DataFrame with bars from ~04:00 to ~08:30 ET on scan_date,
+        all with tz-aware index (America/New_York), as yfinance intraday returns.
+        """
+        from zoneinfo import ZoneInfo
+        _ET_TZ = ZoneInfo("America/New_York")
+
+        # Build 1m bars from 04:00 to 08:29 ET (premarket window)
+        start_et = _dt.datetime(scan_date.year, scan_date.month, scan_date.day, 4, 0, tzinfo=_ET_TZ)
+        end_et = _dt.datetime(scan_date.year, scan_date.month, scan_date.day, 8, 30, tzinfo=_ET_TZ)
+        idx = pd.date_range(start=start_et, end=end_et, freq="1min")
+
+        n = len(idx)
+        closes = [latest_price] * n
+        opens_ = [latest_price * 0.999] * n
+        highs_ = [high] * n
+        lows_ = [latest_price * 0.998] * n
+        volumes = [50_000.0] * n
+
+        return pd.DataFrame(
+            {"open": opens_, "high": highs_, "low": lows_, "close": closes, "volume": volumes},
+            index=idx,
+        )
+
+    def test_premarket_scan_yields_nonempty_watchlist(self, tmp_state_db):
+        """THE regression test for the 2026-06-26 live UAT bug.
+
+        Simulate a premarket scan at 08:30 ET:
+        - Daily frame has NO row for scan_date (daily bar not yet published by yfinance).
+        - 1m intraday data IS available with a gap-up price (premarket bars present).
+        - resolve_today_price (premarket branch) returns today_price from latest 1m close.
+
+        Expected: run_daily_scan returns a NON-EMPTY watchlist (>= 1 code) and
+        persist_watchlist stores >= 1 row.
+
+        This test FAILS on the pre-fix path (which skipped every symbol with
+        no_today_bar) and PASSES after the 02-05 fix.
+        """
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        # Daily frame WITHOUT today's bar (pre-fix failure condition)
+        prior_frame = self._make_prior_only_frame(
+            scan_date=scan_date, n_days=220,
+            prior_close=100.0, prior_high=105.0,
+        )
+
+        # Premarket 1m frame: gap-up (today_price = 106.0, prior_close = 100.0 → gap 6%)
+        # today_open == today_price in premarket branch == 106.0 (latest premarket 1m close)
+        # prior_high = 105.0 → D1: today_price (106) > prior_high (105) ✓
+        # D3: gap_pct (6%) >= d3_min_gap_pct (3.0%) ✓
+        premarket_1m = self._make_premarket_1m_frame(
+            scan_date=scan_date, latest_price=106.0, high=107.0
+        )
+
+        # Fixed premarket clock: 08:30 ET (well before 09:30 RTH open)
+        premarket_now_et = _PREMARKET_ET
+
+        # Differentiate daily vs intraday data sources via data-type sentinels.
+        # _compute_candidates calls get_ticker_frame(daily, sym) for SMA/RVOL
+        # and get_ticker_frame(intraday, sym) for resolve_today_price.
+        daily_sentinel = {"_type": "daily"}
+        intraday_sentinel = {"_type": "intraday", "AAPL": premarket_1m}
+
+        def _gtf_by_data(data, sym):
+            if isinstance(data, dict) and data.get("_type") == "intraday":
+                return premarket_1m  # 1m frame → resolve_today_price (real resolver)
+            return prior_frame      # daily frame → _evaluate_symbol SMA/RVOL
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+             patch("bot.scanner.scanner.download_daily_bars",
+                   return_value=(daily_sentinel, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m",
+                   return_value=(intraday_sentinel, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=_gtf_by_data), \
+             patch("bot.scanner.scanner.now_et", return_value=premarket_now_et), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            # REAL resolve_today_price runs — no patch. This is the end-to-end
+            # integration test that proves the fetcher→scanner path works correctly
+            # at premarket time with gap-up 1m data.
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        # Verify persisted row count
+        row_count = store.conn.execute(
+            "SELECT COUNT(*) FROM daily_scan WHERE scan_date=?",
+            (scan_date.isoformat(),),
+        ).fetchone()[0]
+        store.close()
+
+        assert len(result) >= 1, (
+            f"Premarket scan with gap-up 1m data must return a NON-EMPTY watchlist; "
+            f"got {len(result)} codes. This is the live UAT bug regression lock."
+        )
+        assert "US.AAPL" in result, (
+            "AAPL with 6% gap-up 1m price must be in the premarket watchlist"
+        )
+        assert row_count >= 1, (
+            f"At least 1 row must be persisted in daily_scan; got {row_count}"
+        )
+
+    def test_premarket_scan_real_resolver_end_to_end(self, tmp_state_db):
+        """End-to-end integration: real resolve_today_price runs against a tz-aware 1m frame.
+
+        No resolve_today_price patch — proves the fetcher→scanner integration is correct
+        and that the premarket branch (now_et < 09:30 ET) resolves today_open == today_price
+        == latest premarket 1m close, which gives a gap-up result against prior_close=100.
+        """
+        from bot.scanner.scanner import run_daily_scan
+        from bot.scanner.fetcher import resolve_today_price as _real_resolve
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+
+        prior_frame = self._make_prior_only_frame(
+            scan_date=scan_date, n_days=220,
+            prior_close=100.0, prior_high=105.0,
+        )
+        # latest_price=106: today_price (106) > prior_high (105) → D1 ✓
+        # gap_pct = (106-100)/100*100 = 6.0% ≥ d3_min_gap_pct (3.0%) → D3 ✓
+        premarket_1m = self._make_premarket_1m_frame(
+            scan_date=scan_date, latest_price=106.0, high=107.0
+        )
+
+        premarket_now_et = _PREMARKET_ET
+
+        daily_sentinel = {"_type": "daily"}
+        intraday_sentinel = {"_type": "intraday", "AAPL": premarket_1m}
+
+        def _gtf_by_data(data, sym):
+            if isinstance(data, dict) and data.get("_type") == "intraday":
+                return premarket_1m
+            return prior_frame
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+             patch("bot.scanner.scanner.download_daily_bars",
+                   return_value=(daily_sentinel, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m",
+                   return_value=(intraday_sentinel, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame",
+                   side_effect=_gtf_by_data), \
+             patch("bot.scanner.scanner.now_et", return_value=premarket_now_et), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+            # No resolve_today_price patch — the REAL resolver runs
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        gap_row = store.conn.execute(
+            "SELECT gap_pct FROM daily_scan WHERE scan_date=? AND code=?",
+            (scan_date.isoformat(), "US.AAPL"),
+        ).fetchone()
+        store.close()
+
+        assert "US.AAPL" in result, (
+            "End-to-end premarket scan must produce a non-empty watchlist with real resolver"
+        )
+        assert gap_row is not None
+        # gap = (106 - 100) / 100 * 100 = 6.0% (premarket: today_open = latest 1m close = 106)
+        assert abs(gap_row[0] - 6.0) < 0.1, (
+            f"gap_pct={gap_row[0]} must be ~6.0 from premarket 1m price 106 vs prior_close 100"
+        )
