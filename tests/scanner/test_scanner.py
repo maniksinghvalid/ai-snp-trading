@@ -1102,3 +1102,192 @@ class TestRunFromRunningEventLoop:
         assert set(gw.subscribe.call_args[0][0]) == set(result), (
             "subscribe must still receive the watchlist when bridged from a running loop"
         )
+
+
+# ============================================================
+# Task 1 (02-05): _evaluate_symbol gains today_price parameter
+# ============================================================
+
+class TestEvaluateSymbolTodayPrice:
+    """Task 1 (02-05): _evaluate_symbol sources today's numbers from injected TodayPrice."""
+
+    def _make_daily_prior_only(
+        self,
+        n_days: int = 220,
+        prior_close: float = 100.0,
+        prior_high: float = 105.0,
+        scan_date: date = None,
+    ) -> pd.DataFrame:
+        """Build a daily frame with n_days rows, where ALL rows are dated < scan_date.
+
+        Unlike _make_daily_frame, this does NOT include a row for scan_date itself —
+        mirroring the live premarket case where yfinance has not yet published the
+        daily bar for today.
+        """
+        if scan_date is None:
+            scan_date = date(2026, 6, 23)
+        # End the date range at the business day BEFORE scan_date
+        prior_day = pd.Timestamp(scan_date) - pd.tseries.offsets.BDay(1)
+        dates = pd.date_range(end=prior_day, periods=n_days, freq="B")
+
+        sma_base = prior_close * 0.90   # ensures SMA200 < prior_close (D2 passes)
+        closes = [sma_base] * n_days
+        closes[-1] = prior_close        # last row is the prior trading day
+
+        highs = [sma_base * 1.02] * n_days
+        highs[-1] = prior_high
+
+        lows = [sma_base * 0.98] * n_days
+        opens = [sma_base * 0.99] * n_days
+        volumes = [1_000_000.0] * n_days
+
+        return pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+            index=dates,
+        )
+
+    def test_evaluate_symbol_gap_up_emits_candidate(self):
+        """Injected TodayPrice(today_open=104, today_price=106, today_high=107)
+        against prior_close=100 yields a candidate with gap_pct == 4.0.
+        """
+        from bot.scanner.scanner import _evaluate_symbol
+        from bot.scanner.fetcher import TodayPrice
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+        frame = self._make_daily_prior_only(
+            n_days=220, prior_close=100.0, prior_high=105.0, scan_date=scan_date
+        )
+
+        today_price = TodayPrice(today_open=104.0, today_price=106.0, today_high=107.0)
+
+        # Patch get_ticker_frame so _evaluate_symbol receives our daily frame
+        with patch("bot.scanner.scanner.get_ticker_frame", return_value=frame):
+            result = _evaluate_symbol("AAPL", {}, cfg, scan_date, today_price)
+
+        assert result is not None, "Gap-up symbol with D1/D2/D3 passing must return a candidate"
+        assert abs(result["gap_pct"] - 4.0) < 1e-6, (
+            f"gap_pct must be (104-100)/100*100 = 4.0, got {result['gap_pct']}"
+        )
+        assert "code" in result
+        assert "prior_day_high" in result
+        assert "prior_close" in result
+        assert "sma200" in result
+        assert "rvol_baseline" in result
+        assert abs(result["prior_close"] - 100.0) < 1e-6
+
+    def test_evaluate_symbol_below_d3_skipped(self):
+        """TodayPrice(today_open=102, ...) → gap 2.0% < cfg.d3_min_gap_pct=3.0 → returns None."""
+        from bot.scanner.scanner import _evaluate_symbol
+        from bot.scanner.fetcher import TodayPrice
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+        frame = self._make_daily_prior_only(
+            n_days=220, prior_close=100.0, prior_high=105.0, scan_date=scan_date
+        )
+
+        # gap = (102 - 100) / 100 * 100 = 2.0% < 3.0% threshold
+        today_price = TodayPrice(today_open=102.0, today_price=106.0, today_high=107.0)
+
+        with patch("bot.scanner.scanner.get_ticker_frame", return_value=frame):
+            result = _evaluate_symbol("AAPL", {}, cfg, scan_date, today_price)
+
+        assert result is None, (
+            "Symbol with gap below D3 threshold must be excluded (D3 filter)"
+        )
+
+    def test_evaluate_symbol_none_today_price_skips_fail_closed(self):
+        """today_price=None → returns None AND logs symbol_skipped_no_intraday_price."""
+        from bot.scanner.scanner import _evaluate_symbol
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        import bot.scanner.scanner as scanner_mod
+        with patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
+            result = _evaluate_symbol("AAPL", {}, cfg, scan_date, None)
+
+        assert result is None, "None today_price must return None (fail-closed)"
+        # Must log symbol_skipped_no_intraday_price (not symbol_skipped_no_today_bar)
+        warning_events = [
+            call.args[0] for call in mock_logger.warning.call_args_list
+        ]
+        assert "symbol_skipped_no_intraday_price" in warning_events, (
+            f"Must log symbol_skipped_no_intraday_price; got: {warning_events}"
+        )
+        assert "symbol_skipped_no_today_bar" not in warning_events, (
+            "Must NOT log the old symbol_skipped_no_today_bar event (it is gone)"
+        )
+
+    def test_evaluate_symbol_no_look_ahead_preserved(self):
+        """SMA200 and rvol_baseline use only rows with date < scan_date.
+
+        Build a daily frame that INCLUDES a row dated == scan_date with an anomalous
+        close/volume. The injected TodayPrice drives gap/D1; the daily row dated
+        scan_date must NOT enter SMA/RVOL computation.
+        """
+        from bot.scanner.scanner import _evaluate_symbol
+        from bot.scanner.fetcher import TodayPrice
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(rvol_lookback_days=14)
+
+        # Build prior rows (220 sessions before scan_date)
+        prior_close = 100.0
+        sma_base = prior_close * 0.90
+        prior_day = pd.Timestamp(scan_date) - pd.tseries.offsets.BDay(1)
+        dates_prior = pd.date_range(end=prior_day, periods=220, freq="B")
+
+        closes_prior = [sma_base] * 220
+        closes_prior[-1] = prior_close
+
+        highs_prior = [sma_base * 1.02] * 220
+        highs_prior[-1] = 105.0
+
+        lows_prior = [sma_base * 0.98] * 220
+        opens_prior = [sma_base * 0.99] * 220
+        volumes_prior = [1_000_000.0] * 220
+
+        frame_prior = pd.DataFrame(
+            {
+                "open": opens_prior,
+                "high": highs_prior,
+                "low": lows_prior,
+                "close": closes_prior,
+                "volume": volumes_prior,
+            },
+            index=dates_prior,
+        )
+
+        # Add misleading scan_date row (huge close + huge volume that would inflate SMA/RVOL)
+        scan_ts_date = pd.Timestamp(scan_date)
+        misleading_row = pd.DataFrame(
+            {
+                "open": [999.0],
+                "high": [999.0],
+                "low": [999.0],
+                "close": [999.0],
+                "volume": [999_000_000.0],  # 999x normal — would inflate RVOL if included
+            },
+            index=[scan_ts_date],
+        )
+        frame_with_today = pd.concat([frame_prior, misleading_row])
+
+        today_price = TodayPrice(today_open=104.0, today_price=106.0, today_high=107.0)
+
+        with patch("bot.scanner.scanner.get_ticker_frame", return_value=frame_with_today):
+            result = _evaluate_symbol("AAPL", {}, cfg, scan_date, today_price)
+
+        assert result is not None, "Symbol must pass with injected TodayPrice"
+        # RVOL baseline must use only the 14 prior rows (vol=1_000_000); scan_date row excluded
+        assert abs(result["rvol_baseline"] - 1_000_000.0) < 1.0, (
+            f"rvol_baseline={result['rvol_baseline']} must equal 1_000_000 "
+            "(scan_date row with 999M volume must be excluded by date < scan_date mask)"
+        )
+        # SMA200 must be computed from prior closes only (sma_base ≈ 90.0)
+        assert result["sma200"] is not None
+        assert result["sma200"] < 95.0, (
+            f"sma200={result['sma200']} must be near 90 (prior closes), not 999 "
+            "(scan_date close must be excluded from SMA)"
+        )

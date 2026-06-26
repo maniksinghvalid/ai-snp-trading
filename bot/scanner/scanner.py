@@ -21,7 +21,14 @@ from bot.config.loader import StrategyConfig
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 from bot.scanner.calendar import is_trading_day
-from bot.scanner.fetcher import download_daily_bars, get_ticker_frame, ScanDegradationError
+from bot.scanner.fetcher import (
+    download_daily_bars,
+    download_intraday_1m,
+    get_ticker_frame,
+    resolve_today_price,
+    TodayPrice,
+    ScanDegradationError,
+)
 from bot.scanner.universe import fetch_sp500_symbols, yfinance_to_moomoo
 from bot.state.store import StateStore
 from bot.strategy.indicators import sma, rvol
@@ -42,6 +49,7 @@ def _evaluate_symbol(
     data: object,
     cfg: StrategyConfig,
     scan_date: date,
+    today_price: Optional[TodayPrice],
 ) -> Optional[dict]:
     """Evaluate a single symbol against D1/D2/D3 daily filters.
 
@@ -50,19 +58,33 @@ def _evaluate_symbol(
     baseline (mean of prior cfg.rvol_lookback_days sessions, date < scan_date),
     computes gap_pct, and calls TrendJoinLong(cfg).passes_daily_filters.
 
-    symbol:    yfinance-format ticker (e.g. "AAPL")
-    data:      yf.download() return value (group_by="ticker")
-    cfg:       StrategyConfig — all thresholds drawn from cfg, never hardcoded
-    scan_date: date — used as the no-look-ahead cutoff for RVOL baseline
+    symbol:      yfinance-format ticker (e.g. "AAPL")
+    data:        yf.download() return value (group_by="ticker")
+    cfg:         StrategyConfig — all thresholds drawn from cfg, never hardcoded
+    scan_date:   date — used as the no-look-ahead cutoff for RVOL baseline
+    today_price: TodayPrice | None — today's open/price/high injected by the
+                 caller from the 1m intraday feed (Plan 02-05). When None, the
+                 symbol is skipped fail-closed with no_intraday_price log event.
+                 The daily frame no longer supplies today's numbers (02-05 wiring).
 
     Returns a candidate dict with the moomoo code, gap_pct, prior_day_high,
     prior_close, sma200, rvol_baseline; or None if the symbol is excluded.
     """
+    # Fail-closed: no intraday price → cannot evaluate gap/D1/D3 for today.
+    # Caller (02-05 wiring) resolves today_price via resolve_today_price from the 1m feed.
+    if today_price is None:
+        _logger.warning(
+            "symbol_skipped_no_intraday_price",
+            symbol=symbol,
+            scan_date=str(scan_date),
+        )
+        return None
+
     frame = get_ticker_frame(data, symbol)
     if frame is None:
         return None
 
-    # Require >= 2 rows (prior + today) for basic D1/D2/D3 evaluation
+    # Require >= 2 rows for RVOL/SMA lookback validation
     if len(frame) < 2:
         _logger.warning("symbol_skipped_insufficient_rows", symbol=symbol, rows=len(frame))
         return None
@@ -94,9 +116,7 @@ def _evaluate_symbol(
     # CR-01: An unavailable SMA200 means the D2 trend filter ("prior close > SMA200" —
     # the trend-join premise of the entire strategy) cannot be evaluated. Fail CLOSED:
     # a symbol with >= rvol_lookback_days but < 200 prior sessions must be EXCLUDED,
-    # never admitted as if it were in an established uptrend. Previously sma200_val
-    # was coerced to 0.0 before the filter, which made D2 (`prior_close > 0.0`)
-    # always True for any real price — silently bypassing the trend filter.
+    # never admitted as if it were in an established uptrend.
     if sma200_val is None:
         _logger.warning(
             "symbol_skipped_no_sma200",
@@ -116,23 +136,6 @@ def _evaluate_symbol(
         return None
     rvol_baseline_val = float(prior_sorted["volume"].mean())
 
-    # CR-02: "today" must be the row whose date equals scan_date — NOT the positional
-    # frame.iloc[-1]. During a real premarket scan (before ~09:30 ET, the actual use
-    # case) yfinance has not yet produced today's daily bar, so frame.index[-1] is the
-    # PRIOR trading day. Relying on iloc[-1]/iloc[-2] would then silently evaluate
-    # yesterday-vs-day-before for gap/D1/D3 and fold "today" into the SMA/RVOL baseline.
-    # Locate today's row explicitly by date and skip the symbol if it is absent, so the
-    # scanner never ranks the wrong session.
-    today_rows = frame.index[frame.index.normalize() == scan_ts.normalize()]
-    if len(today_rows) == 0:
-        _logger.warning(
-            "symbol_skipped_no_today_bar",
-            symbol=symbol,
-            scan_date=str(scan_date),
-        )
-        return None
-    today_row = frame.loc[today_rows[-1]]
-
     # prior_row = the most-recent session strictly before scan_date. prior_frame is the
     # date-ascending set of rows with date < scan_date (same mask used for SMA/RVOL),
     # so its last row is the immediately-prior trading day.
@@ -140,7 +143,21 @@ def _evaluate_symbol(
 
     prior_close_val = float(prior_row["close"])
     prior_high_val = float(prior_row["high"])
-    today_open_val = float(today_row["open"])
+
+    # Build synthetic today_row from the injected TodayPrice struct (02-05).
+    # passes_daily_filters reads: iloc[-1]["open"] (D3 gap), iloc[-1]["close"] (D1, universe),
+    # iloc[-1]["high"] (unused in daily filters but included for completeness).
+    # The daily frame's today-row (if present) is IGNORED — today's numbers come
+    # exclusively from the injected TodayPrice (no-look-ahead preserved: SMA/RVOL
+    # still use only prior_mask rows).
+    today_open_val = today_price.today_open
+    today_row = pd.Series({
+        "open": today_price.today_open,
+        "high": today_price.today_high,
+        "low": today_price.today_open,   # low unused by daily filters; set to open
+        "close": today_price.today_price,
+        "volume": 0.0,                   # volume unused by daily filters
+    })
 
     # Compute gap_pct for ranking (used by caller; also mirrored by D3 check inside passes_daily_filters)
     if prior_close_val == 0.0:
@@ -150,9 +167,9 @@ def _evaluate_symbol(
     # Apply D1/D2/D3 + universe price filter via TrendJoinLong.
     # sma200_val is guaranteed non-None here (excluded above if unavailable, CR-01).
     #
-    # CR-02: pass an explicit 2-row (prior, today) frame so passes_daily_filters'
-    # iloc[-2]/iloc[-1] align with the date-resolved prior/today rows above, rather
-    # than the full frame whose last positional row may be the prior day in premarket.
+    # Pass an explicit 2-row (prior, today) frame so passes_daily_filters'
+    # iloc[-2]/iloc[-1] align correctly: prior_row is iloc[-2], synthetic today_row
+    # is iloc[-1]. Gap definition, D1/D2/D3 math, and ranking are UNCHANGED (02-05).
     daily_2row = pd.DataFrame([prior_row, today_row])
     strategy = TrendJoinLong(cfg)
     if not strategy.passes_daily_filters(symbol, daily_2row, sma200_val):
