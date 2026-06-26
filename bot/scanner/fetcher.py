@@ -329,6 +329,21 @@ def resolve_today_price(
     today_frame = frame_1m.loc[today_mask]
     today_idx_et = [ts for ts in idx_et if ts.date() == today_date]
 
+    # download_intraday_1m batches via yf.download(group_by="ticker"), which reindexes
+    # every ticker onto the UNION of all timestamps. The union's last row is a real
+    # print for only ONE ticker; every other ticker gets an all-NaN row there. So the
+    # naive .iloc[0]/.iloc[-1] would read NaN open/close for almost every symbol —
+    # NaN today_price → NaN gap_pct → the symbol silently fails all D-filters → empty
+    # watchlist (same symptom this phase fixes, different path). Always read the
+    # FIRST/LAST VALID (non-NaN) value, and fail-closed if a needed series is all-NaN.
+    def _first_valid(series):
+        s = series.dropna()
+        return None if s.empty else float(s.iloc[0])
+
+    def _last_valid(series):
+        s = series.dropna()
+        return None if s.empty else float(s.iloc[-1])
+
     if is_rth:
         # Regular-session phase: select today's bars with ET bar-time >= 09:30
         rth_mask = [ts.time() >= _RTH_OPEN for ts in today_idx_et]
@@ -337,23 +352,27 @@ def resolve_today_price(
             # No >=09:30 bar yet — fail-closed (e.g. data lag on open)
             return None
 
-        # today_open: open of the FIRST regular-session bar (authoritative gap open)
-        today_open = float(rth_bars["open"].iloc[0])
-        # today_price: close of the LATEST today-dated bar (current price)
-        today_price = float(today_frame["close"].iloc[-1])
-        # today_high: max high of regular-session bars only
+        # today_open: open of the FIRST regular-session bar with a real print
+        today_open = _first_valid(rth_bars["open"])
+        # today_price: close of the LATEST today-dated bar with a real print
+        today_price = _last_valid(today_frame["close"])
+        # today_high: max high of regular-session bars (max already skips NaN)
         today_high = float(rth_bars["high"].max())
 
     else:
         # Premarket phase: use all of today's bars (all are premarket in this phase)
         premarket_bars = today_frame  # non-empty (today_mask guarded above)
 
-        # today_open == today_price == latest premarket close (provisional gap proxy)
-        latest_close = float(premarket_bars["close"].iloc[-1])
+        # today_open == today_price == latest premarket close with a real print
+        latest_close = _last_valid(premarket_bars["close"])
         today_open = latest_close
         today_price = latest_close
-        # today_high: max high across premarket bars
+        # today_high: max high across premarket bars (max already skips NaN)
         today_high = float(premarket_bars["high"].max())
+
+    # Fail-closed if any required value is missing (all-NaN series) or high is NaN.
+    if today_open is None or today_price is None or today_high != today_high:
+        return None
 
     return TodayPrice(
         today_open=today_open,

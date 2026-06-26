@@ -552,6 +552,78 @@ class TestResolveTodayPrice:
         # today_high must be max of TODAY's bars (104.0), NOT the stale 999.0 high.
         assert result.today_high == pytest.approx(104.0)
 
+    def test_resolve_rth_trailing_nan_row_uses_last_valid_close(self):
+        """Regression (live probe 2026-06-26): download_intraday_1m batches via
+        yf.download(group_by="ticker"), which reindexes EVERY ticker onto the UNION
+        of all timestamps. The union's last row is a real print for only ONE ticker;
+        every other ticker gets an all-NaN row there. So `today_frame["close"].iloc[-1]`
+        is NaN for almost every symbol — NaN today_price → NaN gap_pct → the symbol
+        silently fails all D-filters → empty watchlist again (different path, same
+        symptom). The resolver must use the last/first VALID (non-NaN) value.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        nan = float("nan")
+        # Two real RTH bars, then a trailing all-NaN union-artifact row.
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 09:30", "open": 102.0, "high": 106.0, "low": 101.5, "close": 105.0},
+            {"ts": "2026-06-26 09:35", "open": 105.0, "high": 108.0, "low": 104.0, "close": 107.0},
+            {"ts": "2026-06-26 17:23", "open": nan, "high": nan, "low": nan, "close": nan},
+        ])
+        now_et = datetime(2026, 6, 26, 18, 0, tzinfo=ET)  # after close → RTH branch
+
+        result = resolve_today_price(frame, now_et)
+
+        assert result is not None
+        # today_price must be the last VALID close (107.0), NOT the trailing NaN.
+        assert result.today_price == pytest.approx(107.0)
+        # today_open: first VALID regular-session open (102.0).
+        assert result.today_open == pytest.approx(102.0)
+        # today_high: max valid high (108.0).
+        assert result.today_high == pytest.approx(108.0)
+
+    def test_resolve_premarket_trailing_nan_row_uses_last_valid_close(self):
+        """Regression (live probe): same union-NaN artifact in the PREMARKET branch —
+        the latest premarket close must be the last VALID close, never the trailing NaN."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        nan = float("nan")
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 08:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
+            {"ts": "2026-06-26 08:30", "open": 101.0, "high": 104.0, "low": 100.0, "close": 103.0},
+            {"ts": "2026-06-26 08:31", "open": nan, "high": nan, "low": nan, "close": nan},
+        ])
+        now_et = datetime(2026, 6, 26, 8, 35, tzinfo=ET)  # premarket
+
+        result = resolve_today_price(frame, now_et)
+
+        assert result is not None
+        assert result.today_open == pytest.approx(103.0)
+        assert result.today_price == pytest.approx(103.0)
+        assert result.today_high == pytest.approx(104.0)
+
+    def test_resolve_all_nan_today_bars_return_none(self):
+        """If every today-dated bar is all-NaN (no usable print), fail closed."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        nan = float("nan")
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 09:30", "open": nan, "high": nan, "low": nan, "close": nan},
+            {"ts": "2026-06-26 09:35", "open": nan, "high": nan, "low": nan, "close": nan},
+        ])
+        now_et = datetime(2026, 6, 26, 10, 0, tzinfo=ET)
+
+        assert resolve_today_price(frame, now_et) is None
+
 
 # ============================================================
 # Task 2: download_intraday_1m batch fetcher (SCAN-06)
