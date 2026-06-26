@@ -267,3 +267,164 @@ class TestDegradationGate:
         assert len(failed) == 9
         # Data dict returned (partial success)
         assert data is not None
+
+
+# ============================================================
+# Task 1: TodayPrice struct + resolve_today_price pure resolver
+# ============================================================
+
+def _make_1m_frame(bars: list, tz: str = "America/New_York") -> "pd.DataFrame":
+    """Build a tz-aware 1m OHLCV DataFrame from a list of dicts.
+
+    Each dict must have: 'ts' (ISO string, e.g. '2026-06-26 08:00'), and OHLCV floats:
+    open, high, low, close, volume. The timestamp is interpreted as already being in the
+    given tz (America/New_York by default) — so there is no UTC conversion.
+    """
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(tz)
+    timestamps = [
+        pd.Timestamp(b["ts"]).tz_localize(zone) for b in bars
+    ]
+    df = pd.DataFrame(
+        {
+            "open": [b["open"] for b in bars],
+            "high": [b["high"] for b in bars],
+            "low": [b["low"] for b in bars],
+            "close": [b["close"] for b in bars],
+            "volume": [b.get("volume", 1000000) for b in bars],
+        },
+        index=pd.DatetimeIndex(timestamps, name="Datetime"),
+    )
+    return df
+
+
+class TestResolveTodayPrice:
+    """Task 1: resolve_today_price pure resolver — premarket / spanning-09:30 / empty cases."""
+
+    def test_resolve_premarket_uses_latest_premarket_close(self):
+        """Premarket (now_et < 09:30 ET): today_open == today_price == latest premarket close;
+        today_high == max high across premarket bars."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        # Two premarket bars at 08:00 and 08:30 ET
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 08:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
+            {"ts": "2026-06-26 08:30", "open": 101.0, "high": 104.0, "low": 100.0, "close": 103.0},
+        ])
+        scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+        now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+
+        result = resolve_today_price(frame, scan_ts, now_et)
+
+        assert result is not None
+        # today_open == today_price == latest premarket close (08:30 bar close = 103.0)
+        assert result.today_open == pytest.approx(103.0)
+        assert result.today_price == pytest.approx(103.0)
+        # today_high == max high across premarket bars (max(102.0, 104.0) = 104.0)
+        assert result.today_high == pytest.approx(104.0)
+
+    def test_resolve_after_open_uses_first_regular_session_open(self):
+        """At/after 09:30 ET: today_open == open of first regular-session bar (>=09:30 ET),
+        NOT a premarket bar open; today_price == latest bar close; today_high == max high
+        of regular-session bars only."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        # Two premarket bars at 09:25, 09:28 ET then two regular-session bars at 09:30, 09:35 ET
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 09:25", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
+            {"ts": "2026-06-26 09:28", "open": 100.5, "high": 101.5, "low": 100.0, "close": 101.0},
+            {"ts": "2026-06-26 09:30", "open": 102.0, "high": 106.0, "low": 101.5, "close": 105.0},
+            {"ts": "2026-06-26 09:35", "open": 105.0, "high": 108.0, "low": 104.0, "close": 107.0},
+        ])
+        scan_ts = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+        now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+
+        result = resolve_today_price(frame, scan_ts, now_et)
+
+        assert result is not None
+        # today_open == first regular-session bar open (09:30 bar open = 102.0, NOT 100.0 premarket)
+        assert result.today_open == pytest.approx(102.0)
+        # today_price == latest bar close (09:35 bar close = 107.0)
+        assert result.today_price == pytest.approx(107.0)
+        # today_high == max high of regular-session bars only: max(106.0, 108.0) = 108.0
+        assert result.today_high == pytest.approx(108.0)
+
+    def test_resolve_empty_frame_returns_none(self):
+        """Empty or None 1m frame → resolve_today_price returns None (fail-closed)."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+        import pandas as pd
+
+        ET = ZoneInfo("America/New_York")
+        scan_ts = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+        now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+
+        # None frame
+        assert resolve_today_price(None, scan_ts, now_et) is None
+
+        # Empty DataFrame
+        empty_frame = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        assert resolve_today_price(empty_frame, scan_ts, now_et) is None
+
+    def test_resolve_after_open_but_no_regular_bar_returns_none(self):
+        """now_et >= 09:30 ET but frame has ONLY premarket bars → returns None (fail-closed)."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from bot.scanner.fetcher import resolve_today_price
+
+        ET = ZoneInfo("America/New_York")
+        # Only premarket bars; no >=09:30 bar
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 08:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
+            {"ts": "2026-06-26 09:28", "open": 101.0, "high": 103.0, "low": 100.0, "close": 102.0},
+        ])
+        scan_ts = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+        now_et = datetime(2026, 6, 26, 9, 40, tzinfo=ET)
+
+        result = resolve_today_price(frame, scan_ts, now_et)
+
+        assert result is None
+
+    def test_resolve_does_not_call_wall_clock(self):
+        """Purity test: resolve_today_price must NOT call now_et()/datetime.now() internally.
+
+        The injected now_et argument is the only clock source. Verify by patching
+        bot.scanner.fetcher.now_et to a sentinel that raises if called.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch
+
+        ET = ZoneInfo("America/New_York")
+        frame = _make_1m_frame([
+            {"ts": "2026-06-26 08:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0},
+        ])
+        scan_ts = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+        now_et = datetime(2026, 6, 26, 8, 30, tzinfo=ET)
+
+        def _sentinel_clock(*args, **kwargs):
+            raise AssertionError(
+                "resolve_today_price must NOT call now_et() or datetime.now() internally; "
+                "the clock must be the injected now_et argument."
+            )
+
+        from bot.scanner import fetcher as fetcher_module
+        with patch.object(fetcher_module, "now_et", _sentinel_clock, create=True):
+            # Should complete without raising AssertionError
+            from bot.scanner.fetcher import resolve_today_price
+            result = resolve_today_price(frame, scan_ts, now_et)
+
+        # Premarket case: result should be valid
+        assert result is not None
+        assert result.today_open == pytest.approx(101.0)
+        assert result.today_price == pytest.approx(101.0)
+        assert result.today_high == pytest.approx(102.0)
