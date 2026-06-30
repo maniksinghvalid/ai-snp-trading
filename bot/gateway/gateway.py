@@ -328,7 +328,11 @@ class MoomooGateway:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: self._trade_ctx.position_list_query(refresh_cache=refresh_cache),
+            lambda: self._trade_ctx.position_list_query(
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+                refresh_cache=refresh_cache,
+            ),
         )
 
     async def get_equity(self) -> float:

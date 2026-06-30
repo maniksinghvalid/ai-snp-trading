@@ -885,6 +885,81 @@ class TestGetEquity:
 
 
 # ============================================================
+# MoomooGateway.get_positions() — account routing (T-01-01 / BUG-01)
+# ============================================================
+
+class TestGetPositions:
+    """get_positions() must forward trd_env and acc_id to position_list_query (T-01-01).
+
+    BUG-01 regression guard: gateway.py:316 called position_list_query(refresh_cache=...)
+    without trd_env or acc_id. The moomoo SDK defaults those to TrdEnv.REAL / acc_id=0,
+    so reconciliation silently read the REAL account (NVDY +26 long) while orders
+    executed on SIMULATE acc 1727266 (NVDY -130 short). Reconcile never saw the short,
+    kept re-arming NVDY to +26 ACTIVE, and force-close sold another 26 each day.
+    This test is the regression guard; it must FAIL before the fix and PASS after.
+    """
+
+    def test_get_positions_forwards_trd_env_and_acc_id(self):
+        """get_positions() must pass trd_env and acc_id to position_list_query (T-01-01 / BUG-01).
+
+        RED (before fix): call only has refresh_cache — trd_env and acc_id absent,
+        so the SDK defaults to TrdEnv.REAL / acc_id=0, reading the wrong account.
+        GREEN (after fix): all three kwargs forwarded, reading SIMULATE acc 1727266.
+        """
+        gw = _make_gateway_with_mocks(acc_id=1727266, broker_trd_env="SIMULATE")
+
+        async def _run():
+            await gw.get_positions()
+
+        asyncio.run(_run())
+
+        call_args = gw._trade_ctx.position_list_query.call_args
+        assert call_args is not None, "position_list_query was not called"
+        kwargs = call_args[1] if call_args[1] else {}
+
+        assert "trd_env" in kwargs, (
+            f"trd_env must be forwarded to position_list_query; got kwargs={kwargs}. "
+            "Without trd_env the SDK defaults to TrdEnv.REAL, reading the wrong account "
+            "(T-01-01 / BUG-01)."
+        )
+        assert "acc_id" in kwargs, (
+            f"acc_id must be forwarded to position_list_query; got kwargs={kwargs}. "
+            "Without acc_id the SDK defaults to acc_id=0, reading the wrong account "
+            "(T-01-01 / BUG-01)."
+        )
+        assert kwargs["trd_env"] == _parse_trd_env("SIMULATE"), (
+            f"trd_env must equal TrdEnv.SIMULATE (from cfg.trd_env); got {kwargs.get('trd_env')} "
+            "(T-01-01 / BUG-01)."
+        )
+        assert kwargs["acc_id"] == 1727266, (
+            f"acc_id must be 1727266 (cfg.acc_id); got {kwargs.get('acc_id')} "
+            "(T-01-01 / BUG-01)."
+        )
+
+    def test_get_positions_forwards_refresh_cache(self):
+        """get_positions() must also forward refresh_cache to position_list_query (Pitfall B).
+
+        Regression guard: ensure the refresh_cache kwarg is not dropped when
+        trd_env and acc_id are added to the call (minimal-diff correctness check).
+        """
+        gw = _make_gateway_with_mocks(acc_id=1727266, broker_trd_env="SIMULATE")
+
+        async def _run():
+            await gw.get_positions(refresh_cache=True)
+
+        asyncio.run(_run())
+
+        call_args = gw._trade_ctx.position_list_query.call_args
+        assert call_args is not None, "position_list_query was not called"
+        kwargs = call_args[1] if call_args[1] else {}
+
+        assert kwargs.get("refresh_cache") is True, (
+            f"refresh_cache=True must be forwarded to position_list_query (Pitfall B); "
+            f"got kwargs={kwargs}"
+        )
+
+
+# ============================================================
 # MoomooGateway.get_market_snapshot() — raw broker snapshot (D-01)
 # Wave 0 stubs — implemented in 03-01 Task 3
 # ============================================================
