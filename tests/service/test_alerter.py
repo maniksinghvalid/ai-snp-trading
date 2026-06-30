@@ -186,3 +186,92 @@ async def test_send_failure_does_not_raise():
                 f"TelegramAlerter.send() raised {type(exc).__name__}: {exc} — "
                 "alert failures must never propagate (ALERT-04)"
             )
+
+
+# ============================================================
+# ALERT-03 regression: open_risk must use initial_stop/trail_stop
+# ============================================================
+
+
+def test_format_daily_summary_open_risk_uses_correct_stop_columns():
+    """Open Risk must read initial_stop/trail_stop — not the missing 'stop' key (ALERT-03 regression).
+
+    StateStore.get_open_positions() returns dicts keyed by the positions table columns:
+      initial_stop, trail_stop, entry_price, remaining_quantity.
+    There is NO 'stop' column.
+
+    Bug: format_daily_summary reads r.get("stop") which is always None -> 0.0, so
+         Open Risk degrades to sum(entry_price * qty) — gross notional, not risk-to-stop.
+
+    Fix requirement:
+      effective_stop = trail_stop if trail_stop is not None else initial_stop
+      open_risk = sum(max(0, (entry_price - effective_stop) * remaining_quantity))
+    """
+    alerter = _make_alerter_with_token()
+
+    open_positions = [
+        # Position A: no trailing stop yet — effective_stop = initial_stop = 148.00
+        # Per-position risk = (150.00 - 148.00) * 100 = $200.00
+        {
+            "entry_price": 150.00,
+            "initial_stop": 148.00,
+            "trail_stop": None,
+            "remaining_quantity": 100,
+        },
+        # Position B: trailing stop active — effective_stop = trail_stop = 198.00
+        # Per-position risk = (200.00 - 198.00) * 50 = $100.00
+        {
+            "entry_price": 200.00,
+            "initial_stop": 195.00,
+            "trail_stop": 198.00,
+            "remaining_quantity": 50,
+        },
+    ]
+    # Expected: $200.00 + $100.00 = $300.00
+    expected_open_risk = 300.00
+
+    text = alerter.format_daily_summary(trades_rows=[], open_positions=open_positions)
+
+    assert f"Open Risk: ${expected_open_risk:.2f}" in text, (
+        f"Expected 'Open Risk: ${expected_open_risk:.2f}' (risk-to-stop) but got:\n{text}\n\n"
+        "format_daily_summary reads r.get('stop') which is always None — "
+        "positions rows have 'initial_stop' and 'trail_stop', not 'stop'."
+    )
+
+
+def test_format_daily_summary_open_risk_clamped_at_zero_for_locked_profit():
+    """Open Risk contribution for a position with trail_stop above entry must be clamped to 0.
+
+    When a trailing stop has advanced past entry (locked profit), the position has no downside
+    risk to stop. (entry - trail_stop) < 0 would produce negative risk that incorrectly
+    offsets other positions' genuine risk. Per-position contribution must be max(0, ...).
+    """
+    alerter = _make_alerter_with_token()
+
+    open_positions = [
+        # At-risk position: risk = (100.00 - 98.00) * 50 = $100.00
+        {
+            "entry_price": 100.00,
+            "initial_stop": 98.00,
+            "trail_stop": None,
+            "remaining_quantity": 50,
+        },
+        # Locked-profit position: trail_stop (102.00) > entry (100.00)
+        # Contribution must be clamped to max(0, (100 - 102) * 30) = max(0, -60) = 0
+        {
+            "entry_price": 100.00,
+            "initial_stop": 98.00,
+            "trail_stop": 102.00,
+            "remaining_quantity": 30,
+        },
+    ]
+    # Expected: $100.00 (locked-profit position contributes $0, not -$60)
+    expected_open_risk = 100.00
+
+    text = alerter.format_daily_summary(trades_rows=[], open_positions=open_positions)
+
+    assert f"Open Risk: ${expected_open_risk:.2f}" in text, (
+        f"Expected 'Open Risk: ${expected_open_risk:.2f}' (clamped) but got:\n{text}\n\n"
+        "A position whose trailing stop exceeds entry (locked profit) must contribute 0 "
+        "risk, not a negative value that offsets other positions."
+    )

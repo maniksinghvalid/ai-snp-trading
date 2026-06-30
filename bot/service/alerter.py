@@ -189,8 +189,11 @@ class TelegramAlerter:
 
         trades_rows: list of dicts — each dict has keys entry_price, exit_price,
             quantity, r_multiple (NULL-safe via `or 0.0`)
-        open_positions: list of dicts — each dict has keys entry_price, stop,
-            remaining_quantity (for open-risk calculation)
+        open_positions: list of dicts — each dict has keys entry_price,
+            initial_stop, trail_stop, remaining_quantity (matching positions
+            table schema from StateStore.get_open_positions()). trail_stop
+            overrides initial_stop when set; per-position risk is clamped at
+            0 when a trailing stop has advanced past entry (locked profit).
         Returns str — HTML-formatted daily summary message
         """
         n_trades = len(trades_rows)
@@ -203,11 +206,15 @@ class TelegramAlerter:
             for r in trades_rows
         )
 
-        open_risk = sum(
-            ((r.get("entry_price") or 0.0) - (r.get("stop") or 0.0))
-            * (r.get("remaining_quantity") or r.get("quantity") or 0)
-            for r in open_positions
-        )
+        def _position_risk(r: dict) -> float:
+            entry = r.get("entry_price") or 0.0
+            trail_stop = r.get("trail_stop")
+            initial_stop = r.get("initial_stop") or 0.0
+            effective_stop = trail_stop if trail_stop is not None else initial_stop
+            qty = r.get("remaining_quantity") or r.get("quantity") or 0
+            return max(0.0, (entry - effective_stop) * qty)
+
+        open_risk = sum(_position_risk(r) for r in open_positions)
 
         pnl_sign = "+" if realized_pnl >= 0 else ""
         return (
