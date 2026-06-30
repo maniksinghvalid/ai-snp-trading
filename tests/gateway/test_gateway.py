@@ -1102,6 +1102,229 @@ class TestGetGlobalState:
 # BLOCKER-01: set_handler delegates to quote context (SIG-01)
 # ============================================================
 
+# ============================================================
+# SAFE-OG-01: Orphan-adoption ownership + long-only guard
+# ============================================================
+
+class TestOrphanOwnershipGuard:
+    """Regression tests: orphan-adoption must check bot-ownership AND long-only.
+
+    Before the guard, reconcile_once and startup_reconcile adopted ANY broker
+    position not in memory/DB — including manual operator positions and shorts.
+    These tests enforce SAFE-OG-01: both sites must:
+      (a) bot-owned: has_pending_intent(code) OR code in get_open_positions()
+      (b) long-only: broker qty > 0
+    On failure: skip + log reconcile_external_position_ignored.
+    Crash-recovery is preserved because pending_intent is written BEFORE
+    place_order (engine.py, EXEC-04 docstring line ~108).
+    """
+
+    # ----------------------------------------------------------------
+    # reconcile_once tests
+    # ----------------------------------------------------------------
+
+    def test_reconcile_once_does_not_adopt_manual_long(self):
+        """Test A: long broker position with no bot DB record is NOT adopted.
+
+        Broker has US.AAPL qty=17 (manual operator long). Bot has no
+        pending_intent and no open_positions row. insert_orphan_position and
+        adopt_orphan must NOT be called.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.AAPL", "qty": 17, "average_cost": 195.0,
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=194.0)
+        gw._compute_orphan_stop = MagicMock(return_value=192.0)
+        gw.subscribe = AsyncMock()
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_manager.adopt_orphan = MagicMock()
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = []   # no DB record
+        mock_store.has_pending_intent.return_value = False  # no pending intent
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        result = asyncio.run(_run())
+
+        # Guard must reject: no DB record exists for this code
+        mock_store.insert_orphan_position.assert_not_called()
+        mock_manager.adopt_orphan.assert_not_called()
+        assert result["adopted"] == [], (
+            f"Manual long with no bot record must NOT appear in adopted; got {result['adopted']}"
+        )
+
+    def test_reconcile_once_does_not_adopt_short(self):
+        """Test B: short broker position (qty < 0) is NOT adopted.
+
+        Broker has US.MARA qty=-2 (short option). Long-only guard must
+        reject it regardless of ownership.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.MARA", "qty": -2, "average_cost": 0.5,
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=20.0)
+        gw._compute_orphan_stop = MagicMock(return_value=19.0)
+        gw.subscribe = AsyncMock()
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_manager.adopt_orphan = MagicMock()
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = []
+        mock_store.has_pending_intent.return_value = False
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        result = asyncio.run(_run())
+
+        # Guard must reject: qty < 0
+        mock_store.insert_orphan_position.assert_not_called()
+        mock_manager.adopt_orphan.assert_not_called()
+        assert result["adopted"] == [], (
+            f"Short position must NOT appear in adopted; got {result['adopted']}"
+        )
+
+    def test_reconcile_once_adopts_bot_owned_long_with_pending_intent(self):
+        """Test C: crash-recovery — bot-owned long with pending_intent IS adopted.
+
+        Broker has US.NVDA qty=50 (long). Bot has a PENDING intent (placed
+        order, crashed before DB position row was written). The guard must
+        PASS and adopt_orphan must be called so crash-recovery works.
+        """
+        from bot.position.state import PositionPhase
+
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.NVDA", "qty": 50, "average_cost": 800.0,
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=798.0)
+        gw._compute_orphan_stop = MagicMock(return_value=790.0)
+        gw.subscribe = AsyncMock()
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+
+        def _fake_adopt(code, qty, avg_cost, stop, position_id=None):
+            pos = MagicMock()
+            pos.phase = PositionPhase.ACTIVE
+            pos.remaining_quantity = qty
+            mock_manager._positions[code] = pos
+            return pos
+
+        mock_manager.adopt_orphan = MagicMock(side_effect=_fake_adopt)
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = []   # no prior position row (crash)
+        mock_store.has_pending_intent.return_value = True  # pending_intent written pre-crash
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        result = asyncio.run(_run())
+
+        # Guard must pass: has_pending_intent=True + qty>0
+        mock_manager.adopt_orphan.assert_called_once()
+        mock_store.insert_orphan_position.assert_called_once()
+        assert "US.NVDA" in result["adopted"], (
+            f"Bot-owned long with pending_intent must be adopted; got {result['adopted']}"
+        )
+
+    # ----------------------------------------------------------------
+    # startup_reconcile tests
+    # ----------------------------------------------------------------
+
+    def test_startup_reconcile_does_not_adopt_manual_long(self):
+        """Test D (startup): long broker position with no bot DB record is NOT adopted.
+
+        startup_reconcile must not adopt US.AAPL (manual operator position)
+        when has_pending_intent returns False. insert_orphan_position must NOT
+        be called.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.AAPL", "qty": 17, "average_cost": 195.0,
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=194.0)
+        gw._compute_orphan_stop = MagicMock(return_value=192.0)
+        gw.subscribe = AsyncMock()
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = []   # no DB positions
+        mock_store.has_pending_intent.return_value = False  # no pending intent
+        mock_store.get_pending_intent_codes.return_value = []
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_manager = MagicMock()
+
+        async def _run():
+            await gw.startup_reconcile(store=mock_store, manager=mock_manager)
+        asyncio.run(_run())
+
+        # Guard must reject: no bot DB record
+        mock_store.insert_orphan_position.assert_not_called()
+
+    def test_startup_reconcile_adopts_bot_owned_long_with_pending_intent(self):
+        """Test E (startup): crash-recovery — bot-owned long with pending_intent IS adopted.
+
+        startup_reconcile must adopt US.NVDA when has_pending_intent returns
+        True (bot placed order, crashed before position row was written).
+        insert_orphan_position MUST be called.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.NVDA", "qty": 50, "average_cost": 800.0,
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=798.0)
+        gw._compute_orphan_stop = MagicMock(return_value=790.0)
+        gw.subscribe = AsyncMock()
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = []   # crash: no position row yet
+        mock_store.has_pending_intent.return_value = True  # pending_intent written pre-crash
+        mock_store.get_pending_intent_codes.return_value = []
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_manager = MagicMock()
+
+        async def _run():
+            await gw.startup_reconcile(store=mock_store, manager=mock_manager)
+        asyncio.run(_run())
+
+        # Guard must pass: has_pending_intent=True + qty>0
+        mock_store.insert_orphan_position.assert_called_once()
+
+
 def test_set_handler_delegates_to_quote_ctx():
     """set_handler() must call _quote_ctx.set_handler(handler) exactly once (BLOCKER-01).
 

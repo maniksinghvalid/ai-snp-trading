@@ -1389,10 +1389,21 @@ def test_restart_reconciliation():
     )
     store.conn.commit()
 
+    # ---- Seed a PENDING intent for US.GOOG (SAFE-OG-01 crash-recovery) ----
+    # startup_reconcile now enforces bot-ownership: an orphan is only adopted
+    # when has_pending_intent(code) is True. This reflects the real crash-recovery
+    # scenario: the bot wrote the pending_intent BEFORE placing the order, crashed,
+    # and the position row was never persisted. On restart, the intent is still
+    # PENDING → adoption proceeds (D-10).
+    store.insert_pending_intent(
+        "INTENT-GOOG-D10-001", "US.GOOG", 175.0, 168.3, 50,
+        "2026-06-24T09:30:00+00:00",
+    )
+
     # ---- Build broker positions DataFrame ----
     # US.AAPL is ABSENT (broker says flat → D-09 close)
     # US.TSLA has qty=250 (differs from stored 300 → D-09 adopt-qty)
-    # US.GOOG is an orphan (not in StateStore → D-10)
+    # US.GOOG is a bot-owned orphan with PENDING intent (crash-recovery → D-10)
     # US.NVDA is present with qty=200 (same as stored → D-11 never-loosen)
     broker_df = pd.DataFrame([
         {"code": "US.TSLA", "qty": 250, "average_cost": 200.0},

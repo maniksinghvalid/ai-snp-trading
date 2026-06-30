@@ -895,11 +895,30 @@ class MoomooGateway:
 
         # --- Adopt orphan broker positions (CR-03 + WR-04) ---
         state_codes = set(in_memory_codes)
+        # Pre-compute DB open-position codes for the ownership guard (SAFE-OG-01).
+        # Covers the edge case where a position is in the DB but not yet in memory.
+        open_pos_codes = {r["code"] for r in store.get_open_positions()}
         for code, bp in broker_map.items():
             if code in state_codes:
                 continue
             if code in exiting_codes:
                 continue
+
+            # SAFE-OG-01: ownership + long-only guard.
+            # Never adopt a position the bot has no DB record for (manual operator
+            # holdings) or a short/option position the strategy cannot manage.
+            _is_long = bp["qty"] > 0
+            _bot_owned = store.has_pending_intent(code) or code in open_pos_codes
+            if not _is_long or not _bot_owned:
+                _reason = "not_long" if not _is_long else "not_bot_owned"
+                _logger.warning(
+                    "reconcile_external_position_ignored",
+                    code=code,
+                    broker_qty=bp["qty"],
+                    reason=_reason,
+                )
+                continue
+
             _logger.warning("reconcile_orphan_adopting", code=code, broker_qty=bp["qty"])
             lod = await self._derive_lod_for_orphan(code)
             stop = self._compute_orphan_stop(lod)
@@ -1048,6 +1067,23 @@ class MoomooGateway:
         for code, bp in broker_map.items():
             if code in state_codes:
                 continue  # known position, handled above
+
+            # SAFE-OG-01: ownership + long-only guard.
+            # state_codes already excludes every position the bot DB knows about
+            # (Step 3). The only remaining bot-ownership signal is a pending_intent
+            # row: the bot wrote it before placing the order, then crashed before
+            # the position row was persisted (crash-recovery path).
+            _is_long = bp["qty"] > 0
+            _bot_owned = store.has_pending_intent(code)
+            if not _is_long or not _bot_owned:
+                _reason = "not_long" if not _is_long else "not_bot_owned"
+                _logger.warning(
+                    "reconcile_external_position_ignored",
+                    code=code,
+                    broker_qty=bp["qty"],
+                    reason=_reason,
+                )
+                continue
 
             # Orphan: broker has it, StateStore doesn't — adopt and protect (D-10)
             _logger.warning(
