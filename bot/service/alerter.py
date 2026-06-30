@@ -178,17 +178,17 @@ class TelegramAlerter:
 
     def format_daily_summary(
         self,
-        trades_rows: list,
+        trade_stats: dict,
         open_positions: list,
     ) -> str:
         """Build a daily summary alert message (ALERT-03).
 
-        Computes trade count, wins, losses, realized PnL, and open risk from
-        the provided rows (mirroring the `trades` and `positions` table schemas
-        from bot.state.migrations).
+        Accepts pre-aggregated trade statistics (from StateStore.get_daily_trade_stats)
+        rather than raw row lists, ensuring the summary always reflects ALL closed trades
+        for the session regardless of any display-cap in the store read path (DAILY-CAP-01).
 
-        trades_rows: list of dicts — each dict has keys entry_price, exit_price,
-            quantity, r_multiple (NULL-safe via `or 0.0`)
+        trade_stats: dict with keys trade_count (int), wins (int), losses (int),
+            realized_pnl (float) — as returned by StateStore.get_daily_trade_stats().
         open_positions: list of dicts — each dict has keys entry_price,
             initial_stop, trail_stop, remaining_quantity (matching positions
             table schema from StateStore.get_open_positions()). trail_stop
@@ -196,15 +196,10 @@ class TelegramAlerter:
             0 when a trailing stop has advanced past entry (locked profit).
         Returns str — HTML-formatted daily summary message
         """
-        n_trades = len(trades_rows)
-        wins = sum(1 for r in trades_rows if (r.get("r_multiple") or 0.0) > 0)
-        losses = n_trades - wins
-
-        realized_pnl = sum(
-            ((r.get("exit_price") or 0.0) - (r.get("entry_price") or 0.0))
-            * (r.get("quantity") or 0)
-            for r in trades_rows
-        )
+        n_trades = trade_stats.get("trade_count", 0)
+        wins = trade_stats.get("wins", 0)
+        losses = trade_stats.get("losses", n_trades - wins)
+        realized_pnl = trade_stats.get("realized_pnl", 0.0)
 
         def _position_risk(r: dict) -> float:
             entry = r.get("entry_price") or 0.0
@@ -259,15 +254,18 @@ class TelegramAlerter:
 
     async def alert_summary(
         self,
-        trades_rows: list,
+        trade_stats: dict,
         open_positions: list,
     ) -> None:
         """Build and send a daily summary alert (ALERT-03).
 
         Convenience wrapper — callers dispatch via asyncio.create_task for
         truly fire-and-forget delivery.
+
+        trade_stats: dict from StateStore.get_daily_trade_stats() (uncapped aggregates).
+        open_positions: list from StateStore.get_open_positions().
         """
-        text = self.format_daily_summary(trades_rows, open_positions)
+        text = self.format_daily_summary(trade_stats, open_positions)
         await self.send(text)
 
     # ============================================================

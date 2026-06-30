@@ -361,6 +361,49 @@ class StateStore:
             self._conn.row_factory = None
         return [dict(r) for r in rows]
 
+    def get_daily_trade_stats(self, session_date) -> dict:
+        """Return uncapped aggregate trade statistics for a session date (DAILY-CAP-01).
+
+        Uses SQL COUNT/SUM to aggregate ALL closed trades for the date without
+        loading any rows into Python memory and without the LIMIT 20 cap that
+        get_closed_trades applies for display purposes.
+
+        The Daily Summary alert MUST use this method for count/wins/losses/PnL.
+        get_closed_trades is for bounded display lists only (e.g. HTML reports).
+
+        Wins are defined as r_multiple > 0 (NULL r_multiple counts as a loss,
+        consistent with the `(r.get("r_multiple") or 0.0) > 0` guard in
+        format_daily_summary).
+
+        session_date: date or str — the trading session date in YYYY-MM-DD format.
+        Returns dict with keys:
+            trade_count:  int   — total closed trades on session_date
+            wins:         int   — trades where r_multiple > 0
+            losses:       int   — trades where r_multiple <= 0 or NULL
+            realized_pnl: float — sum of (exit_price - entry_price) * quantity;
+                                  0.0 when no trades exist
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT
+                    COUNT(*)                                                  AS trade_count,
+                    COUNT(CASE WHEN r_multiple > 0 THEN 1 END)               AS wins,
+                    COALESCE(SUM((exit_price - entry_price) * quantity), 0.0) AS realized_pnl
+                FROM trades
+                WHERE DATE(closed_at) = ?
+                """,
+                (str(session_date),),
+            ).fetchone()
+        trade_count = row[0] or 0
+        wins = row[1] or 0
+        return {
+            "trade_count": trade_count,
+            "wins": wins,
+            "losses": trade_count - wins,
+            "realized_pnl": row[2] or 0.0,
+        }
+
     def get_open_positions(self) -> list:
         """Return all non-CLOSED position rows as dicts (for startup reconciliation).
 

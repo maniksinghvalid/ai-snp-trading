@@ -150,6 +150,10 @@ async def test_eod_report_job_writes_reports_and_dispatches_summary(tmp_path):
     ]
     mock_positions = []
     bot._store.get_closed_trades.return_value = mock_trades
+    # get_daily_trade_stats provides uncapped aggregates for the summary (DAILY-CAP-01)
+    bot._store.get_daily_trade_stats.return_value = {
+        "trade_count": 1, "wins": 1, "losses": 0, "realized_pnl": 50.0
+    }
     bot._store.get_open_positions.return_value = mock_positions
 
     # Patch write_reports and is_trading_day

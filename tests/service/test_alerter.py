@@ -230,7 +230,10 @@ def test_format_daily_summary_open_risk_uses_correct_stop_columns():
     # Expected: $200.00 + $100.00 = $300.00
     expected_open_risk = 300.00
 
-    text = alerter.format_daily_summary(trades_rows=[], open_positions=open_positions)
+    text = alerter.format_daily_summary(
+        trade_stats={"trade_count": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0},
+        open_positions=open_positions,
+    )
 
     assert f"Open Risk: ${expected_open_risk:.2f}" in text, (
         f"Expected 'Open Risk: ${expected_open_risk:.2f}' (risk-to-stop) but got:\n{text}\n\n"
@@ -268,7 +271,10 @@ def test_format_daily_summary_open_risk_clamped_at_zero_for_locked_profit():
     # Expected: $100.00 (locked-profit position contributes $0, not -$60)
     expected_open_risk = 100.00
 
-    text = alerter.format_daily_summary(trades_rows=[], open_positions=open_positions)
+    text = alerter.format_daily_summary(
+        trade_stats={"trade_count": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0},
+        open_positions=open_positions,
+    )
 
     assert f"Open Risk: ${expected_open_risk:.2f}" in text, (
         f"Expected 'Open Risk: ${expected_open_risk:.2f}' (clamped) but got:\n{text}\n\n"

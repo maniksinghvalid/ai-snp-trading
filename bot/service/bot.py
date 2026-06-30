@@ -688,27 +688,38 @@ class TradingBot:
 
                 Lock is inside each guarded store method (CR-01 / T-06.1-09-01) so
                 the row_factory flip + fetch + reset is always serialized.
+
+                get_closed_trades is used for the HTML display table only (bounded
+                at LIMIT 20 by design — avoids loading all rows for a visual list).
+                get_daily_trade_stats provides uncapped SQL COUNT/SUM aggregates for
+                the summary alert (DAILY-CAP-01).
                 """
-                trades_rows = self._store.get_closed_trades(today)
+                trades_rows = self._store.get_closed_trades(today)   # display list (LIMIT 20)
+                trade_stats = self._store.get_daily_trade_stats(today)  # uncapped aggregates
                 positions_rows = self._store.get_open_positions()
                 html_content = _build_daily_html(trades_rows, positions_rows, today)
                 _write_reports(html_content, today)
-                return trades_rows, positions_rows
+                return trade_stats, trades_rows, positions_rows
 
-            trades_rows, positions_rows = await loop.run_in_executor(
+            trade_stats, trades_rows, positions_rows = await loop.run_in_executor(
                 None, _fetch_build_write
             )
-            _logger.info("eod_report_written", date=str(today), trade_count=len(trades_rows))
+            _logger.info(
+                "eod_report_written",
+                date=str(today),
+                trade_count=trade_stats["trade_count"],
+            )
 
             # Step 5: Dispatch daily summary (ALERT-03, fire-and-forget)
-            summary = self._alerter.format_daily_summary(trades_rows, positions_rows)
+            # trade_stats comes from get_daily_trade_stats (uncapped) — not trades_rows
+            summary = self._alerter.format_daily_summary(trade_stats, positions_rows)
             asyncio.create_task(self._alerter.send(summary))
 
             # Step 6: Audit entry for report generation
             append_audit({
                 "event": "eod_report_generated",
                 "date": str(today),
-                "trade_count": len(trades_rows),
+                "trade_count": trade_stats["trade_count"],
             })
 
             _logger.info("eod_report_done", date=str(today))
