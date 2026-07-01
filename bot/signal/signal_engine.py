@@ -106,6 +106,30 @@ class SignalEngine:
             codes=list(self._premarket_highs.keys()),
         )
 
+    def add_premarket_highs(self, mapping: Dict[str, float]) -> None:
+        """Merge rescan-discovered premarket highs into the session dict (D-01 merge guard).
+
+        Unlike set_premarket_highs (which replaces the entire dict), this method
+        updates _premarket_highs in-place, preserving the 09:30 frozen highs while
+        seeding codes discovered by the intraday rescan.
+
+        Thread-safety: dict.update() is a single C-level call, protected by the GIL
+        — the same assumption as set_premarket_highs (no explicit lock). Call from
+        the event-loop coroutine only (mirrors the set_premarket_highs write path).
+
+        Args:
+            mapping: {code: pre_high_price} for rescan codes with pre_high_price > 0.
+        """
+        if not mapping:
+            return
+        self._premarket_highs.update(mapping)
+        _logger.info(
+            "premarket_highs_merged",
+            added_count=len(mapping),
+            codes=list(mapping.keys()),
+            total_count=len(self._premarket_highs),
+        )
+
     def note_intent_emitted(self) -> None:
         """Increment the session pending tally by exactly 1 (D-09 burst guard).
 
@@ -218,6 +242,98 @@ class SignalEngine:
             valid_count=len(valid),
         )
         self.set_premarket_highs(valid)
+        return valid
+
+    async def fetch_and_merge_premarket_highs(self, codes: List[str]) -> Dict[str, float]:
+        """Fetch premarket highs for rescan codes and MERGE into the session dict.
+
+        Used by _job_intraday_rescan to seed codes discovered after the 09:30 freeze.
+        Unlike fetch_premarket_highs (which calls set_premarket_highs and replaces the
+        dict), this method calls add_premarket_highs to preserve the frozen 09:30 highs.
+
+        Pre-filters codes to only those NOT already in _premarket_highs, avoiding
+        redundant snapshot round-trips and never re-freezing existing highs.
+
+        Fail-closed: on a non-RET_OK snapshot or schema error, returns {} without
+        raising (same as fetch_premarket_highs degraded-gracefully design). The rescan
+        code simply has no premarket high and stays gated by Gate 1 — safe default.
+
+        Thread-safety: called from the event-loop coroutine; dict.update() (via
+        add_premarket_highs) is GIL-protected, same as set_premarket_highs.
+
+        Args:
+            codes: Full rescan watchlist (Moomoo-format). Codes already in
+                   _premarket_highs are skipped; only genuinely new codes are fetched.
+
+        Returns:
+            dict: {code: pre_high_price} for newly-merged codes with valid highs.
+                  Returns {} when codes is empty, all codes already known, or on error.
+        """
+        # Only fetch for codes not already seeded (avoid redundant snapshot round-trips
+        # and preserve the 09:30 frozen highs for codes already present).
+        new_codes = [c for c in codes if c not in self._premarket_highs]
+        if not new_codes:
+            return {}
+
+        ret, data = await self._gateway.get_market_snapshot(new_codes)
+
+        if ret != _RET_OK:
+            _logger.warning(
+                "fetch_and_merge_premarket_highs_snapshot_failed",
+                ret=ret,
+                reason="non-RET_OK response from get_market_snapshot",
+            )
+            return {}
+
+        valid: Dict[str, float] = {}
+
+        if data is None or (hasattr(data, "__len__") and len(data) == 0):
+            return {}
+
+        # WR-05 guard: fail fast on schema mismatch rather than silently zeroing all codes.
+        if hasattr(data, "columns"):
+            for required_col in ("code", "pre_high_price"):
+                if required_col not in data.columns:
+                    _logger.warning(
+                        "fetch_and_merge_premarket_highs_missing_column",
+                        missing_column=required_col,
+                        available_columns=list(data.columns),
+                        reason="snapshot DataFrame missing expected column — rescan codes not merged",
+                    )
+                    return {}
+
+        for _, row in data.iterrows():
+            code = row["code"]
+            raw_price = row["pre_high_price"]
+
+            # D-03: include only when pre_high_price is a real positive number
+            try:
+                price = float(raw_price)
+                if pd.isna(price) or price <= 0.0:
+                    _logger.info(
+                        "premarket_high_excluded",
+                        code=code,
+                        pre_high_price=raw_price,
+                        reason="zero_or_missing",
+                    )
+                    continue
+            except (TypeError, ValueError):
+                _logger.info(
+                    "premarket_high_excluded",
+                    code=code,
+                    pre_high_price=raw_price,
+                    reason="unparseable",
+                )
+                continue
+
+            valid[code] = price
+
+        _logger.info(
+            "premarket_highs_fetched_rescan",
+            total_requested=len(new_codes),
+            valid_count=len(valid),
+        )
+        self.add_premarket_highs(valid)
         return valid
 
     # ============================================================

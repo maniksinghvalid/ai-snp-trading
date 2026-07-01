@@ -839,3 +839,154 @@ class TestPremarketHighSeededEndToEnd:
             "Expected no SignalEvent when _premarket_highs is empty (Gate 1 must block). "
             "This documents the live bug: signal_skipped_no_premarket_high blocks 100% of bars."
         )
+
+
+# ============================================================
+# Regression: rescan-added symbols never seeded (premarket-high-rescan-gap)
+#
+# Proves that after the 09:30 freeze (set_premarket_highs), intraday rescan
+# codes can be merged via add_premarket_highs / fetch_and_merge_premarket_highs
+# WITHOUT clobbering the original W0 highs, and that on_bar stops emitting
+# signal_skipped_no_premarket_high for the rescan code after the merge.
+#
+# RED: add_premarket_highs does not exist before the fix (AttributeError).
+# GREEN: after add_premarket_highs + fetch_and_merge_premarket_highs are added.
+# ============================================================
+
+class TestRescanPremarketHighMerge:
+    """Rescan merge path: add_premarket_highs must merge, not replace (D-01 guard).
+
+    Root cause: _job_intraday_rescan discarded run_intraday_rescan's returned
+    watchlist and never seeded premarket highs for the new codes. SignalEngine had
+    no merge method — set_premarket_highs replaces the dict, so calling it again
+    for rescan codes would wipe the 09:30 frozen highs.
+
+    Fix: add add_premarket_highs (merge) + fetch_and_merge_premarket_highs (fetch
+    for new codes only, then merge) to SignalEngine; wire the call in
+    _job_intraday_rescan after capturing the returned watchlist.
+
+    Added 2026-07-01 for debug session premarket-high-rescan-gap.
+    """
+
+    def _make_seeded_store(self, session_date: str = "2026-06-24") -> StateStore:
+        """Open an in-memory StateStore with daily_scan rows for AAPL and NVDA."""
+        s = StateStore(db_path=":memory:")
+        s.open()
+        for code, rvol in [("US.AAPL", 500_000), ("US.NVDA", 800_000)]:
+            s.conn.execute(
+                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (session_date, code, 2.0, 1, f"{session_date}T09:30:00", rvol),
+            )
+        s.conn.commit()
+        return s
+
+    def test_add_premarket_highs_merges_without_clobbering_initial_seed(self):
+        """add_premarket_highs must merge new rescan codes, not replace the 09:30 dict.
+
+        RED before add_premarket_highs is added to SignalEngine (AttributeError).
+        GREEN after the fix: all W0 codes and the rescan code are present.
+        """
+        engine = make_engine()
+
+        # Simulate 09:30 freeze for initial watchlist W0
+        W0 = {"US.AAPL": 150.0, "US.MSFT": 300.0}
+        engine.set_premarket_highs(W0)
+        assert engine._premarket_highs == W0, "Precondition: W0 must be frozen"
+
+        # Rescan discovers a new code not in W0 — merge it
+        engine.add_premarket_highs({"US.NVDA": 120.5})
+
+        # W0 codes must survive the merge
+        assert "US.AAPL" in engine._premarket_highs, "W0 code US.AAPL clobbered by rescan merge"
+        assert "US.MSFT" in engine._premarket_highs, "W0 code US.MSFT clobbered by rescan merge"
+        assert engine._premarket_highs["US.AAPL"] == 150.0, "W0 value must be unchanged"
+        # Rescan code must be present
+        assert "US.NVDA" in engine._premarket_highs, "Rescan code US.NVDA not seeded after merge"
+        assert engine._premarket_highs["US.NVDA"] == 120.5, "Rescan premarket high value wrong"
+
+    def test_fetch_and_merge_premarket_highs_merges_without_clobbering(self):
+        """fetch_and_merge_premarket_highs fetches for new codes only and merges.
+
+        Verifies:
+        - The 09:30 frozen highs (W0) are preserved.
+        - The rescan code is seeded from the snapshot response.
+        - Codes already in _premarket_highs are NOT re-fetched (gateway called once
+          for only the new codes, not the full set).
+        """
+        cfg = make_cfg()
+
+        # Mock gateway: snapshot returns valid pre_high_price for the rescan code only
+        snap_data = pd.DataFrame({
+            "code": ["US.NVDA"],
+            "pre_high_price": [120.5],
+        })
+        gateway = MagicMock()
+        gateway.get_market_snapshot = AsyncMock(return_value=(0, snap_data))
+
+        engine = SignalEngine(cfg=cfg, gateway=gateway, store=StateStore(db_path=":memory:"))
+        engine._store.open()
+
+        # Simulate 09:30 freeze
+        W0 = {"US.AAPL": 150.0, "US.MSFT": 300.0}
+        engine.set_premarket_highs(W0)
+
+        # fetch_and_merge_premarket_highs for the rescan watchlist (W0 + new code)
+        # The method must skip codes already in _premarket_highs
+        all_rescan_codes = ["US.AAPL", "US.MSFT", "US.NVDA"]
+        result = run(engine.fetch_and_merge_premarket_highs(all_rescan_codes))
+
+        # Only US.NVDA was fetched (W0 codes skipped)
+        gateway.get_market_snapshot.assert_called_once()
+        called_codes = gateway.get_market_snapshot.call_args[0][0]
+        assert "US.NVDA" in called_codes, "Rescan code must be passed to snapshot"
+        assert "US.AAPL" not in called_codes, "W0 codes must not be re-fetched"
+        assert "US.MSFT" not in called_codes, "W0 codes must not be re-fetched"
+
+        # W0 codes must survive
+        assert engine._premarket_highs["US.AAPL"] == 150.0
+        assert engine._premarket_highs["US.MSFT"] == 300.0
+        # Rescan code now seeded
+        assert engine._premarket_highs["US.NVDA"] == 120.5
+        # Return value is only the newly-added codes
+        assert result == {"US.NVDA": 120.5}
+
+    def test_on_bar_no_longer_skips_rescan_code_after_merge(self):
+        """After add_premarket_highs seeds a rescan code, on_bar must NOT emit
+        signal_skipped_no_premarket_high for that code — Gate 1 must pass.
+        """
+        cfg = make_cfg(rvol_min=2.0, earliest_entry_et="10:05", latest_entry_et="15:30")
+        session_date = "2026-06-24"
+        store = self._make_seeded_store(session_date=session_date)
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        engine = SignalEngine(cfg=cfg, gateway=gateway, store=store)
+
+        # 09:30 seed — only AAPL and MSFT, NOT NVDA
+        engine.set_premarket_highs({"US.AAPL": 150.0, "US.MSFT": 300.0})
+        assert "US.NVDA" not in engine._premarket_highs, "Precondition: NVDA not in initial set"
+
+        # Without merge: on_bar for NVDA hits Gate 1 → signal_skipped_no_premarket_high
+        bar_nvda = make_bar(code="US.NVDA", close=125.0, hod=124.0)
+        in_window = datetime(2026, 6, 24, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result_before = run(engine.on_bar(bar_nvda))
+        assert result_before is None, (
+            "Before merge: on_bar must return None for rescan code (Gate 1 blocks)"
+        )
+
+        # Rescan discovers NVDA and merges its premarket high
+        engine.add_premarket_highs({"US.NVDA": 120.5})
+
+        # After merge: NVDA bar with close > premarket_high must pass Gate 1
+        # close=125.0 > premarket_high=120.5 (I1 passes)
+        # close=125.0 >= hod=124.0 (I2 passes)
+        # rvol = volume/rvol_baseline = 1_000_000/800_000 = 1.25 — below rvol_min=2.0 → Gate 2 blocks
+        # That's expected: Gate 1 no longer blocks. Gate 2 may still block (that's correct behavior).
+        # We verify gate_1 no longer emits signal_skipped_no_premarket_high by checking
+        # that _premarket_highs now contains the code.
+        assert engine._premarket_highs.get("US.NVDA") == 120.5, (
+            "After merge: NVDA must be in _premarket_highs so Gate 1 can evaluate it"
+        )

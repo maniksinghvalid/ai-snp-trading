@@ -619,20 +619,32 @@ class TradingBot:
         _logger.info("intraday_rescan_start", date=str(today))
         try:
             loop = asyncio.get_running_loop()
+            rescan_watchlist: list = []
 
             def _intraday_rescan_worker():
                 # Lock is now inside each StateStore method (CR-01 / T-06.1-09-01).
                 # Serialization is intrinsic — no outer with store.lock() needed.
-                self._scanner.run_intraday_rescan(
+                nonlocal rescan_watchlist
+                rescan_watchlist = self._scanner.run_intraday_rescan(
                     self._store,
                     self._gateway,
                     self._cfg,
                     active_codes=set(),
                     scan_date=today,
                     scan_pass="intraday",
-                )
+                ) or []
 
             await loop.run_in_executor(None, _intraday_rescan_worker)
+
+            # Seed premarket highs for rescan-discovered codes (D-01 merge guard).
+            # fetch_and_merge_premarket_highs skips codes already in _premarket_highs
+            # (preserving the 09:30 frozen highs) and merges only genuinely new codes.
+            # This closes the gap where rescan-added symbols were permanently stuck at
+            # Gate 1 (signal_skipped_no_premarket_high) because fetch_premarket_highs
+            # was only called once at 09:30 for the market-open watchlist.
+            if self._signal_engine is not None and rescan_watchlist:
+                await self._signal_engine.fetch_and_merge_premarket_highs(rescan_watchlist)
+
             _logger.info("intraday_rescan_done", date=str(today))
         except asyncio.CancelledError:
             raise
