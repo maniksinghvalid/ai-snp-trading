@@ -339,3 +339,79 @@ class TestSnapshotPriceMethods:
         bid = _run(gw.get_bid_price("US.AAPL"))
 
         assert bid == pytest.approx(182.52)
+
+
+# ============================================================
+# Test: get_order_status — rate-limit retry (RATE-01)
+# ============================================================
+
+class TestGetOrderStatusRateLimit:
+    """Asserts get_order_status retries on rate-limit and raises on non-rate-limit errors."""
+
+    def test_rate_limit_then_success_returns_rows(self):
+        """get_order_status recovers from a rate-limit ret=-1 by retrying and returns rows.
+
+        Mock order_list_query: first call returns (-1, high-frequency message);
+        second call returns (RET_OK, df). Must FAIL before the fix because the
+        current code calls _check_ret immediately and raises GatewayError.
+        """
+        from unittest.mock import patch as _patch
+
+        mock_trade_ctx = MagicMock()
+        df = pd.DataFrame([
+            {
+                "order_id": "O-RATELIMIT",
+                "code": "US.CLOV",
+                "order_status": "FILLED_ALL",
+                "qty": 66,
+                "dealt_qty": 66,
+                "dealt_avg_price": 5.10,
+                "trd_side": "SELL",
+            }
+        ])
+        # First call → rate-limit error; second call → success
+        mock_trade_ctx.order_list_query.side_effect = [
+            (
+                -1,
+                "Get Order list request failed due to high frequency."
+                " Maximum 10 times per 30 seconds.",
+            ),
+            (0, df),
+        ]
+
+        gw = _make_gateway(mock_trade_ctx=mock_trade_ctx)
+
+        # Patch backoff to 0 s so tests remain fast
+        with _patch("bot.gateway.gateway._RATE_LIMIT_BACKOFF_SECONDS", 0.0):
+            rows = _run(gw.get_order_status("O-RATELIMIT"))
+
+        assert isinstance(rows, list), "rows must be a list after retry succeeds"
+        assert len(rows) == 1, "one order row must be returned after successful retry"
+        assert rows[0]["order_id"] == "O-RATELIMIT"
+        assert rows[0]["dealt_qty"] == 66
+        # Verify retry occurred: order_list_query called exactly twice
+        assert mock_trade_ctx.order_list_query.call_count == 2, (
+            "order_list_query must be called twice (rate-limit then success)"
+        )
+
+    def test_non_rate_limit_error_still_raises_gateway_error(self):
+        """A non-rate-limit ret=-1 must still raise GatewayError immediately — no regression.
+
+        This confirms only the rate-limit substring triggers retries; all other
+        SDK errors are propagated unchanged.
+        """
+        mock_trade_ctx = MagicMock()
+        mock_trade_ctx.order_list_query.return_value = (
+            -1,
+            "order_list_query failed: Access denied.",
+        )
+
+        gw = _make_gateway(mock_trade_ctx=mock_trade_ctx)
+
+        with pytest.raises(GatewayError, match="order_list_query"):
+            _run(gw.get_order_status())
+
+        # Only one call — no retry on non-rate-limit errors
+        assert mock_trade_ctx.order_list_query.call_count == 1, (
+            "order_list_query must be called exactly once on a non-rate-limit error"
+        )

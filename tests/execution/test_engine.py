@@ -732,3 +732,84 @@ def test_paper_fill_exit_partial_then_full():
     )
     # No double-count: Round 1 dealt 100, Round 2 dealt 200 → total 300 (not 400 or 600)
     # If double-count occurred, total_filled would be 200 (100+100) or exceed 300.
+
+
+# ============================================================
+# Rate-limit resilience — RATE-01 manage_exit defense-in-depth
+# ============================================================
+
+def test_manage_exit_continues_on_transient_poll_failure():
+    """manage_exit does not abort on a single transient get_order_status GatewayError.
+
+    Simulates a rate-limit-driven GatewayError from the gateway on the first
+    status poll, followed by a successful fill on the second poll. manage_exit
+    must absorb the transient failure, keep the order live, and detect the fill
+    on the next cadence tick rather than propagating the exception and orphaning
+    the exit order.
+
+    Must FAIL before the fix (GatewayError from get_order_status propagates out
+    of the manage_exit poll loop and is caught by manager._place_exit_order which
+    returns 0 — abandoning the exit).
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError as GwError
+
+    # Long TTL so two poll cadence ticks easily fit within deadline
+    cfg = _MockCfg(exit_ttl_seconds=0.5, exit_escalation_cadence_seconds=0.01)
+
+    gw = MagicMock()
+    gw.get_bid_price = AsyncMock(return_value=149.90)
+    gw.place_order = AsyncMock(return_value="EXIT-RL-001")
+    gw.cancel_order = AsyncMock()
+
+    call_count = {"n": 0}
+
+    async def mock_status(order_id=""):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First call: rate-limit GatewayError (transient)
+            raise GwError(
+                "order_list_query failed: ret=-1, data=Get Order list request failed "
+                "due to high frequency. Maximum 10 times per 30 seconds."
+            )
+        # Second call onward: return a fill
+        return [
+            {
+                "order_id": "EXIT-RL-001",
+                "code": "US.CLOV",
+                "order_status": "FILLED_ALL",
+                "qty": 66,
+                "dealt_qty": 66,
+                "dealt_avg_price": 149.85,
+                "trd_side": "SELL",
+            }
+        ]
+
+    gw.get_order_status = mock_status
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    try:
+        from moomoo import TrdSide
+        sell_side = TrdSide.SELL
+    except ImportError:
+        sell_side = "SELL"
+
+    # Must NOT raise GatewayError — transient poll failure must be absorbed
+    total_filled = _run(engine.manage_exit(
+        code="US.CLOV",
+        qty=66,
+        side=sell_side,
+        escalation_step=0.10,
+        escalation_cadence=0.01,
+        ttl=0.5,
+    ))
+
+    assert total_filled == 66, (
+        f"manage_exit must detect fill after transient poll GatewayError; "
+        f"got total_filled={total_filled}"
+    )
+    assert call_count["n"] >= 2, (
+        "get_order_status must be called at least twice (first raises, second fills)"
+    )

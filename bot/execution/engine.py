@@ -423,7 +423,22 @@ class ExecutionEngine:
                 # ONE row per order with cumulative dealt_qty. We break on first non-zero
                 # read so order_filled_this_round = dealt_qty is the total fill for this
                 # order_id in this round (no cross-round double-count — EXEC-05 / CR-02).
-                order_rows = await self._gw.get_order_status(order_id)
+                #
+                # Defense-in-depth (RATE-01): absorb any transient status-query failure
+                # (e.g. a residual rate-limit burst that get_order_status's own retry
+                # could not clear in time). The exit order is still live at the broker;
+                # we continue polling on the next cadence tick rather than propagating
+                # out of manage_exit, which would orphan the placed order.
+                try:
+                    order_rows = await self._gw.get_order_status(order_id)
+                except Exception as _poll_exc:
+                    _logger.warning(
+                        "exit_poll_status_failed",
+                        code=code,
+                        order_id=order_id,
+                        error=str(_poll_exc),
+                    )
+                    continue  # order stays live; retry on next cadence tick
                 matched = [
                     r for r in order_rows
                     if str(r.get("order_id", "")) == str(order_id)

@@ -67,6 +67,24 @@ _IMPLAUSIBLE_HIGH: float = 10_000_000.0  # > 100× $100k starting equity → sus
 
 
 # ============================================================
+# Rate-limit retry constants for order_list_query (RATE-01)
+# ============================================================
+# Moomoo caps order_list_query at 10 calls per 30 seconds.  When the cap is
+# exceeded the SDK returns ret=-1 with a message containing one or both of
+# these substrings.  Detection is by substring, NOT by ret value alone, because
+# ret=-1 is a generic failure code shared by many unrelated SDK errors.
+#
+# _RATE_LIMIT_BACKOFF_SECONDS is defined as a module-level name so tests can
+# patch it to 0.0 without actually sleeping.
+_RATE_LIMIT_MARKERS: tuple = (
+    "Maximum 10 times per 30 seconds",
+    "high frequency",
+)
+_RATE_LIMIT_MAX_RETRIES: int = 3           # total retry attempts after first failure
+_RATE_LIMIT_BACKOFF_SECONDS: float = 3.0  # asyncio.sleep between retries
+
+
+# ============================================================
 # Configuration
 # ============================================================
 
@@ -691,6 +709,15 @@ class MoomooGateway:
         Returns list of dicts with dealt_qty and dealt_avg_price for partial-fill
         detection (EXEC-05).
 
+        Rate-limit resilience (RATE-01): Moomoo caps order_list_query at 10
+        calls per 30 seconds.  When the cap is exceeded (ret=-1 with a message
+        containing "high frequency" / "Maximum 10 times per 30 seconds") this
+        method retries up to _RATE_LIMIT_MAX_RETRIES times with a backoff sleep
+        of _RATE_LIMIT_BACKOFF_SECONDS between each attempt.  Only the rate-limit
+        condition triggers retries; all other non-RET_OK codes still raise
+        GatewayError immediately (or after exhausting retries for the rate-limit
+        case).
+
         Parameters:
             order_id: Filter to a specific order; empty string = all orders.
 
@@ -699,19 +726,39 @@ class MoomooGateway:
             dealt_qty, dealt_avg_price, trd_side.
 
         Raises:
-            GatewayError — if SDK returns non-RET_OK.
+            GatewayError — if SDK returns non-RET_OK for a non-rate-limit reason,
+                           or if the rate-limit condition persists after all retries.
         """
         loop = asyncio.get_running_loop()
-        ret, data = await loop.run_in_executor(
-            None,
-            lambda: self._trade_ctx.order_list_query(
-                order_id=order_id,
-                trd_env=_parse_trd_env(self.cfg.trd_env),
-                acc_id=self.cfg.acc_id,
-                refresh_cache=True,             # MANDATORY for SIMULATE (Pitfall B)
-            ),
-        )
-        _check_ret(ret, data, "order_list_query")
+        ret, data = None, None
+        for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+            ret, data = await loop.run_in_executor(
+                None,
+                lambda: self._trade_ctx.order_list_query(
+                    order_id=order_id,
+                    trd_env=_parse_trd_env(self.cfg.trd_env),
+                    acc_id=self.cfg.acc_id,
+                    refresh_cache=True,         # MANDATORY for SIMULATE (Pitfall B)
+                ),
+            )
+            if ret == RET_OK:
+                break
+            # Detect rate-limit condition by substring on the data message.
+            # ret=-1 is generic; we ONLY retry on the documented rate-limit text.
+            data_str = str(data) if data is not None else ""
+            is_rate_limit = any(marker in data_str for marker in _RATE_LIMIT_MARKERS)
+            if is_rate_limit and attempt < _RATE_LIMIT_MAX_RETRIES:
+                _logger.warning(
+                    "order_list_query_rate_limit",
+                    attempt=attempt + 1,
+                    max_retries=_RATE_LIMIT_MAX_RETRIES,
+                    backoff_seconds=_RATE_LIMIT_BACKOFF_SECONDS,
+                    data=data_str,
+                )
+                await asyncio.sleep(_RATE_LIMIT_BACKOFF_SECONDS)
+                continue
+            # Non-rate-limit error, or rate-limit persists after max retries → raise.
+            _check_ret(ret, data, "order_list_query")
         if data is None or len(data) == 0:
             return []
         return [
