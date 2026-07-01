@@ -12,6 +12,7 @@ Exports: download_daily_bars, download_intraday_1m, get_ticker_frame,
          resolve_today_price, TodayPrice, ScanDegradationError
 """
 import datetime
+import time
 from dataclasses import dataclass
 from typing import Optional, Set, Tuple
 
@@ -60,6 +61,72 @@ class ScanDegradationError(Exception):
     Signals that the data quality is insufficient for a reliable scan;
     caller should abort the scan session rather than publish a thin universe.
     """
+
+
+# ============================================================
+# Retry configuration (module-level so tests can monkeypatch)
+# ============================================================
+
+# Number of retry attempts for the FAILED SUBSET after the initial download.
+# Each attempt downloads only the previously-failed symbols (not the full
+# universe) so recovery from yfinance rate-limiting is cheap.
+_RETRY_MAX_ATTEMPTS: int = 2
+
+# Seconds to sleep before each retry attempt.  A short pause lets yfinance
+# server-side rate-limit windows expire; the smaller batch size of the retry
+# call is the primary recovery mechanism.  Monkeypatch to 0.0 in tests.
+_RETRY_BACKOFF_S: float = 3.0
+
+# Thread count used for retry downloads.  Fewer threads reduce the chance of
+# triggering server-side rate limiting again on the second attempt.
+_RETRY_THREADS: int = 2
+
+
+# ============================================================
+# Internal helpers
+# ============================================================
+
+def _to_data_dict(raw: object, yf_symbols: list) -> dict:
+    """Normalise a yf.download result to a plain {symbol: sub_frame} dict.
+
+    yf.download with group_by="ticker" returns:
+      - A MultiIndex-column DataFrame in production (multiple tickers).
+      - A flat-column DataFrame in production for a single-ticker call.
+      - A plain dict in unit-test mocks.
+
+    Converting to a uniform dict lets the retry splice always use plain
+    dict assignment (``data[sym] = frame``) regardless of yfinance version
+    or how many tickers were requested.
+
+    raw:        the raw yf.download return value.
+    yf_symbols: the list of symbols that were requested (used to iterate
+                over a MultiIndex DataFrame by ticker key).
+    Returns a {symbol: sub_frame} dict; symbols absent from raw are omitted.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)  # copy so retry merges don't mutate mock return values
+
+    if not isinstance(raw, pd.DataFrame):
+        return {}
+
+    # MultiIndex columns: standard multi-ticker yf.download result.
+    if isinstance(raw.columns, pd.MultiIndex):
+        result = {}
+        for sym in yf_symbols:
+            try:
+                frame = raw[sym]
+                if isinstance(frame, pd.DataFrame):
+                    result[sym] = frame
+            except (KeyError, TypeError):
+                pass
+        return result
+
+    # Flat columns: single-ticker yf.download result (yfinance behaviour when
+    # len(tickers) == 1, even with group_by="ticker" on older versions).
+    if len(yf_symbols) == 1:
+        return {yf_symbols[0]: raw}
+
+    return {}
 
 
 # ============================================================
@@ -118,7 +185,7 @@ def _download_batch(
     # Pitfall #2: clear shared module-level state before download
     shared._ERRORS.clear()
 
-    data = yf.download(
+    raw = yf.download(
         tickers=yf_symbols,
         group_by="ticker",
         auto_adjust=True,
@@ -127,7 +194,63 @@ def _download_batch(
         **download_kwargs,
     )
 
+    # Normalise to a plain {symbol: sub_frame} dict so retry merges are
+    # uniform regardless of whether yf.download returns a MultiIndex
+    # DataFrame (production) or a dict (test mocks / single-ticker calls).
+    data = _to_data_dict(raw, yf_symbols)
+
     failed = _detect_failed(data, yf_symbols)
+
+    # ---- Retry the failed SUBSET only (bounded, backoff) ----------------
+    # Only re-download the symbols that failed, not the full universe.
+    # This is cheaper and more likely to succeed under rate-limiting because
+    # the smaller batch uses fewer threads and is processed faster by yfinance.
+    # Recovered per-ticker frames are spliced back into `data` so
+    # get_ticker_frame(data, sym) remains the single access point for callers.
+    # failure_rate / ScanDegradationError are evaluated AFTER all retries so
+    # transient failures are not penalised at the degradation gate (D-06).
+    retry_threads = max(1, min(_RETRY_THREADS, threads))  # Pitfall #1: integer
+    for attempt in range(_RETRY_MAX_ATTEMPTS):
+        if not failed:
+            break  # everything already good — skip remaining retry budget
+
+        _logger.warning(
+            "fetch_retry_attempt",
+            attempt=attempt + 1,
+            max_attempts=_RETRY_MAX_ATTEMPTS,
+            retry_count=len(failed),
+            symbols=sorted(failed),
+        )
+        time.sleep(_RETRY_BACKOFF_S)
+
+        # Pitfall #2: clear before EACH retry so a prior-attempt's errors
+        # (from shared._ERRORS) don't leak into the failure detection of
+        # this attempt.
+        shared._ERRORS.clear()
+
+        retry_syms = sorted(failed)
+        retry_raw = yf.download(
+            tickers=retry_syms,
+            group_by="ticker",
+            auto_adjust=True,
+            threads=retry_threads,  # Pitfall #1: integer, fewer than original
+            progress=False,
+            **download_kwargs,
+        )
+        retry_data = _to_data_dict(retry_raw, retry_syms)
+
+        # Splice recovered tickers back into data.  Only update entries that
+        # the retry actually returned so we never clobber good existing data
+        # with a missing-key from retry_data.
+        for sym in retry_syms:
+            if sym in retry_data:
+                data[sym] = retry_data[sym]
+
+        # Recompute failed using the post-merge state of data plus any
+        # shared._ERRORS the retry's yf.download may have populated.
+        failed = _detect_failed(data, yf_symbols)
+
+    # ---- Evaluate degradation gate on POST-RETRY numbers (D-06 / D-07) --
     failure_rate = len(failed) / len(yf_symbols) if yf_symbols else 0.0
 
     if failure_rate >= degradation_threshold:

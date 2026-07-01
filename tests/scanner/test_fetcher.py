@@ -722,3 +722,206 @@ class TestDownloadIntraday1m:
         assert data == {}
         assert failed == set()
         mock_dl.assert_not_called()
+
+
+# ============================================================
+# Retry-on-partial-failure: _download_batch retries failed subset
+# ============================================================
+
+class TestDownloadBatchRetry:
+    """Bounded retry of the failed subset: recovered tickers are spliced into
+    data and excluded from failed_set; ScanDegradationError is only raised on
+    POST-retry failure rates.
+
+    Before the fix: _download_batch makes exactly ONE yf.download call.  Any
+    ticker whose frame is missing or all-NaN is permanently in failed_set for
+    that scan.  If the initial failure rate is >= degradation_threshold the
+    function raises ScanDegradationError even for transient yfinance
+    rate-limit errors that a single retry would have resolved.
+
+    After the fix: up to _RETRY_MAX_ATTEMPTS retries of just the failed subset
+    are made (with backoff); recovered tickers are spliced back into data;
+    failure_rate and ScanDegradationError are evaluated ONLY on the post-retry
+    final failed set.
+    """
+
+    def test_failed_subset_retried_and_recovered_does_not_raise(self, monkeypatch):
+        """Core retry contract (TDD RED): a ticker that fails on attempt 1 but
+        returns valid data on attempt 2 must appear in data, be absent from
+        failed_set, and must NOT trigger ScanDegradationError even though the
+        initial failure rate was >= degradation_threshold.
+
+        Setup:
+          10 symbols, degradation_threshold=0.10 (default).
+          Attempt 1: NDSN returns all-NaN -> 1/10 = 10% -> AT threshold ->
+                     ScanDegradationError raised without retry.
+          Retry (attempt 2): yf.download called with ["NDSN"] only -> returns
+                     valid data -> failure_rate drops to 0% -> no raise.
+
+        This test MUST FAIL before the fix: without retry, the 10% initial
+        failure rate raises ScanDegradationError instead of returning (data, set()).
+        """
+        import yfinance.shared as yf_shared
+
+        all_syms = [
+            "AAPL", "MSFT", "GOOG", "NFLX", "NVDA",
+            "AMZN", "META", "TSLA", "BRKB", "NDSN",
+        ]
+        ok_syms = all_syms[:-1]  # everyone except NDSN
+
+        # Attempt-1 result: NDSN present but all-NaN (yfinance 1.4.1 failure shape)
+        attempt1_data = {
+            **{sym: _make_ticker_df(sym) for sym in ok_syms},
+            "NDSN": _make_nan_ticker_df(),
+        }
+        # Retry result: called with ["NDSN"] only; returns valid data for NDSN
+        retry_data = {"NDSN": _make_ticker_df("NDSN")}
+
+        download_call_tickers: list = []
+
+        def fake_yf_download(**kwargs):
+            tickers = kwargs.get("tickers", [])
+            if isinstance(tickers, str):
+                tickers = [tickers]
+            download_call_tickers.append(list(tickers))
+            if len(download_call_tickers) == 1:
+                return attempt1_data
+            return retry_data
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()
+            # Zero out the backoff so the test runs instantly.
+            # raising=False: before the fix _RETRY_BACKOFF_S doesn't exist yet;
+            # the no-op lets the test fail for the CORRECT reason (ScanDegradationError)
+            # rather than AttributeError. After the fix it patches to 0.0 correctly.
+            monkeypatch.setattr("bot.scanner.fetcher._RETRY_BACKOFF_S", 0.0, raising=False)
+            with patch("yfinance.download", side_effect=fake_yf_download), \
+                 patch("bot.scanner.fetcher.append_audit"):
+                from bot.scanner.fetcher import (
+                    download_daily_bars,
+                    ScanDegradationError,
+                    get_ticker_frame,
+                )
+                # Must NOT raise: NDSN recovers on retry -> 0% final failure rate
+                data, failed = download_daily_bars(all_syms)
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+        # 1. Recovered ticker must be absent from failed_set
+        assert "NDSN" not in failed, (
+            "NDSN was recovered on retry and must not remain in failed_set"
+        )
+        assert failed == set(), (
+            "All failures must be resolved by retry; failed_set must be empty"
+        )
+
+        # 2. Recovered ticker must be accessible via get_ticker_frame (splice correctness)
+        ndsn_frame = get_ticker_frame(data, "NDSN")
+        assert ndsn_frame is not None, (
+            "get_ticker_frame must return valid data for NDSN after retry splice; "
+            "got None — merged frame is missing or still all-NaN"
+        )
+
+        # 3. Retry must have been for the failed subset only (not the full universe)
+        assert len(download_call_tickers) >= 2, (
+            f"Expected at least 2 yf.download calls (initial + retry), "
+            f"got {len(download_call_tickers)}"
+        )
+        assert download_call_tickers[1] == ["NDSN"], (
+            f"Second yf.download call must be for the failed subset only, "
+            f"got {download_call_tickers[1]!r} instead of ['NDSN']"
+        )
+
+    def test_post_retry_failure_rate_evaluated_not_initial(self, monkeypatch):
+        """ScanDegradationError must be evaluated against POST-RETRY failures.
+
+        20 symbols, degradation_threshold=0.10.
+        Attempt 1: 3 symbols fail (SYM00-SYM02) -> 3/20 = 15% > threshold.
+        Retry: all 3 recover -> 0/20 = 0% -> no ScanDegradationError.
+
+        Without retry: raises immediately at 15%.
+        With retry:  recovers -> returns (data, set()).
+        """
+        import yfinance.shared as yf_shared
+
+        total = 20
+        all_syms = [f"SYM{i:02d}" for i in range(total)]
+        fail_set = {"SYM00", "SYM01", "SYM02"}
+        ok_syms = [s for s in all_syms if s not in fail_set]
+
+        attempt1_data = {
+            **{sym: _make_ticker_df(sym) for sym in ok_syms},
+            **{sym: _make_nan_ticker_df() for sym in fail_set},
+        }
+        retry_data = {sym: _make_ticker_df(sym) for sym in fail_set}
+
+        call_count = [0]
+
+        def fake_download(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return attempt1_data
+            return retry_data
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()
+            monkeypatch.setattr("bot.scanner.fetcher._RETRY_BACKOFF_S", 0.0, raising=False)
+            with patch("yfinance.download", side_effect=fake_download), \
+                 patch("bot.scanner.fetcher.append_audit"):
+                from bot.scanner.fetcher import download_daily_bars, ScanDegradationError
+                # Must NOT raise: 3/20 initial failure rate resolves to 0% after retry
+                data, failed = download_daily_bars(all_syms)
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+        assert failed == set(), (
+            "All 3 failures must be recovered on retry; failed_set must be empty"
+        )
+        # Exactly 2 calls: initial (20 symbols) + one retry (3 symbols)
+        assert call_count[0] == 2, (
+            f"Expected exactly 2 yf.download calls, got {call_count[0]}"
+        )
+
+    def test_still_failed_after_retries_raises_degradation(self, monkeypatch):
+        """If failures persist through ALL retry attempts, ScanDegradationError
+        is still raised (with the POST-retry count).
+
+        10 symbols, 1 fails on every attempt (never recovers) -> 10% -> raise.
+        Verifies the degradation gate is preserved even with retry logic.
+        """
+        import yfinance.shared as yf_shared
+
+        all_syms = ["AAPL", "MSFT", "GOOG", "NFLX", "NVDA",
+                    "AMZN", "META", "TSLA", "BRKB", "NDSN"]
+        ok_syms = all_syms[:-1]
+
+        # Every call returns the same all-NaN for NDSN; it never recovers
+        persistent_fail_data = {
+            **{sym: _make_ticker_df(sym) for sym in ok_syms},
+            "NDSN": _make_nan_ticker_df(),
+        }
+
+        original_errors = dict(yf_shared._ERRORS)
+        try:
+            yf_shared._ERRORS.clear()
+            monkeypatch.setattr("bot.scanner.fetcher._RETRY_BACKOFF_S", 0.0, raising=False)
+            with patch("yfinance.download", return_value=persistent_fail_data), \
+                 patch("bot.scanner.fetcher.append_audit") as mock_audit:
+                from bot.scanner.fetcher import download_daily_bars, ScanDegradationError
+                with pytest.raises(ScanDegradationError) as exc_info:
+                    download_daily_bars(all_syms)
+                # D-07 audit must still be emitted with final (post-retry) numbers
+                mock_audit.assert_called_once()
+                audit_payload = mock_audit.call_args[0][0]
+                assert audit_payload["event"] == "scan_aborted_data_degradation"
+                assert audit_payload["failed_count"] == 1
+                assert audit_payload["total"] == 10
+        finally:
+            yf_shared._ERRORS.clear()
+            yf_shared._ERRORS.update(original_errors)
+
+        assert "1/10 symbols failed" in str(exc_info.value)
