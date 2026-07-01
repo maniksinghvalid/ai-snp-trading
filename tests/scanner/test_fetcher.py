@@ -12,6 +12,19 @@ import pandas as pd
 from unittest.mock import patch, MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _zero_retry_backoff(monkeypatch):
+    """Zero the yfinance retry backoff for every test in this module.
+
+    _download_batch sleeps _RETRY_BACKOFF_S (default 3s) between each of its
+    _RETRY_MAX_ATTEMPTS retries, so failure-path tests (which trigger the retry)
+    otherwise add ~6s each. No test depends on the real backoff DURATION — only
+    the retry count/behaviour matters — so collapsing it to 0 keeps the suite
+    fast without changing any assertion.
+    """
+    monkeypatch.setattr("bot.scanner.fetcher._RETRY_BACKOFF_S", 0.0, raising=False)
+
+
 def _make_ticker_df(symbol: str) -> pd.DataFrame:
     """Return a minimal OHLCV DataFrame for a ticker (capitalized columns)."""
     return pd.DataFrame({
