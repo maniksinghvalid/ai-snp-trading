@@ -79,8 +79,14 @@ def _make_cfg(
     max_position_size_pct: int = 10,
     max_concurrent_positions: int = 5,
     max_trades_per_day: int = 5,
+    sizing_equity_usd=None,  # None → live-equity path (existing tests unchanged)
 ) -> StrategyConfig:
-    """Return a StrategyConfig with test-friendly risk parameters."""
+    """Return a StrategyConfig with test-friendly risk parameters.
+
+    sizing_equity_usd defaults to None so existing tests keep exercising the
+    live-equity path (gateway.get_equity() called on each sizing decision).
+    Pass a float to use the fixed-basis path (260702-ick RISK-01).
+    """
     return StrategyConfig(
         min_price_usd=10.0,
         d3_min_gap_pct=1.0,
@@ -97,6 +103,7 @@ def _make_cfg(
         max_position_size_pct=max_position_size_pct,
         max_concurrent_positions=max_concurrent_positions,
         max_trades_per_day=max_trades_per_day,
+        sizing_equity_usd=sizing_equity_usd,
         **_EXECUTION_DEFAULTS, **_SERVICE_DEFAULTS,
     )
 

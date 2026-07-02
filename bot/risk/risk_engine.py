@@ -118,8 +118,13 @@ class RiskEngine:
             )
             return None
 
-        # RISK-01: live equity on every sizing decision (D-05 — never cached)
-        equity = await self._gateway.get_equity()
+        # RISK-01: sizing basis selection (260702-ick RISK-01).
+        # Use cfg.sizing_equity_usd when set (fixed basis for shared SIMULATE account).
+        # Fall back to live gateway.get_equity() when None (original live-equity path).
+        if self._cfg.sizing_equity_usd is not None:
+            equity = float(self._cfg.sizing_equity_usd)
+        else:
+            equity = await self._gateway.get_equity()
 
         # RISK-01: 1%-risk sizing
         risk_dollars = equity * self._cfg.max_risk_per_trade_pct / 100.0
