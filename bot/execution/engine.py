@@ -449,24 +449,46 @@ class ExecutionEngine:
                         break
 
             if order_filled_this_round > 0:
-                total_filled += order_filled_this_round
-                remaining -= order_filled_this_round
-                append_audit({
-                    "event": "exit_fill_detected",
-                    "code": code,
-                    "order_id": order_id,
-                    "filled_this_round": order_filled_this_round,
-                    "remaining": remaining,
-                })
-                _logger.info("exit_fill_detected", code=code, order_id=order_id,
-                             filled=order_filled_this_round, remaining=remaining)
-                if remaining <= 0:
-                    break
-                # Cancel any remainder before re-placing
+                # Cancel any unfilled remainder before computing the definitive fill.
+                # For a fully-filled order this is a no-op; for a partial fill it
+                # prevents the remainder from executing while we re-query.
                 try:
                     await self._gw.cancel_order(order_id)
                 except Exception:
                     pass
+
+                # Fix 1.4: re-query dealt_qty AFTER cancel to get the definitive
+                # cumulative fill for this order_id. A partial fill arriving during
+                # the cancel window is captured here; using only the pre-cancel
+                # snapshot would over-size the replacement order (over-sell into short).
+                # (T-06.2-03: tamper-prevention on cancel-replace qty)
+                try:
+                    post_cancel_rows = await self._gw.get_order_status(order_id)
+                    post_matched = [
+                        r for r in post_cancel_rows
+                        if str(r.get("order_id", "")) == str(order_id)
+                    ]
+                    if post_matched:
+                        post_cancel_filled = int(post_matched[0].get("dealt_qty", 0) or 0)
+                    else:
+                        post_cancel_filled = order_filled_this_round  # safe fallback
+                except Exception:
+                    post_cancel_filled = order_filled_this_round  # safe fallback
+
+                total_filled += post_cancel_filled
+                remaining = qty - total_filled
+
+                append_audit({
+                    "event": "exit_fill_detected",
+                    "code": code,
+                    "order_id": order_id,
+                    "filled_this_round": post_cancel_filled,
+                    "remaining": remaining,
+                })
+                _logger.info("exit_fill_detected", code=code, order_id=order_id,
+                             filled=post_cancel_filled, remaining=remaining)
+                if remaining <= 0:
+                    break
                 # Price next round at current bid - buffer - escalation
                 bid_price = await self._gw.get_bid_price(code)
                 limit_price = round(
