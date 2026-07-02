@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 status: planning
 stopped_at: Phase 4 context gathered
-last_updated: "2026-06-24T19:02:11.887Z"
-last_activity: 2026-06-24 -- Phase 03 verified and marked complete
+last_updated: "2026-07-02T17:02:55.039Z"
+last_activity: 2026-07-02 -- Phase 06.2 inserted (code review remediation, 16 findings)
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 3
   total_plans: 11
   completed_plans: 11
-  percent: 50
+  percent: 43
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 ## Current Position
 
-Phase: 4 (order-and-position-management) — READY TO PLAN
+Phase: 06.2 (code-review-remediation) — READY TO PLAN
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-06-24 -- Phase 03 verified and marked complete
+Last activity: 2026-07-02 -- Phase 06.2 inserted (code review remediation, 16 findings)
 
 Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
 
@@ -61,6 +61,10 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 03-intraday-signal-and-risk-engine P03 | 310 | 2 tasks | 4 files |
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 06.2 inserted after Phase 6 (2026-07-02): Code review remediation — fix 16 confirmed findings from 2026-07-02 review (3 tiers: blockers, correctness, hygiene) (URGENT)
 
 ### Decisions
 
