@@ -756,6 +756,8 @@ def _make_mock_gateway():
     """Return an async-capable mock gateway for subscribe tests."""
     gw = MagicMock()
     gw.subscribe = AsyncMock()
+    # get_external_codes returns empty set → no exclusions (safe default for non-exclusion tests)
+    gw.get_external_codes = AsyncMock(return_value=set())
     return gw
 
 
