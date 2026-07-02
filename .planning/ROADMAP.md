@@ -222,4 +222,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 06.2 to break down — Tier 1 blockers, Tier 2 correctness, Tier 3 hygiene)
+- [ ] 06.2-01-PLAN.md — Tier 1 live-run blockers (findings 1.1–1.5): wire FillEvent→PositionManager, reconcile guard, bar-handler re-register, post-cancel dealt_qty, calendar-aware force-close; full suite + live premarket UAT gate [Wave 1]
+- [ ] 06.2-02-PLAN.md — Tier 2 correctness (findings 2.1–2.8): bot-owned gate count, rescan active-codes, trades writer, bid/ask raise, orphan dedup, scanner staleness, exit-proxy R, config-driven orphan stop [Wave 2]
+- [ ] 06.2-03-PLAN.md — Tier 3 hygiene (findings 3.1–3.2): shared reconcile core (after 1.2), trading-day-keyed daily-bar cache [Wave 3]
