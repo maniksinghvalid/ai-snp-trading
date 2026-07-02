@@ -453,6 +453,62 @@ def test_duplicate_guard():
 
 
 # ============================================================
+# test_exec04_blocks_entry_for_manual_holding — EXEC-04 regression (260702-ick Task 1)
+# ============================================================
+
+def test_exec04_blocks_entry_for_manual_holding():
+    """EXEC-04 regression: entry backstop blocks entry on manually held code.
+
+    Documents the entry-time backstop that layers with the scan-time exclusion
+    introduced in 260702-ick (spec Testing section). The EXEC-04 duplicate guard
+    in consume_intent fires when get_positions reports the intent's code is already
+    held at the broker — regardless of whether the bot owns it via DB record.
+
+    This is a regression test: it documents existing behavior in ExecutionEngine
+    with NO change to bot/execution/engine.py. The scan-time exclusion (Task 2)
+    is the primary defence; EXEC-04 is the entry-time backstop.
+    """
+    from bot.execution.engine import ExecutionEngine
+    import pandas as pd
+
+    cfg = _MockCfg()
+    intent = _MockIntent(code="US.AAPL")
+
+    # Broker reports the code as held (manual holding — not bot-owned)
+    positions_df = pd.DataFrame([{
+        "code": "US.AAPL",
+        "qty": 100,
+        "average_cost": 182.0,
+        "position_side": "LONG",
+    }])
+
+    gw = MagicMock()
+    gw.get_positions = AsyncMock(return_value=(0, positions_df))
+    gw.get_order_status = AsyncMock(return_value=[])
+    gw.place_order = AsyncMock(return_value="ORDER-SHOULD-NOT-PLACE")
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.cancel_order = AsyncMock()
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    result = _run(engine.consume_intent(intent))
+
+    # consume_intent must return None — the EXEC-04 duplicate guard fired
+    assert result is None, (
+        "EXEC-04: consume_intent must return None when broker reports the code "
+        "as already held (manual holding blocks entry)"
+    )
+    # place_order must never be called — the guard blocked before order placement
+    gw.place_order.assert_not_awaited(), (
+        "EXEC-04: place_order must NOT be called when the duplicate guard fires "
+        "on a manually held position"
+    )
+    # get_positions must have been called (broker-verified check)
+    gw.get_positions.assert_awaited()
+
+
+# ============================================================
 # test_fill_by_order_id — EXEC-05
 # ============================================================
 
