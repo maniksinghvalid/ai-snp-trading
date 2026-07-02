@@ -24,6 +24,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.position.state import PositionPhase, PositionState
 
+from bot.position.manager import get_force_close_time_et
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
@@ -384,14 +385,17 @@ class TradingBot:
             misfire_grace_time=self._cfg.misfire_grace_rescan_s,
         )
 
-        # ---- force_close (CronTrigger at cfg.force_close_et) ----
-        fc_h, fc_m = self._parse_hhmm(self._cfg.force_close_et)
+        # ---- force_close (DateTrigger — rescheduled daily by _job_premarket_scan) ----
+        # Fix 1.5: Use a DateTrigger rather than a static CronTrigger so the
+        # force-close fires at the CALENDAR-AWARE close time (half-day aware) each
+        # trading day. _job_premarket_scan reschedules this job every morning after
+        # the scan completes using get_force_close_time_et(today). The initial
+        # placeholder is set far in the future so it never fires unless explicitly
+        # rescheduled for the current day. (T-06.2-05)
         self._scheduler.add_job(
             self._job_force_close,
-            CronTrigger(
-                hour=fc_h,
-                minute=fc_m,
-                timezone=ZoneInfo("America/New_York"),
+            DateTrigger(
+                run_date=_datetime.datetime(2099, 1, 1, tzinfo=ZoneInfo("America/New_York")),
             ),
             id="force_close",
             coalesce=True,
@@ -488,6 +492,31 @@ class TradingBot:
 
             await loop.run_in_executor(None, _premarket_scan_worker)
             _logger.info("premarket_scan_done", date=str(today))
+
+            # Fix 1.5: reschedule the force_close job with the calendar-aware
+            # close time for today. get_force_close_time_et returns the correct
+            # time for half-days (e.g. 12:51 ET on early-close days), avoiding
+            # the stale 15:51 CronTrigger that previously left positions open
+            # ~3 hours past early-close. (T-06.2-05)
+            try:
+                close_time = get_force_close_time_et(today)
+                run_at = _datetime.datetime.combine(
+                    today,
+                    close_time,
+                    tzinfo=ZoneInfo("America/New_York"),
+                )
+                self._scheduler.reschedule_job(
+                    "force_close",
+                    trigger=DateTrigger(run_date=run_at),
+                )
+                _logger.info(
+                    "force_close_job_rescheduled",
+                    date=str(today),
+                    run_at=str(run_at),
+                )
+            except Exception:
+                _logger.error("force_close_reschedule_error", exc_info=True)
+
         except asyncio.CancelledError:
             raise
         except Exception:
