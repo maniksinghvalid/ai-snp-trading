@@ -254,10 +254,14 @@ async def test_entries_enabled_allows_entry():
     AttributeError on _on_bar_closed.
     """
     from bot.signal.events import SignalEvent
-    from bot.risk.events import OrderIntent
 
     signal_event = MagicMock(spec=SignalEvent)
-    order_intent = MagicMock(spec=OrderIntent)
+    # Use plain MagicMock (not spec=OrderIntent) so intent.intent_id is accessible.
+    # spec=OrderIntent(class) excludes dataclass instance fields from the spec;
+    # _process_bar now correctly accesses intent.intent_id on the abandon path
+    # (Fix 1.1), so the mock must allow that attribute.
+    order_intent = MagicMock()
+    order_intent.intent_id = "test-intent-integration"
 
     mock_signal_engine = MagicMock()
     mock_signal_engine.on_bar = AsyncMock(return_value=signal_event)

@@ -12,12 +12,17 @@ the D-08 hard startup readiness gate and D-07 graceful-shutdown handler.
 Exports: TradingBot
 """
 import asyncio
+import datetime as _datetime
 from datetime import time as _time
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+
+from bot.position.state import PositionPhase, PositionState
 
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
@@ -273,7 +278,32 @@ class TradingBot:
         if intent is None:
             return
 
-        await self._execution_engine.consume_intent(intent)
+        # Fix 1.1: capture FillEvent return; wire fill into PositionManager.
+        fill = await self._execution_engine.consume_intent(intent)
+        if fill is not None:
+            # Build AWAITING_FILL PositionState — DB-first via register_position (POS-05/EXEC-05).
+            pos = PositionState(
+                position_id=str(uuid4()),
+                code=intent.code,
+                phase=PositionPhase.AWAITING_FILL,
+                entry_price=intent.entry_price,
+                initial_stop=intent.stop_price,
+                trail_stop=intent.stop_price,
+                full_quantity=intent.quantity,
+                remaining_quantity=intent.quantity,
+                entry_order_id=fill.order_id,   # EXEC-05: match by order_id
+            )
+            self._position_manager.register_position(pos)   # DB-first (manager.py:1003)
+            self._position_manager.on_fill(fill)            # FSM AWAITING_FILL → ACTIVE
+        else:
+            # Abandon path: intent was not filled; resolve it in state store.
+            self._store.resolve_pending_intent(intent.intent_id, "ABANDONED")
+
+        # Fix #5: decrement _pending_count on BOTH the fill and abandon paths.
+        # Without this call, _pending_count only grows, permanently blocking
+        # new entries after max_concurrent_positions fills (note_intent_emitted
+        # was already called by RiskEngine; this resolves the slot).
+        self._signal_engine.note_intent_resolved()
 
     @staticmethod
     def _parse_hhmm(s: str):
