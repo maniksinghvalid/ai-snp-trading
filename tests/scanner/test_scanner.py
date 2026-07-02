@@ -1727,3 +1727,173 @@ class TestPremarketNonEmptyWatchlist:
         assert abs(gap_row[0] - 6.0) < 0.1, (
             f"gap_pct={gap_row[0]} must be ~6.0 from premarket 1m price 106 vs prior_close 100"
         )
+
+
+# ============================================================
+# Scan-time external code exclusion (260702-ick Task 2)
+# ============================================================
+
+class TestExternalCodeExclusion:
+    """Scan-time exclusion of external (manually held) codes before the top-20 cap.
+
+    Both run_daily_scan and run_intraday_rescan must call _exclude_external_codes
+    after _compute_candidates and before sorting/capping. Tests patch
+    _compute_candidates to return a known list and provide a mock gateway.
+    """
+
+    def _make_candidates(self, codes):
+        """Build minimal candidate dicts for the given moomoo codes."""
+        return [{"code": c, "gap_pct": 5.0 + i, "rank": 0} for i, c in enumerate(codes)]
+
+    def test_daily_scan_drops_external_code(self, tmp_state_db):
+        """run_daily_scan: external code removed from watchlist, bot code retained."""
+        from bot.scanner.scanner import run_daily_scan
+        from bot.gateway.gateway import GatewayError
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        candidates = self._make_candidates(["US.NVDA", "US.AAPL"])
+        # NVDA is external (manual holding), AAPL is bot-owned
+        gw = MagicMock()
+        gw.get_external_codes = AsyncMock(return_value={"US.NVDA"})
+        gw.subscribe = AsyncMock()
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner._compute_candidates", return_value=candidates), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner.now_et", return_value=_dt.datetime(
+                 2026, 6, 23, 8, 30, tzinfo=ZoneInfo("America/New_York"))):
+            result = run_daily_scan(store=store, gateway=gw, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+
+        assert "US.NVDA" not in result, (
+            "External (manually held) code must be dropped before the top-20 cap"
+        )
+        assert "US.AAPL" in result, (
+            "Bot-owned code must be retained in the watchlist"
+        )
+
+    def test_daily_scan_gateway_error_keeps_full_list(self, tmp_state_db):
+        """run_daily_scan: GatewayError → watchlist intact, no exclusion applied."""
+        from bot.scanner.scanner import run_daily_scan
+        from bot.gateway.gateway import GatewayError
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        candidates = self._make_candidates(["US.NVDA", "US.AAPL"])
+        gw = MagicMock()
+        gw.get_external_codes = AsyncMock(side_effect=GatewayError("broker offline"))
+        gw.subscribe = AsyncMock()
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner._compute_candidates", return_value=candidates), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner.now_et", return_value=_dt.datetime(
+                 2026, 6, 23, 8, 30, tzinfo=ZoneInfo("America/New_York"))):
+            result = run_daily_scan(store=store, gateway=gw, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+
+        # Fail-open: entire list preserved
+        assert "US.NVDA" in result, (
+            "On GatewayError, scan must proceed with the full candidate list (fail-open)"
+        )
+        assert "US.AAPL" in result, (
+            "On GatewayError, bot-owned code must also be preserved"
+        )
+
+    def test_daily_scan_gateway_none_noop(self, tmp_state_db):
+        """run_daily_scan with gateway=None: candidate list unchanged, no broker call."""
+        from bot.scanner.scanner import run_daily_scan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        candidates = self._make_candidates(["US.NVDA", "US.AAPL"])
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner._compute_candidates", return_value=candidates), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner.now_et", return_value=_dt.datetime(
+                 2026, 6, 23, 8, 30, tzinfo=ZoneInfo("America/New_York"))):
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+
+        assert "US.NVDA" in result, "gateway=None must not exclude any code"
+        assert "US.AAPL" in result, "gateway=None must not exclude any code"
+
+    def test_rescan_drops_external_code(self, tmp_state_db):
+        """run_intraday_rescan: external code removed, bot code retained."""
+        from bot.scanner.scanner import run_intraday_rescan
+        from bot.gateway.gateway import GatewayError
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        candidates = self._make_candidates(["US.NVDA", "US.AAPL"])
+        gw = MagicMock()
+        gw.get_external_codes = AsyncMock(return_value={"US.NVDA"})
+        gw.subscribe = AsyncMock()
+        gw.unsubscribe = AsyncMock()
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner._compute_candidates", return_value=candidates), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner.now_et", return_value=_dt.datetime(
+                 2026, 6, 23, 10, 30, tzinfo=ZoneInfo("America/New_York"))):
+            result = run_intraday_rescan(
+                store=store, gateway=gw, cfg=cfg, active_codes=set(), scan_date=scan_date
+            )
+
+        store.close()
+
+        assert "US.NVDA" not in result, (
+            "run_intraday_rescan: external code must be dropped before the cap"
+        )
+        assert "US.AAPL" in result, (
+            "run_intraday_rescan: bot-owned code must be retained"
+        )
+
+    def test_rescan_gateway_error_keeps_full_list(self, tmp_state_db):
+        """run_intraday_rescan: GatewayError → watchlist intact."""
+        from bot.scanner.scanner import run_intraday_rescan
+        from bot.gateway.gateway import GatewayError
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg()
+
+        candidates = self._make_candidates(["US.NVDA", "US.AAPL"])
+        gw = MagicMock()
+        gw.get_external_codes = AsyncMock(side_effect=GatewayError("broker offline"))
+        gw.subscribe = AsyncMock()
+        gw.unsubscribe = AsyncMock()
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner._compute_candidates", return_value=candidates), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner.now_et", return_value=_dt.datetime(
+                 2026, 6, 23, 10, 30, tzinfo=ZoneInfo("America/New_York"))):
+            result = run_intraday_rescan(
+                store=store, gateway=gw, cfg=cfg, active_codes=set(), scan_date=scan_date
+            )
+
+        store.close()
+
+        assert "US.NVDA" in result, (
+            "run_intraday_rescan: on GatewayError must proceed with full list (fail-open)"
+        )
+        assert "US.AAPL" in result
