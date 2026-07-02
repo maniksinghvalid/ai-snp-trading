@@ -1385,3 +1385,58 @@ async def test_reconcile_once_externally_closed():
     )
     mock_store.mark_position_closed.assert_called()  # DB update via guarded method (CR-01 / 06.1-09)
 
+
+# ============================================================
+# Finding 1.2: reconcile_once must skip cycle on failed position_list_query
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_reconcile_once_skips_on_broker_query_failure():
+    """Regression 1.2: a failed position_list_query must abort the reconcile cycle.
+
+    When get_positions() returns ret != RET_OK (broker error), reconcile_once must:
+    - Return an empty result dict immediately (no cycle)
+    - NOT call any mark_position_closed / manager mutation
+    - Emit the structured log event 'reconcile_skipped_broker_query_failed'
+
+    Previously, the guard only FILLED broker_map on RET_OK but still ran the
+    reconcile loop with an empty broker_map, treating all in-memory positions as
+    'externally closed' and wiping them on any transient broker glitch.
+    """
+    gw = _make_gateway_with_mocks()
+
+    # Inject a position into the gateway's mock so reconcile has something to check.
+    from bot.position.state import PositionState, PositionPhase
+    from bot.position.manager import PositionManager
+
+    mock_manager = MagicMock()
+    mock_manager._positions = {
+        "US.AAPL": MagicMock(
+            code="US.AAPL",
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=100,
+            entry_order_id="ORD-111",
+        )
+    }
+    mock_manager._exiting = set()
+
+    mock_store = MagicMock()
+    mock_alerter = MagicMock()
+    mock_alerter.send = AsyncMock()
+
+    # Make position_list_query return ret=1 (error) — simulates transient broker failure.
+    gw._trade_ctx.position_list_query.return_value = (1, None)
+
+    result = await gw.reconcile_once(mock_store, mock_manager, mock_alerter)
+
+    # Must return empty dict without touching positions.
+    assert result == {}, (
+        f"reconcile_once must return empty dict on broker failure, got: {result}"
+    )
+    # No position must be marked closed from a failed query.
+    mock_store.mark_position_closed.assert_not_called()
+    # Manager positions must not have been mutated.
+    assert "US.AAPL" in mock_manager._positions, (
+        "reconcile_once must not remove positions on a failed query"
+    )
+
