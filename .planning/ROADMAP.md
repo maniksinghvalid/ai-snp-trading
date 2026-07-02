@@ -219,9 +219,15 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 **Requirements**: Regression-test-first (TDD) per finding; full suite green per tier; live premarket UAT gates Tier 1 sign-off
 **Depends on:** Phase 06.1 (wire core trade loop) — NOT Phase 6 (backtester, unbuilt)
 **Plans:** 3 planned (one per tier)
-
 Plans:
+**Wave 1**
 
 - [ ] 06.2-01-PLAN.md — Tier 1 live-run blockers (findings 1.1–1.5): wire FillEvent→PositionManager, reconcile guard, bar-handler re-register, post-cancel dealt_qty, calendar-aware force-close; full suite + live premarket UAT gate [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 06.2-02-PLAN.md — Tier 2 correctness (findings 2.1–2.8): bot-owned gate count, rescan active-codes, trades writer, bid/ask raise, orphan dedup, scanner staleness, exit-proxy R, config-driven orphan stop [Wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 06.2-03-PLAN.md — Tier 3 hygiene (findings 3.1–3.2): shared reconcile core (after 1.2), trading-day-keyed daily-bar cache [Wave 3]
