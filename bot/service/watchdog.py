@@ -219,6 +219,18 @@ class OpenDWatchdog:
         except Exception:
             _logger.warning("resubscribe_failed_after_reconnect", exc_info=True)
 
+        # Fix 1.3: re-register bar handler on the reconnected quote ctx BEFORE re-enabling
+        # entries. Without this, the new quote context has no BarAggregator push handler
+        # so no 5m bars are delivered and position management is silently disabled. (T-06.2-02)
+        if self._bot._bar_agg is not None:
+            try:
+                self._gateway.set_handler(self._bot._bar_agg)
+                _logger.info("bar_handler_reregistered_after_reconnect")
+            except Exception:
+                _logger.warning(
+                    "bar_handler_reregister_failed_after_reconnect", exc_info=True
+                )
+
         # D-11 Step 3: re-enable entries AFTER reconcile + re-subscribe (ordering enforced)
         self._bot._entries_enabled = True
 

@@ -858,8 +858,26 @@ class MoomooGateway:
             return t
 
         ret_pos, broker_data = await self.get_positions(refresh_cache=True)
+
+        # Fix 1.2: skip the reconcile cycle on a failed broker query.
+        # Never derive "externally closed" from a failed/empty query — a transient
+        # OpenD error must not wipe all managed positions. (T-06.2-01)
+        if ret_pos != RET_OK or broker_data is None:
+            _logger.error(
+                "reconcile_skipped_broker_query_failed",
+                ret=ret_pos,
+            )
+            if alerter is not None:
+                try:
+                    await alerter.send(
+                        "WARN: position_list_query failed — reconcile cycle skipped"
+                    )
+                except Exception:
+                    pass
+            return {}
+
         broker_map = {}
-        if ret_pos == RET_OK and broker_data is not None and len(broker_data) > 0:
+        if len(broker_data) > 0:
             for _, row in broker_data.iterrows():
                 code = str(row.get("code", "") or "")
                 if not code:

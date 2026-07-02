@@ -95,3 +95,82 @@ async def test_reconnect_reenables_entries():
     assert bot_mock._entries_enabled is True, (
         "Watchdog must re-enable entries after reconnect + reconcile"
     )
+
+
+# ============================================================
+# Finding 1.3: re-register bar handler after OpenD reconnect
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_reconnect_reregisters_bar_handler():
+    """Regression 1.3: _on_reconnect must call gateway.set_handler(bot._bar_agg) after reconnect.
+
+    After OpenD restarts, the new quote context must have the BarAggregator push
+    handler re-registered so 5m bars resume flowing. Previously _on_reconnect
+    re-subscribed feeds but never re-attached the bar handler, leaving the bot
+    deaf to bars until the next manual restart.
+
+    Assertions:
+    - gateway.set_handler called exactly once with bot._bar_agg
+    - Call occurs AFTER startup_reconcile and AFTER subscribe (ordering preserved)
+    - If bot._bar_agg is None, set_handler is not called and no error raised
+    """
+    from unittest.mock import call
+
+    watchdog, mock_gateway, mock_bot, mock_alerter = _make_watchdog_with_mocks()
+
+    # Give the bot a non-None bar aggregator (the handler to re-register).
+    mock_bar_agg = MagicMock()
+    mock_bot._bar_agg = mock_bar_agg
+
+    # Wire the bot's store so get_watchlist_codes returns some codes.
+    mock_bot._store = MagicMock()
+    mock_bot._store.get_watchlist_codes.return_value = ["US.AAPL"]
+    mock_bot._position_manager = MagicMock()
+
+    # Use a call recorder to capture ordering: startup_reconcile, subscribe, set_handler.
+    call_recorder = MagicMock()
+    call_recorder.startup_reconcile = AsyncMock()
+    call_recorder.subscribe = AsyncMock()
+    call_recorder.set_handler = MagicMock()
+
+    mock_gateway.startup_reconcile = call_recorder.startup_reconcile
+    mock_gateway.subscribe = call_recorder.subscribe
+    mock_gateway.set_handler = call_recorder.set_handler
+
+    # Trigger _on_reconnect (the reconnect handler)
+    await watchdog._on_reconnect()
+
+    # Assert set_handler called once with the bot's bar aggregator.
+    call_recorder.set_handler.assert_called_once_with(mock_bar_agg)
+
+    # Assert ordering: startup_reconcile and subscribe must precede set_handler.
+    recorded_names = [c[0] for c in call_recorder.mock_calls if c[0]]
+    assert "startup_reconcile" in recorded_names, "startup_reconcile must be called"
+    assert "subscribe" in recorded_names, "subscribe must be called"
+    assert "set_handler" in recorded_names, "set_handler must be called"
+    assert recorded_names.index("startup_reconcile") < recorded_names.index("set_handler"), (
+        "set_handler must be called AFTER startup_reconcile"
+    )
+    assert recorded_names.index("subscribe") < recorded_names.index("set_handler"), (
+        "set_handler must be called AFTER subscribe"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconnect_skips_set_handler_when_bar_agg_none():
+    """Finding 1.3 guard: set_handler must not be called if bot._bar_agg is None."""
+    watchdog, mock_gateway, mock_bot, mock_alerter = _make_watchdog_with_mocks()
+
+    # Explicitly set _bar_agg to None — set_handler must be skipped.
+    mock_bot._bar_agg = None
+    mock_bot._store = MagicMock()
+    mock_bot._store.get_watchlist_codes.return_value = []
+    mock_bot._position_manager = MagicMock()
+
+    mock_gateway.set_handler = MagicMock()
+
+    # Must not raise and must not call set_handler.
+    await watchdog._on_reconnect()
+
+    mock_gateway.set_handler.assert_not_called()

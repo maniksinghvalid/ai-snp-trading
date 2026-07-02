@@ -990,3 +990,34 @@ class TestRescanPremarketHighMerge:
         assert engine._premarket_highs.get("US.NVDA") == 120.5, (
             "After merge: NVDA must be in _premarket_highs so Gate 1 can evaluate it"
         )
+
+
+# ============================================================
+# Finding 1.1/#5: note_intent_resolved decrements _pending_count
+# ============================================================
+
+class TestNoteIntentResolved:
+    """note_intent_resolved must decrement _pending_count and never go below 0."""
+
+    def test_note_intent_resolved_decrements_pending_count(self):
+        """After note_intent_emitted then note_intent_resolved, _pending_count returns to prior value.
+
+        Regression for finding 1.1/#5: note_intent_resolved had zero production callers,
+        causing _pending_count to leak upward until it permanently blocked new entries.
+        """
+        engine = make_engine()
+        assert engine._pending_count == 0, "count must start at 0"
+
+        engine.note_intent_emitted()
+        assert engine._pending_count == 1, "count must be 1 after emit"
+
+        engine.note_intent_resolved()
+        assert engine._pending_count == 0, "count must return to 0 after resolve"
+
+    def test_note_intent_resolved_never_goes_below_zero(self):
+        """Calling note_intent_resolved when count is already 0 must not produce a negative count."""
+        engine = make_engine()
+        engine.note_intent_resolved()  # call on zero — must not go negative
+        assert engine._pending_count == 0, (
+            "note_intent_resolved on count=0 must leave count=0 (underflow guard)"
+        )

@@ -325,3 +325,225 @@ async def test_market_open_subscribe_skips_seed_when_signal_engine_none():
 
     # Subscribe still called
     mock_gateway.subscribe.assert_called_once_with(["US.AAPL"])
+
+
+# ============================================================
+# Finding 1.1 + #5: wire FillEvent into PositionManager; resolve intent on both paths
+# ============================================================
+
+def _make_bot_with_full_pipeline():
+    """Return a TradingBot with full signal/risk/exec pipeline mocked for _process_bar tests.
+
+    Sets up AsyncMock for all async methods called inside _process_bar so the pipeline
+    can be driven end-to-end without a running event loop at construction time.
+    """
+    from bot.service.bot import TradingBot
+
+    mock_cfg = MagicMock()
+    mock_cfg.premarket_scan_et = "08:30"
+    mock_cfg.market_open_et = "09:30"
+    mock_cfg.intraday_rescan_interval_min = 30
+    mock_cfg.intraday_rescan_start_et = "09:55"
+    mock_cfg.intraday_rescan_end_et = "12:55"
+    mock_cfg.eod_report_et = "15:55"
+    mock_cfg.force_close_et = "15:51"
+    mock_cfg.misfire_grace_scan_s = 3600
+    mock_cfg.misfire_grace_rescan_s = 600
+    mock_cfg.force_close_misfire_grace_s = 300
+
+    mock_gateway = MagicMock()
+    mock_gateway.get_global_state = AsyncMock(
+        return_value={"connected": True, "qot_logined": True, "trd_logined": True}
+    )
+
+    mock_signal_engine = MagicMock()
+    mock_signal_engine.on_bar = AsyncMock(return_value=MagicMock())
+    mock_signal_engine.note_intent_resolved = MagicMock()
+
+    mock_intent = MagicMock()
+    mock_intent.code = "US.AAPL"
+    mock_intent.entry_price = 182.55
+    mock_intent.stop_price = 180.18
+    mock_intent.quantity = 100
+    mock_intent.intent_id = "intent-test-001"
+
+    mock_risk_engine = MagicMock()
+    mock_risk_engine.on_signal = AsyncMock(return_value=mock_intent)
+
+    mock_exec_engine = MagicMock()
+    # Default: consume_intent returns None (abandon path); override per test.
+    mock_exec_engine.consume_intent = AsyncMock(return_value=None)
+
+    mock_position_manager = MagicMock()
+    mock_position_manager.on_bar = AsyncMock()
+
+    bot = TradingBot(
+        cfg=mock_cfg,
+        gateway=mock_gateway,
+        store=MagicMock(),
+        scanner=MagicMock(),
+        position_manager=mock_position_manager,
+        execution_engine=mock_exec_engine,
+        kill_switch=MagicMock(),
+        alerter=MagicMock(),
+        watchdog=None,
+        signal_engine=mock_signal_engine,
+        risk_engine=mock_risk_engine,
+    )
+    # Enable entries so the signal/risk/exec pipeline branch runs.
+    bot._entries_enabled = True
+    return bot, mock_signal_engine, mock_position_manager, mock_exec_engine, mock_intent
+
+
+_PROCESS_BAR_DATA = {
+    "code": "US.AAPL",
+    "time_key": "2026-06-24 10:05:00",
+    "open": 182.0,
+    "high": 183.0,
+    "low": 180.0,
+    "close": 182.5,
+    "volume": 100000,
+    "hod": 183.0,
+    "lod": 180.0,
+}
+
+
+@pytest.mark.asyncio
+async def test_premarket_scan_reschedules_force_close_for_half_day():
+    """Finding 1.5: _job_premarket_scan must reschedule the force_close job via DateTrigger.
+
+    Verifies that after _job_premarket_scan completes:
+    1. Exactly one job with id='force_close' exists (reschedule_job, NOT a second add_job).
+    2. The trigger is a DateTrigger (not CronTrigger) so it fires once at the
+       calendar-aware close minus 9 minutes.
+    3. When get_force_close_time_et returns 12:51 (half-day), the job's next
+       run time is at 12:51 ET today (not the static 15:51 from rules.json).
+
+    Previously: force_close was registered as a static CronTrigger('15:51') that
+    fires every day at 15:51 ET regardless of half-days. On early-close days the
+    bot holds positions for ~3 hours past market close.
+    """
+    from bot.service.bot import TradingBot
+    from apscheduler.triggers.date import DateTrigger
+    from datetime import date as _date, time as _time
+    import datetime as _datetime
+    from unittest.mock import patch
+
+    bot, _, _ = _make_bot_with_mocks()
+
+    # Patch get_force_close_time_et to simulate a half-day (12:51 ET close)
+    mock_close_time = _time(12, 51)
+
+    with patch("bot.service.bot.get_force_close_time_et", return_value=mock_close_time), \
+         patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        today = _date(2026, 7, 3)  # Example half-day (July 3)
+        mock_now.return_value.date.return_value = today
+        # Also register_jobs before running premarket scan so force_close job exists
+        bot._register_jobs()
+
+        await bot._job_premarket_scan()
+
+    # Verify exactly one 'force_close' job exists (no duplicate)
+    force_close_jobs = [j for j in bot._scheduler.get_jobs() if j.id == "force_close"]
+    assert len(force_close_jobs) == 1, (
+        f"Exactly one force_close job must exist after _job_premarket_scan; "
+        f"got {len(force_close_jobs)}: {[j.id for j in force_close_jobs]}"
+    )
+
+    # Verify the trigger is a DateTrigger (not CronTrigger)
+    from apscheduler.triggers.cron import CronTrigger
+    job = force_close_jobs[0]
+    assert isinstance(job.trigger, DateTrigger), (
+        f"force_close job must use DateTrigger after reschedule; "
+        f"got {type(job.trigger).__name__}"
+    )
+
+    # Verify the run_date is at 12:51 ET (half-day close - 9min)
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+    expected_run_at = _datetime.datetime.combine(today, mock_close_time, tzinfo=ET)
+    # job.next_run_time is timezone-aware; compare in ET
+    next_run = job.next_run_time
+    if next_run is not None and next_run.tzinfo is not None:
+        next_run_et = next_run.astimezone(ET)
+        assert next_run_et.hour == 12 and next_run_et.minute == 51, (
+            f"force_close job must be scheduled at 12:51 ET on half-day; "
+            f"got {next_run_et.strftime('%H:%M')} ET"
+        )
+
+
+# ============================================================
+# Finding 1.1 + #5: wire FillEvent into PositionManager; resolve intent on both paths
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_process_bar_registers_position_on_fill():
+    """Regression 1.1: _process_bar must call register_position + on_fill when consume_intent fills.
+
+    Previously, bot.py:276 discarded the FillEvent return value from consume_intent,
+    so PositionManager never received the fill and the position was unmanaged.
+    """
+    from bot.execution.events import FillEvent
+    from datetime import datetime as _dt
+
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+
+    fill = FillEvent(
+        order_id="ord-001",
+        intent_id=mock_intent.intent_id,
+        code="US.AAPL",
+        filled_qty=100,
+        avg_fill_price=182.60,
+        is_entry=True,
+        fill_time=_dt(2026, 6, 24, 10, 5, 0),
+    )
+    mock_ee.consume_intent = AsyncMock(return_value=fill)
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    mock_pm.register_position.assert_called_once()
+    mock_pm.on_fill.assert_called_once_with(fill)
+
+
+@pytest.mark.asyncio
+async def test_process_bar_resolves_intent_on_fill():
+    """Regression 1.1/#5: signal_engine.note_intent_resolved called once on fill path."""
+    from bot.execution.events import FillEvent
+    from datetime import datetime as _dt
+
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+
+    fill = FillEvent(
+        order_id="ord-002",
+        intent_id=mock_intent.intent_id,
+        code="US.AAPL",
+        filled_qty=100,
+        avg_fill_price=182.60,
+        is_entry=True,
+        fill_time=_dt(2026, 6, 24, 10, 5, 0),
+    )
+    mock_ee.consume_intent = AsyncMock(return_value=fill)
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    mock_se.note_intent_resolved.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_process_bar_resolves_intent_on_abandon():
+    """Regression 1.1/#5: on abandon path (consume_intent=None), both resolve_pending_intent
+    and note_intent_resolved must be called (both-paths invariant).
+    """
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+    # consume_intent returns None → abandon path
+    mock_ee.consume_intent = AsyncMock(return_value=None)
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    # resolve_pending_intent called with the intent_id and "ABANDONED"
+    bot._store.resolve_pending_intent.assert_called_once_with(
+        mock_intent.intent_id, "ABANDONED"
+    )
+    # note_intent_resolved called on BOTH paths
+    mock_se.note_intent_resolved.assert_called_once()
