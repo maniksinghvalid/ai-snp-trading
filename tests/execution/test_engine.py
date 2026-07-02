@@ -813,3 +813,96 @@ def test_manage_exit_continues_on_transient_poll_failure():
     assert call_count["n"] >= 2, (
         "get_order_status must be called at least twice (first raises, second fills)"
     )
+
+
+# ============================================================
+# Finding 1.4: re-query dealt_qty after cancel before computing replacement qty
+# ============================================================
+
+def test_manage_exit_requeries_dealt_qty_after_cancel():
+    """Regression 1.4: after cancel_order confirms, manage_exit must re-query dealt_qty.
+
+    Scenario:
+      - Total qty to exit = 100
+      - Pre-cancel poll: dealt_qty = 80 (partial fill detected in poll loop)
+      - cancel_order returns OK
+      - Post-cancel re-query: dealt_qty = 90 (10 more shares filled during cancel)
+      - Replacement order must be for 100 - 90 = 10, NOT 100 - 80 = 20
+      - Without the fix, the engine uses the pre-cancel snapshot (80), over-orders
+        by 10, potentially going net-short
+
+    This test drives manage_exit with a carefully orchestrated sequence of
+    get_order_status return values to verify that the post-cancel re-query
+    is used for sizing the replacement order.
+    """
+    from bot.execution.engine import ExecutionEngine
+
+    cfg = _MockCfg(
+        exit_ttl_seconds=0.05,
+        exit_escalation_cadence_seconds=0.01,
+        exit_limit_buffer_usd=0.05,
+        exit_escalation_step_usd=0.10,
+    )
+    store = _make_mock_store()
+
+    # Track get_order_status call count to distinguish pre-cancel poll from post-cancel re-query.
+    get_order_status_calls = {"n": 0}
+
+    async def mock_get_order_status(order_id=None):
+        get_order_status_calls["n"] += 1
+        n = get_order_status_calls["n"]
+        oid = str(order_id) if order_id else "ORDER-EXIT-001"
+
+        if oid == "ORDER-EXIT-001":
+            if n == 1:
+                # First poll: pre-cancel snapshot (80 filled)
+                return [{"order_id": "ORDER-EXIT-001", "dealt_qty": 80, "dealt_avg_price": 150.00}]
+            else:
+                # Post-cancel re-query: 90 filled (10 more during cancel)
+                return [{"order_id": "ORDER-EXIT-001", "dealt_qty": 90, "dealt_avg_price": 150.00}]
+        elif oid == "ORDER-EXIT-002":
+            # Replacement order: fills the remaining 10 immediately
+            return [{"order_id": "ORDER-EXIT-002", "dealt_qty": 10, "dealt_avg_price": 149.90}]
+        return []
+
+    order_seq = {"n": 0}
+
+    async def mock_place_order(code, qty, price, side):
+        order_seq["n"] += 1
+        n = order_seq["n"]
+        if n == 1:
+            assert qty == 100, f"First order must be for full qty=100, got {qty}"
+            return "ORDER-EXIT-001"
+        elif n == 2:
+            # This is the replacement order — assert correct qty after post-cancel re-query
+            assert qty == 10, (
+                f"Replacement order qty must be 100 - post_cancel_filled(90) = 10, got {qty}. "
+                "Using pre-cancel snapshot (80) would give qty=20 — over-sell into short."
+            )
+            return "ORDER-EXIT-002"
+        return f"ORDER-EXIT-{n:03d}"
+
+    gw = MagicMock()
+    gw.get_bid_price = AsyncMock(return_value=150.05)
+    gw.place_order = mock_place_order
+    gw.get_order_status = mock_get_order_status
+    gw.cancel_order = AsyncMock()
+
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    from moomoo import TrdSide
+    total_filled = _run(engine.manage_exit(
+        code="US.AAPL",
+        qty=100,
+        side=TrdSide.SELL,
+        escalation_step=0.10,
+        escalation_cadence=0.01,
+        ttl=0.05,
+    ))
+
+    assert total_filled == 100, (
+        f"manage_exit must exit all 100 shares; got total_filled={total_filled}"
+    )
+    assert order_seq["n"] == 2, (
+        f"Must place exactly 2 orders (initial + replacement); got {order_seq['n']}"
+    )
