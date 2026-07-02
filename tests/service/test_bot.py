@@ -409,6 +409,75 @@ _PROCESS_BAR_DATA = {
 
 
 @pytest.mark.asyncio
+async def test_premarket_scan_reschedules_force_close_for_half_day():
+    """Finding 1.5: _job_premarket_scan must reschedule the force_close job via DateTrigger.
+
+    Verifies that after _job_premarket_scan completes:
+    1. Exactly one job with id='force_close' exists (reschedule_job, NOT a second add_job).
+    2. The trigger is a DateTrigger (not CronTrigger) so it fires once at the
+       calendar-aware close minus 9 minutes.
+    3. When get_force_close_time_et returns 12:51 (half-day), the job's next
+       run time is at 12:51 ET today (not the static 15:51 from rules.json).
+
+    Previously: force_close was registered as a static CronTrigger('15:51') that
+    fires every day at 15:51 ET regardless of half-days. On early-close days the
+    bot holds positions for ~3 hours past market close.
+    """
+    from bot.service.bot import TradingBot
+    from apscheduler.triggers.date import DateTrigger
+    from datetime import date as _date, time as _time
+    import datetime as _datetime
+    from unittest.mock import patch
+
+    bot, _, _ = _make_bot_with_mocks()
+
+    # Patch get_force_close_time_et to simulate a half-day (12:51 ET close)
+    mock_close_time = _time(12, 51)
+
+    with patch("bot.service.bot.get_force_close_time_et", return_value=mock_close_time), \
+         patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        today = _date(2026, 7, 3)  # Example half-day (July 3)
+        mock_now.return_value.date.return_value = today
+        # Also register_jobs before running premarket scan so force_close job exists
+        bot._register_jobs()
+
+        await bot._job_premarket_scan()
+
+    # Verify exactly one 'force_close' job exists (no duplicate)
+    force_close_jobs = [j for j in bot._scheduler.get_jobs() if j.id == "force_close"]
+    assert len(force_close_jobs) == 1, (
+        f"Exactly one force_close job must exist after _job_premarket_scan; "
+        f"got {len(force_close_jobs)}: {[j.id for j in force_close_jobs]}"
+    )
+
+    # Verify the trigger is a DateTrigger (not CronTrigger)
+    from apscheduler.triggers.cron import CronTrigger
+    job = force_close_jobs[0]
+    assert isinstance(job.trigger, DateTrigger), (
+        f"force_close job must use DateTrigger after reschedule; "
+        f"got {type(job.trigger).__name__}"
+    )
+
+    # Verify the run_date is at 12:51 ET (half-day close - 9min)
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+    expected_run_at = _datetime.datetime.combine(today, mock_close_time, tzinfo=ET)
+    # job.next_run_time is timezone-aware; compare in ET
+    next_run = job.next_run_time
+    if next_run is not None and next_run.tzinfo is not None:
+        next_run_et = next_run.astimezone(ET)
+        assert next_run_et.hour == 12 and next_run_et.minute == 51, (
+            f"force_close job must be scheduled at 12:51 ET on half-day; "
+            f"got {next_run_et.strftime('%H:%M')} ET"
+        )
+
+
+# ============================================================
+# Finding 1.1 + #5: wire FillEvent into PositionManager; resolve intent on both paths
+# ============================================================
+
+@pytest.mark.asyncio
 async def test_process_bar_registers_position_on_fill():
     """Regression 1.1: _process_bar must call register_position + on_fill when consume_intent fills.
 
