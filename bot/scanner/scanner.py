@@ -18,6 +18,7 @@ from typing import List, Optional, Set
 import pandas as pd
 
 from bot.config.loader import StrategyConfig
+from bot.gateway.gateway import GatewayError
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 from bot.scanner.calendar import is_trading_day
@@ -313,6 +314,61 @@ def _run_coro(coro):
 
 
 # ============================================================
+# External-code exclusion helper (260702-ick SCAN-08 / SAFE-OG-01)
+# ============================================================
+
+def _exclude_external_codes(gateway, store, passing: List[dict], scan_pass: str = "") -> List[dict]:
+    """Drop broker-held external codes from the candidate list (fail-open on error).
+
+    Calls gateway.get_external_codes(store) to retrieve the set of codes held at
+    the broker that the bot does NOT own (manual/operator holdings). Those codes
+    are removed from passing BEFORE the top-20 cap, and symbol_excluded_manual_holding
+    is logged per dropped code.
+
+    If gateway is None (unit-test path with no broker), the list is returned unchanged.
+    If get_external_codes raises GatewayError, the full candidate list is returned
+    unchanged (fail-open: a transient broker read must never empty the watchlist;
+    EXEC-04 is the entry-time backstop).
+
+    Args:
+        gateway:   MoomooGateway instance, or None (skips exclusion).
+        store:     StateStore — forwarded to gateway.get_external_codes().
+        passing:   Candidate list from _compute_candidates().
+        scan_pass: Scan label for structured log fields (e.g. "premarket", "intraday_1").
+
+    Returns:
+        Filtered candidate list with external codes removed; or passing unchanged
+        when gateway is None or a GatewayError occurs.
+    """
+    if gateway is None:
+        return passing
+
+    try:
+        external = _run_coro(gateway.get_external_codes(store))
+    except GatewayError:
+        _logger.warning(
+            "external_exclusion_skipped_query_failed",
+            scan_pass=scan_pass,
+            exc_info=True,
+        )
+        return passing
+
+    filtered = []
+    for candidate in passing:
+        code = candidate.get("code", "")
+        if code in external:
+            _logger.info(
+                "symbol_excluded_manual_holding",
+                code=code,
+                scan_pass=scan_pass,
+            )
+        else:
+            filtered.append(candidate)
+
+    return filtered
+
+
+# ============================================================
 # Subscription helper
 # ============================================================
 
@@ -399,6 +455,10 @@ def run_daily_scan(
     # for all per-symbol evaluations in this scan pass.
     passing = _compute_candidates(cfg, scan_date, now_et_value=current_et)
 
+    # Step 3b: drop externally held codes before the cap (SAFE-OG-01 / 260702-ick).
+    # Fail-open: if the broker query fails, the full candidate list is preserved.
+    passing = _exclude_external_codes(gateway, store, passing, scan_pass=scan_pass)
+
     # Step 4: sort by gap_pct DESC, cap at top-20 (SCAN-08)
     passing.sort(key=lambda c: c["gap_pct"], reverse=True)
     top20 = passing[:_WATCHLIST_CAP]
@@ -473,6 +533,10 @@ def run_intraday_rescan(
     # Thread the resolved ET clock so resolve_today_price gets a consistent clock
     # for all per-symbol evaluations in this rescan pass.
     passing = _compute_candidates(cfg, scan_date, now_et_value=current_et)
+
+    # Step 3b: drop externally held codes before the cap (SAFE-OG-01 / 260702-ick).
+    # Fail-open: if the broker query fails, the full candidate list is preserved.
+    passing = _exclude_external_codes(gateway, store, passing, scan_pass=scan_pass)
 
     # Step 4: sort all passing candidates by gap_pct DESC
     passing.sort(key=lambda c: c["gap_pct"], reverse=True)

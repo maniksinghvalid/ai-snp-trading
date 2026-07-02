@@ -229,3 +229,61 @@ class TestLoadStrategyConfigFailure:
         import bot.config.loader as loader_mod
         src = inspect.getsource(loader_mod)
         assert "sys.exit" not in src
+
+
+# ============================================================
+# sizing_equity_usd — RISK-01 / 260702-ick Task 3
+# ============================================================
+
+class TestSizingEquityUsd:
+    """Tests for risk.sizing_equity_usd optional field in rules.json.
+
+    Default: 100000 when key absent.
+    Explicit null: None (signals live-equity fallback).
+    """
+
+    def test_sizing_equity_usd_defaults_to_100000_when_absent(self, tmp_path):
+        """When risk.sizing_equity_usd is absent from rules.json, cfg.sizing_equity_usd == 100000."""
+        rules = dict(CANONICAL_RULES)
+        # Ensure sizing_equity_usd is absent from the risk block (current canonical rules ~53-58)
+        risk_block = dict(rules["risk"])
+        risk_block.pop("sizing_equity_usd", None)  # remove if accidentally present
+        rules["risk"] = risk_block
+
+        path = tmp_path / "rules.json"
+        path.write_text(json.dumps(rules), encoding="utf-8")
+
+        cfg = load_strategy_config(str(path))
+        assert cfg.sizing_equity_usd == 100_000, (
+            f"sizing_equity_usd must default to 100000 when absent; got {cfg.sizing_equity_usd}"
+        )
+
+    def test_sizing_equity_usd_explicit_null_maps_to_none(self, tmp_path):
+        """When risk.sizing_equity_usd is explicitly null, cfg.sizing_equity_usd is None."""
+        rules = dict(CANONICAL_RULES)
+        risk_block = dict(rules["risk"])
+        risk_block["sizing_equity_usd"] = None
+        rules["risk"] = risk_block
+
+        path = tmp_path / "rules.json"
+        path.write_text(json.dumps(rules), encoding="utf-8")
+
+        cfg = load_strategy_config(str(path))
+        assert cfg.sizing_equity_usd is None, (
+            f"Explicit null must map to None (live-equity fallback); got {cfg.sizing_equity_usd}"
+        )
+
+    def test_sizing_equity_usd_explicit_value_loaded(self, tmp_path):
+        """When risk.sizing_equity_usd is set to a number, it is loaded correctly."""
+        rules = dict(CANONICAL_RULES)
+        risk_block = dict(rules["risk"])
+        risk_block["sizing_equity_usd"] = 200_000
+        rules["risk"] = risk_block
+
+        path = tmp_path / "rules.json"
+        path.write_text(json.dumps(rules), encoding="utf-8")
+
+        cfg = load_strategy_config(str(path))
+        assert cfg.sizing_equity_usd == 200_000, (
+            f"Explicit value must be loaded; got {cfg.sizing_equity_usd}"
+        )

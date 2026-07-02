@@ -353,6 +353,49 @@ class MoomooGateway:
             ),
         )
 
+    async def get_external_codes(self, store) -> set:
+        """Return broker-held codes NOT owned by the bot (SAFE-OG-01 predicate).
+
+        Queries the broker for all open positions, then subtracts codes the bot
+        owns (open DB position row OR live pending intent). The remaining codes
+        are external (manual operator holdings or short positions the strategy
+        cannot manage).
+
+        Called at scan time to exclude external codes before the top-20 cap.
+        The caller decides the fail-open / fail-closed policy on GatewayError.
+
+        Args:
+            store: StateStore — used for get_open_positions() and has_pending_intent().
+
+        Returns:
+            set: Set of Moomoo-format codes held at broker but NOT bot-owned.
+
+        Raises:
+            GatewayError: When the broker position query returns ret != RET_OK
+                          or data is None. Caller must handle this.
+        """
+        # Pitfall B: refresh_cache=True bypasses the OpenD stale cache on SIMULATE.
+        ret, data = await self.get_positions(refresh_cache=True)
+        if ret != RET_OK or data is None:
+            raise GatewayError(
+                f"get_external_codes: broker position query failed (ret={ret})"
+            )
+
+        # Build bot-ownership set from DB (open positions + pending intents).
+        # This mirrors the SAFE-OG-01 predicate in reconcile_once (~972-977 / ~1136-1143).
+        open_pos_codes = {r["code"] for r in store.get_open_positions()}
+
+        external: set = set()
+        for _, row in data.iterrows():
+            code = row.get("code", "")
+            if not code:
+                continue
+            bot_owned = code in open_pos_codes or store.has_pending_intent(code)
+            if not bot_owned:
+                external.add(code)
+
+        return external
+
     async def get_equity(self) -> float:
         """Read live total net assets from the SIMULATE account (RISK-01, D-04/D-05).
 

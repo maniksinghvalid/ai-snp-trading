@@ -11,6 +11,7 @@ Exports: load_strategy_config, StrategyConfig, ConfigError
 """
 import json
 from dataclasses import dataclass
+from typing import Optional
 
 import jsonschema
 
@@ -127,6 +128,11 @@ class StrategyConfig:
     launchd_throttle_interval_s: int        # service.launchd_throttle_interval_s (D-06)
     crash_loop_alert_threshold: int         # service.crash_loop_alert_threshold (D-06)
 
+    # ---- risk (optional / 260702-ick RISK-01) ----
+    # Default 100000: fixed sizing basis (shared SIMULATE account isolation).
+    # Set to None to fall back to live gateway.get_equity() on each sizing decision.
+    sizing_equity_usd: Optional[float] = 100_000.0
+
 
 # ============================================================
 # Loader
@@ -200,6 +206,7 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         max_position_size_pct=int(rk["max_position_size_pct_of_portfolio"]),
         max_concurrent_positions=int(rk["max_concurrent_positions"]),
         max_trades_per_day=int(rk["max_trades_per_day"]),
+        sizing_equity_usd=rk.get("sizing_equity_usd", 100_000),
         # execution (Phase 4 tunables — CFG-01, D-05/D-07/D-08)
         entry_limit_buffer_usd=float(ex_cfg["entry_limit_buffer_usd"]),
         entry_ttl_seconds=float(ex_cfg["entry_ttl_seconds"]),

@@ -132,7 +132,8 @@ SCHEMA = {
                 "max_risk_per_trade_pct": {"type": "number"},
                 "max_position_size_pct_of_portfolio": {"type": "number"},
                 "max_concurrent_positions": {"type": "integer"},
-                "max_trades_per_day": {"type": "integer"}
+                "max_trades_per_day": {"type": "integer"},
+                "sizing_equity_usd": {"type": ["number", "null"]}
             }
         },
 

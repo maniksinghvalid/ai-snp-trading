@@ -79,8 +79,14 @@ def _make_cfg(
     max_position_size_pct: int = 10,
     max_concurrent_positions: int = 5,
     max_trades_per_day: int = 5,
+    sizing_equity_usd=None,  # None → live-equity path (existing tests unchanged)
 ) -> StrategyConfig:
-    """Return a StrategyConfig with test-friendly risk parameters."""
+    """Return a StrategyConfig with test-friendly risk parameters.
+
+    sizing_equity_usd defaults to None so existing tests keep exercising the
+    live-equity path (gateway.get_equity() called on each sizing decision).
+    Pass a float to use the fixed-basis path (260702-ick RISK-01).
+    """
     return StrategyConfig(
         min_price_usd=10.0,
         d3_min_gap_pct=1.0,
@@ -97,6 +103,7 @@ def _make_cfg(
         max_position_size_pct=max_position_size_pct,
         max_concurrent_positions=max_concurrent_positions,
         max_trades_per_day=max_trades_per_day,
+        sizing_equity_usd=sizing_equity_usd,
         **_EXECUTION_DEFAULTS, **_SERVICE_DEFAULTS,
     )
 
@@ -620,3 +627,57 @@ class TestPendingCountWiredPipeline:
         )
 
         store.close()
+
+
+# ============================================================
+# sizing_equity_usd basis selection — RISK-01 / 260702-ick Task 3
+# ============================================================
+
+class TestSizingEquityUsdBasis:
+    """RiskEngine.on_signal uses cfg.sizing_equity_usd as the sizing basis when set,
+    and falls back to gateway.get_equity() when None. equity_used records the basis used.
+    """
+
+    def test_fixed_basis_bypasses_get_equity(self):
+        """When cfg.sizing_equity_usd is set, RiskEngine uses it without calling get_equity."""
+        from bot.risk.risk_engine import RiskEngine
+
+        cfg = _make_cfg(sizing_equity_usd=200_000.0)
+        gw = _make_mock_gateway(equity=100_000.0)  # different from fixed basis
+        store = _make_store_in_memory()
+
+        signal = _make_signal(code="US.AAPL", close=50.0, lod=48.0)
+        risk_engine = RiskEngine(gateway=gw, store=store, cfg=cfg, signal_engine=None)
+
+        intent = asyncio.run(risk_engine.on_signal(signal))
+        store.close()
+
+        assert intent is not None, "RiskEngine must emit an intent with a valid signal"
+        assert intent.equity_used == 200_000.0, (
+            f"equity_used must equal cfg.sizing_equity_usd (200000); got {intent.equity_used}"
+        )
+        gw.get_equity.assert_not_awaited(), (
+            "get_equity must NOT be called when cfg.sizing_equity_usd is set"
+        )
+
+    def test_null_sizing_equity_falls_back_to_live_equity(self):
+        """When cfg.sizing_equity_usd is None, RiskEngine awaits gateway.get_equity()."""
+        from bot.risk.risk_engine import RiskEngine
+
+        cfg = _make_cfg(sizing_equity_usd=None)
+        gw = _make_mock_gateway(equity=150_000.0)
+        store = _make_store_in_memory()
+
+        signal = _make_signal(code="US.AAPL", close=50.0, lod=48.0)
+        risk_engine = RiskEngine(gateway=gw, store=store, cfg=cfg, signal_engine=None)
+
+        intent = asyncio.run(risk_engine.on_signal(signal))
+        store.close()
+
+        assert intent is not None, "RiskEngine must emit an intent with a valid signal"
+        assert intent.equity_used == 150_000.0, (
+            f"equity_used must equal live equity (150000); got {intent.equity_used}"
+        )
+        gw.get_equity.assert_awaited_once(), (
+            "get_equity must be awaited exactly once when sizing_equity_usd is None"
+        )

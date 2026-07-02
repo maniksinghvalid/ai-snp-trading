@@ -1440,3 +1440,127 @@ async def test_reconcile_once_skips_on_broker_query_failure():
         "reconcile_once must not remove positions on a failed query"
     )
 
+
+# ============================================================
+# TestGetExternalCodes — SAFE-OG-01 (260702-ick Task 1)
+# ============================================================
+
+class TestGetExternalCodes:
+    """Tests for MoomooGateway.get_external_codes(store).
+
+    SAFE-OG-01 ownership predicate: returns the set of broker-held codes that
+    the bot does NOT own (i.e. manual/external holdings). Raises GatewayError
+    when the broker position query fails.
+    """
+
+    def _make_store(self, open_pos_codes=(), pending_codes=()):
+        """Return a mock store with configurable ownership data."""
+        store = MagicMock()
+        store.get_open_positions.return_value = [{"code": c} for c in open_pos_codes]
+        store.has_pending_intent.side_effect = lambda code: code in set(pending_codes)
+        return store
+
+    def test_held_and_bot_owned_via_position_excluded(self):
+        """A code held at broker AND in the bot DB positions is NOT external."""
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{"code": "US.AAPL", "qty": 100}])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        store = self._make_store(open_pos_codes=["US.AAPL"])
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        result = asyncio.run(_run())
+        assert "US.AAPL" not in result, (
+            "A code owned via DB position must NOT be in external codes"
+        )
+
+    def test_held_and_bot_owned_via_pending_intent_excluded(self):
+        """A code held at broker AND with a pending intent is NOT external."""
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{"code": "US.MSFT", "qty": 50}])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        store = self._make_store(pending_codes=["US.MSFT"])
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        result = asyncio.run(_run())
+        assert "US.MSFT" not in result, (
+            "A code with a pending intent must NOT be in external codes"
+        )
+
+    def test_held_and_not_bot_owned_included(self):
+        """A code held at broker with NO bot DB record is external (manual holding)."""
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{"code": "US.NVDA", "qty": 200}])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        store = self._make_store()  # no ownership for NVDA
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        result = asyncio.run(_run())
+        assert "US.NVDA" in result, (
+            "A code held at broker without bot ownership must be in external codes"
+        )
+
+    def test_short_position_not_bot_owned_included(self):
+        """A short (qty < 0) not owned by the bot is external — never bot-tradable."""
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{"code": "US.TSLA", "qty": -10}])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        store = self._make_store()
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        result = asyncio.run(_run())
+        assert "US.TSLA" in result, (
+            "A short position not owned by the bot must be in external codes"
+        )
+
+    def test_broker_query_failure_raises_gateway_error(self):
+        """When broker position query returns ret != RET_OK, GatewayError is raised."""
+        gw = _make_gateway_with_mocks()
+        gw.get_positions = AsyncMock(return_value=(-1, None))
+        store = self._make_store()
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        with pytest.raises(GatewayError):
+            asyncio.run(_run())
+
+    def test_returns_set(self):
+        """get_external_codes returns a set, not a list."""
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{"code": "US.NVDA", "qty": 200}])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        store = self._make_store()
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        result = asyncio.run(_run())
+        assert isinstance(result, set), "get_external_codes must return a set"
+
+    def test_mixed_owned_and_external(self):
+        """Mixed broker holdings — only the unowned ones are external."""
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([
+            {"code": "US.AAPL", "qty": 100},   # bot-owned (position)
+            {"code": "US.NVDA", "qty": 200},   # external (manual)
+            {"code": "US.MSFT", "qty": 50},    # bot-owned (pending intent)
+        ])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        store = self._make_store(open_pos_codes=["US.AAPL"], pending_codes=["US.MSFT"])
+
+        async def _run():
+            return await gw.get_external_codes(store)
+
+        result = asyncio.run(_run())
+        assert "US.AAPL" not in result
+        assert "US.MSFT" not in result
+        assert "US.NVDA" in result
+
