@@ -36,6 +36,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close
 - [ ] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging
 - [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code
+- [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
 
@@ -199,10 +200,29 @@ Plans:
 - [ ] 06-03: Backtester harness — wires feed through SignalEngine + RiskEngine + PositionManager (shared classes, shared `rules.json`); produces trade log
 - [ ] 06-04: Performance report — win rate, avg R, max drawdown, profit factor, per-trade CSV output
 
+### Phase 7: Strategy Optimization
+
+**Goal**: The live strategy's four structural weaknesses identified by quant feedback (2026-07-03) are closed: the RVOL gate is time-of-day normalized (restoring realistic signal frequency), exits stop feeding the left tail (model selected by backtest evidence), stop invalidation moves from 5m bar-close to tick/broker-side (eliminating fat-tail losses past 1R), and a -2R daily circuit breaker halts new entries on adverse days
+**Depends on**: Phase 6 (Backtester — required to validate exit-model change and RVOL-TOD threshold), Phase 06.2 (code-review remediation)
+**Requirements**: TBD at planning (candidate IDs: SIG-RVOL-TOD, EXIT-MODEL, RISK-TICK-STOP, RISK-CIRCUIT)
+**Success Criteria** (what must be TRUE):
+
+  1. Intraday RVOL compares cumulative volume at time T against the 14-day average of cumulative volume at the same time-of-day bucket (no full-day-average denominator before the close); signal frequency increases materially without loosening the institutional-interest intent
+  2. The exit model shipped in rules.json is chosen from a backtest comparison (current partial/BE model vs no-scale/fixed-2R vs full-size-to-1.5R + trail variants) using the Phase 6 backtester, not by default
+  3. A stop violation is acted on at tick/quote granularity (broker-side trigger order or quote-driven exit), not at the next 5m bar close; realized losses on stop-outs converge to ~1R
+  4. When cumulative daily realized loss reaches -2R, all new entries are halted for the rest of the session (existing positions continue to be managed); the halt is logged, alerted, and resets next trading day
+  5. All thresholds (RVOL-TOD min, circuit-breaker R, exit-model parameters) live in rules.json — no hardcoded strategy literals
+
+**Plans**: TBD
+
+Plans:
+
+- [ ] 07-01: TBD at planning
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -212,6 +232,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |
+| 7. Strategy Optimization | 0/? | Not started | - |
 
 ### Phase 06.2: Code review remediation (INSERTED)
 
