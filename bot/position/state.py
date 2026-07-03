@@ -120,6 +120,11 @@ class PositionState:
     # Set at the FSM trigger point before the exit fill arrives so the alerter
     # can pass the real reason (not a hardcoded constant) to on_exit_alert (ALERT-02).
     pending_exit_reason: Optional[str] = None
+    # Broker-assigned order_id of the live protective stop order (D-01/D-04).
+    # None before the first stop is placed; set by arm_stop_protection() after a
+    # confirmed entry fill; updated by _sync_broker_stop() on every trail ratchet.
+    # Persisted to positions.broker_stop_order_id (migration 0005).
+    broker_stop_order_id: Optional[str] = None
 
     # ============================================================
     # Phase 4 FSM Methods

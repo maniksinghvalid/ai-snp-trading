@@ -2318,3 +2318,595 @@ class TestAdoptOrphan:
             f"Expected CLOSED after stop-out on adopted position, got "
             f"{pos.phase if pos else 'None (removed)'}"
         )
+
+
+# ============================================================
+# Test: arm_stop_protection — broker stop placement on entry fill (D-01/D-03)
+# ============================================================
+
+class TestArmStopProtection:
+    """Tests for arm_stop_protection (07-03 D-01/D-03 broker stop after fill)."""
+
+    def test_broker_path_calls_place_stop_order(self, open_store, mock_strategy):
+        """arm_stop_protection with use_broker_stop_orders=True calls gateway.place_stop_order once
+        with (code, remaining_quantity, trail_stop, TrdSide.SELL) and sets pos.broker_stop_order_id."""
+        import sys
+        import types
+
+        mock_gateway = MagicMock()
+        mock_gateway.place_stop_order = AsyncMock(return_value="STOP-BROKER-001")
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=100,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager.arm_stop_protection(pos))
+
+        mock_gateway.place_stop_order.assert_called_once()
+        assert pos.broker_stop_order_id == "STOP-BROKER-001", (
+            "arm_stop_protection must set pos.broker_stop_order_id to the returned order_id"
+        )
+
+    def test_broker_path_uses_trd_side_sell(self, open_store, mock_strategy):
+        """arm_stop_protection passes TrdSide.SELL to place_stop_order (Pitfall 7 — long-only)."""
+        import sys
+        import types
+
+        mock_gateway = MagicMock()
+        mock_gateway.place_stop_order = AsyncMock(return_value="STOP-SELL-001")
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        sell_sentinel = object()
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = sell_sentinel
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        pos = _make_pos(phase=PositionPhase.ACTIVE, remaining_quantity=100, trail_stop=98.0)
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager.arm_stop_protection(pos))
+
+        call_args = mock_gateway.place_stop_order.call_args
+        # trd_side must be TrdSide.SELL (sentinel) — long-only protective stop
+        passed_side = call_args.kwargs.get("trd_side") or (call_args.args[3] if len(call_args.args) > 3 else None)
+        assert passed_side is sell_sentinel, (
+            "arm_stop_protection must pass TrdSide.SELL (not BUY) — Pitfall 7 long-only guard"
+        )
+
+    def test_no_op_when_gateway_none(self, open_store, mock_strategy):
+        """arm_stop_protection is a no-op (no raise) when self._gateway is None."""
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=None,
+        )
+
+        pos = _make_pos(phase=PositionPhase.ACTIVE, remaining_quantity=100, trail_stop=98.0)
+
+        # Must not raise — no-op path
+        try:
+            asyncio.run(manager.arm_stop_protection(pos))
+        except Exception as exc:
+            pytest.fail(f"arm_stop_protection raised with gateway=None: {exc}")
+
+        # broker_stop_order_id must remain unset/None
+        assert getattr(pos, "broker_stop_order_id", None) is None
+
+    def test_broker_stop_placement_failure_is_non_fatal(self, open_store, mock_strategy):
+        """arm_stop_protection swallows place_stop_order exceptions (non-fatal D-03 backstop)."""
+        mock_gateway = MagicMock()
+        mock_gateway.place_stop_order = AsyncMock(
+            side_effect=Exception("SIMULATE stop order rejected")
+        )
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        pos = _make_pos(phase=PositionPhase.ACTIVE, remaining_quantity=100, trail_stop=98.0)
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # place_stop_order raises but arm_stop_protection must swallow it
+        try:
+            import sys
+            import types
+            moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+            moomoo_mod.TrdSide = MagicMock()
+            moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+            with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+                asyncio.run(manager.arm_stop_protection(pos))
+        except Exception as exc:
+            pytest.fail(
+                f"arm_stop_protection must swallow place_stop_order exceptions; raised: {exc}"
+            )
+
+
+# ============================================================
+# Test: _sync_broker_stop — cancel-replace on trail ratchet (D-04/D-11)
+# ============================================================
+
+class TestSyncBrokerStop:
+    """Tests for _sync_broker_stop (07-03 D-04 cancel-replace on breakeven/trail_up)."""
+
+    def _make_manager_with_gateway(self, open_store, mock_strategy, cancel_mock=None, place_mock=None):
+        """Helper: PositionManager with a mock gateway having cancel_order + place_stop_order."""
+        import sys
+        import types
+
+        mock_gateway = MagicMock()
+        mock_gateway.cancel_order = cancel_mock or AsyncMock()
+        mock_gateway.place_stop_order = place_mock or AsyncMock(return_value="STOP-NEW-001")
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        # Patch moomoo so deferred import of TrdSide succeeds
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+        return manager, mock_gateway
+
+    def test_sync_broker_stop_cancels_old_and_places_new(self, open_store, mock_strategy):
+        """_sync_broker_stop cancels the existing broker stop then places a new one
+        at the updated trail_stop; pos.broker_stop_order_id is updated to the new id."""
+        import sys
+        import types
+
+        cancel_mock = AsyncMock()
+        place_mock = AsyncMock(return_value="STOP-REPLACED-001")
+
+        manager, mock_gateway = self._make_manager_with_gateway(
+            open_store, mock_strategy, cancel_mock=cancel_mock, place_mock=place_mock
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.BREAKEVEN,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=100.0,   # stop moved to entry (breakeven)
+            remaining_quantity=200,
+        )
+        pos.broker_stop_order_id = "STOP-OLD-001"
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager._sync_broker_stop(pos))
+
+        cancel_mock.assert_called_once_with("STOP-OLD-001")
+        place_mock.assert_called_once()
+        assert pos.broker_stop_order_id == "STOP-REPLACED-001", (
+            "_sync_broker_stop must update pos.broker_stop_order_id to the new order_id"
+        )
+
+    def test_sync_broker_stop_never_loosens_stop_price(self, open_store, mock_strategy):
+        """After trail_up, _sync_broker_stop places a new stop at the ratcheted (higher)
+        trail_stop; D-11 never-loosen is enforced by the FSM before this method is called,
+        and the replacement always uses pos.trail_stop (the current, non-loosened value)."""
+        import sys
+        import types
+
+        placed_prices = []
+
+        async def _capture_place(code, qty, stop_price, trd_side):
+            placed_prices.append(stop_price)
+            return "STOP-TRAIL-001"
+
+        mock_gateway = MagicMock()
+        mock_gateway.cancel_order = AsyncMock()
+        mock_gateway.place_stop_order = _capture_place
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        # trail_stop ratcheted to 101.5 (a new swing-low > old 100.0)
+        pos = _make_pos(
+            phase=PositionPhase.TRAILING,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=101.5,
+            remaining_quantity=150,
+        )
+        pos.broker_stop_order_id = "STOP-OLD-TRAIL"
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager._sync_broker_stop(pos))
+
+        assert len(placed_prices) == 1, "_sync_broker_stop must place exactly one replacement stop"
+        assert placed_prices[0] == 101.5, (
+            f"Replacement stop price must equal the ratcheted trail_stop=101.5, got {placed_prices[0]}"
+        )
+
+    def test_sync_broker_stop_noop_when_no_broker_stop_order_id(self, open_store, mock_strategy):
+        """_sync_broker_stop is a no-op when pos.broker_stop_order_id is None
+        (position was armed without a broker stop, D-03 fallback active)."""
+        manager, mock_gateway = self._make_manager_with_gateway(open_store, mock_strategy)
+
+        pos = _make_pos(phase=PositionPhase.ACTIVE, remaining_quantity=100, trail_stop=98.0)
+        pos.broker_stop_order_id = None    # no broker stop placed
+        manager._positions[pos.code] = pos
+
+        import sys
+        import types
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager._sync_broker_stop(pos))
+
+        mock_gateway.cancel_order.assert_not_called()
+        mock_gateway.place_stop_order.assert_not_called()
+
+    def test_sync_broker_stop_swallows_cancel_exception_and_still_places(self, open_store, mock_strategy):
+        """If cancel_order raises (already filled/cancelled), the exception is swallowed
+        and the replacement stop is still placed (finding-1.4 tolerance)."""
+        import sys
+        import types
+
+        cancel_mock = AsyncMock(side_effect=Exception("order already cancelled"))
+        place_mock = AsyncMock(return_value="STOP-AFTER-CANCEL-ERR")
+
+        manager, mock_gateway = self._make_manager_with_gateway(
+            open_store, mock_strategy, cancel_mock=cancel_mock, place_mock=place_mock
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.BREAKEVEN,
+            remaining_quantity=200,
+            trail_stop=100.0,
+        )
+        pos.broker_stop_order_id = "STOP-STALE-001"
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        try:
+            with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+                asyncio.run(manager._sync_broker_stop(pos))
+        except Exception as exc:
+            pytest.fail(f"_sync_broker_stop must swallow cancel exceptions; raised: {exc}")
+
+        place_mock.assert_called_once(), (
+            "Replacement stop must still be placed even after cancel_order raises"
+        )
+        assert pos.broker_stop_order_id == "STOP-AFTER-CANCEL-ERR"
+
+    @pytest.mark.asyncio
+    async def test_on_bar_breakeven_triggers_sync_broker_stop(self, open_store, mock_strategy):
+        """When breakeven transition fires on on_bar and use_broker_stop_orders=True,
+        the broker stop is cancel-replaced via _sync_broker_stop."""
+        import sys
+        import types
+
+        cancel_mock = AsyncMock()
+        place_mock = AsyncMock(return_value="STOP-BREAKEVEN-SYNC")
+
+        mock_gateway = MagicMock()
+        mock_gateway.cancel_order = cancel_mock
+        mock_gateway.place_stop_order = place_mock
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+        # breakeven_trigger_r=1.0; entry=100, stop=98 → R=2 → breakeven at close>=102
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        # PARTIAL_TAKEN: ready for breakeven transition at 1R close
+        pos = _make_pos(
+            phase=PositionPhase.PARTIAL_TAKEN,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=98.0,
+            remaining_quantity=200,
+        )
+        pos.broker_stop_order_id = "STOP-PRE-BREAKEVEN"
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # Close at 102.0 → 1R → breakeven transition
+        bar = _make_bar(code=pos.code, close=102.0)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            await manager.on_bar(bar)
+
+        # _trigger_breakeven must call _sync_broker_stop: cancel old + place new
+        cancel_mock.assert_called_once_with("STOP-PRE-BREAKEVEN")
+        place_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_bar_trail_up_triggers_sync_broker_stop(self, open_store, mock_strategy):
+        """When trail_up fires on on_bar and use_broker_stop_orders=True, the broker stop
+        is cancel-replaced at the new (higher) trail_stop."""
+        import sys
+        import types
+        from collections import deque
+
+        cancel_mock = AsyncMock()
+        new_stop_prices = []
+
+        async def _capture_place(code, qty, stop_price, trd_side):
+            new_stop_prices.append(stop_price)
+            return "STOP-TRAIL-SYNC"
+
+        mock_gateway = MagicMock()
+        mock_gateway.cancel_order = cancel_mock
+        mock_gateway.place_stop_order = _capture_place
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = True
+
+        # Strategy returns swing-low at 103.0 (above current 100.0 breakeven stop).
+        # bar_buffer must be non-empty so _compute_swing_low reaches the strategy mock.
+        mock_strategy_trail = MagicMock()
+        mock_strategy_trail.compute_swing_low_2_2 = MagicMock(return_value=103.0)
+
+        # Provide a minimal bar_buffer so _compute_swing_low doesn't short-circuit.
+        bar_buf = deque([
+            {"time_key": "2026-06-24 10:00:00", "open": 100.0, "high": 104.0,
+             "low": 99.0, "close": 103.0, "volume": 10000},
+            {"time_key": "2026-06-24 10:05:00", "open": 103.0, "high": 106.0,
+             "low": 102.0, "close": 105.0, "volume": 8000},
+        ])
+        bar_buffer = {"US.AAPL": bar_buf}
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy_trail,
+            gateway=mock_gateway,
+            bar_buffer=bar_buffer,
+        )
+
+        # BREAKEVEN: trail_stop at entry (100.0); swing-low 103.0 will ratchet it up
+        pos = _make_pos(
+            phase=PositionPhase.BREAKEVEN,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=100.0,
+            remaining_quantity=150,
+        )
+        pos.broker_stop_order_id = "STOP-PRE-TRAIL"
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # Bar close at 105.0 (well above breakeven stop; swing_low=103 > trail_stop=100 → TRAIL_UP)
+        bar = _make_bar(code=pos.code, close=105.0)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            await manager.on_bar(bar)
+
+        cancel_mock.assert_called_once_with("STOP-PRE-TRAIL")
+        assert len(new_stop_prices) == 1, "_sync_broker_stop must place exactly one replacement"
+        assert new_stop_prices[0] == 103.0, (
+            f"Replacement must use ratcheted trail_stop=103.0, got {new_stop_prices[0]}"
+        )
+
+
+# ============================================================
+# Test: _on_quote + quote-tick fallback arm path (D-02)
+# ============================================================
+
+class TestQuoteTickFallback:
+    """Tests for arm_stop_protection else-branch (use_broker_stop_orders=False)
+    and _on_quote one-shot tick-level stop (07-03 D-02)."""
+
+    def test_fallback_path_does_not_call_place_stop_order(self, open_store, mock_strategy):
+        """With use_broker_stop_orders=False, arm_stop_protection must NOT call
+        place_stop_order; instead it arms the quote-tick monitor."""
+        import sys
+        import types
+
+        mock_gateway = MagicMock()
+        mock_gateway.place_stop_order = AsyncMock(return_value="SHOULD-NOT-BE-CALLED")
+        mock_gateway.subscribe_quote = AsyncMock()
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False  # quote-fallback path
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        pos = _make_pos(phase=PositionPhase.ACTIVE, remaining_quantity=100, trail_stop=98.0)
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager.arm_stop_protection(pos))
+
+        mock_gateway.place_stop_order.assert_not_called()
+        mock_gateway.subscribe_quote.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_quote_below_trail_stop_fires_manage_exit(self, open_store, mock_strategy):
+        """_on_quote with bid_price <= pos.trail_stop invokes engine.manage_exit
+        once for the remaining_quantity."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=100)
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        manager = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=200,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # bid at exactly trail_stop — should fire
+        await manager._on_quote(pos.code, bid_price=98.0)
+
+        mock_engine.manage_exit.assert_called_once()
+        call_kwargs = mock_engine.manage_exit.call_args
+        assert 200 in (call_kwargs.args + tuple(call_kwargs.kwargs.values())), (
+            "_on_quote must pass remaining_quantity=200 to manage_exit"
+        )
+
+    @pytest.mark.asyncio
+    async def test_on_quote_above_trail_stop_does_nothing(self, open_store, mock_strategy):
+        """_on_quote with bid_price > pos.trail_stop must NOT invoke manage_exit."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=0)
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        manager = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=200,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+
+        # bid above trail_stop — should NOT fire
+        await manager._on_quote(pos.code, bid_price=100.0)
+
+        mock_engine.manage_exit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_quote_fires_at_most_once(self, open_store, mock_strategy):
+        """_on_quote fires the exit at most once per position (one-shot guard).
+        A second tick at the same or lower bid must NOT call manage_exit again."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=200)
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        manager = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=200,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # First tick: fires
+        await manager._on_quote(pos.code, bid_price=97.5)
+        # Second tick: same bid — must NOT fire again
+        await manager._on_quote(pos.code, bid_price=97.0)
+
+        assert mock_engine.manage_exit.call_count == 1, (
+            "_on_quote one-shot guard must prevent double-fire on repeated ticks"
+        )

@@ -311,15 +311,16 @@ class StateStore:
                 """INSERT INTO positions
                    (position_id, code, phase, entry_price, initial_stop, trail_stop,
                     full_quantity, remaining_quantity, entry_order_id, exit_order_id,
-                    avg_fill_price, opened_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    avg_fill_price, opened_at, updated_at, broker_stop_order_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(position_id) DO UPDATE SET
                      phase=excluded.phase,
                      trail_stop=excluded.trail_stop,
                      remaining_quantity=excluded.remaining_quantity,
                      exit_order_id=excluded.exit_order_id,
                      avg_fill_price=excluded.avg_fill_price,
-                     updated_at=excluded.updated_at""",
+                     updated_at=excluded.updated_at,
+                     broker_stop_order_id=excluded.broker_stop_order_id""",
                 (
                     pos.position_id,
                     pos.code,
@@ -334,6 +335,7 @@ class StateStore:
                     pos.avg_fill_price,
                     pos.opened_at.isoformat() if pos.opened_at else None,
                     pos.updated_at.isoformat() if pos.updated_at else None,
+                    pos.broker_stop_order_id,
                 ),
             )
             self._conn.commit()

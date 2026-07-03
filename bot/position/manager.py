@@ -31,6 +31,7 @@ Usage:
     manager.flush_all()                 # called by KillSwitch on shutdown (04-04)
 """
 
+import asyncio
 import datetime as _dt
 import pandas as pd
 from collections import deque
@@ -127,6 +128,7 @@ class PositionManager:
         bar_buffer=None,
         on_entry_alert: Optional[Callable] = None,
         on_exit_alert: Optional[Callable] = None,
+        gateway=None,
     ) -> None:
         """Initialise PositionManager.
 
@@ -145,6 +147,8 @@ class PositionManager:
                             Signature: on_exit_alert(code, exit_reason, r_multiple).
                             None by default — backward compatible with existing call sites.
                             Invocation failures are logged and never propagate (ALERT-04).
+            gateway:        Optional MoomooGateway for broker-side stop management (D-01/D-04).
+                            None by default — all stop logic falls back to bar-close FSM.
         """
         self._store = store
         self._engine = engine
@@ -153,6 +157,7 @@ class PositionManager:
         self._bar_buffer: Optional[Dict[str, deque]] = bar_buffer
         self._on_entry_alert: Optional[Callable] = on_entry_alert
         self._on_exit_alert: Optional[Callable] = on_exit_alert
+        self._gateway = gateway
 
         # In-memory dict keyed by stock code (e.g. "US.AAPL" → PositionState).
         # Only one live position per code is supported at a time (EXEC-04 guard).
@@ -162,6 +167,10 @@ class PositionManager:
         # Populated before _place_exit_order call, discarded in finally.
         # SAFE-03 reconcile_once reads this via getattr to skip mid-exit positions.
         self._exiting: set = set()
+
+        # One-shot guard for D-02 quote-tick fallback: prevents repeated tick callbacks
+        # from firing manage_exit multiple times for the same position (D-02 single-exit).
+        self._quote_exiting: set = set()
 
     # ============================================================
     # Public API — fill processing
@@ -226,9 +235,180 @@ class PositionManager:
         elif action == FSM_ACTION_PARTIAL:
             await self._trigger_partial_profit(pos, qty, bar.time_key)
         elif action == FSM_ACTION_BREAKEVEN:
-            self._trigger_breakeven(pos, bar.time_key)
+            await self._trigger_breakeven(pos, bar.time_key)
         elif action == FSM_ACTION_TRAIL_UP:
-            self._trigger_trail_up(pos, bar.time_key)
+            await self._trigger_trail_up(pos, bar.time_key)
+
+    # ============================================================
+    # Public API — broker stop placement (D-01/D-03)
+    # ============================================================
+
+    async def arm_stop_protection(self, pos) -> None:
+        """Place or register protective stop for an entry fill (D-01/D-02/D-03).
+
+        Called immediately after on_fill() confirms an entry fill (post-fill hook
+        in bot.service.bot). Two dispatch paths:
+
+          cfg.use_broker_stop_orders=True  → D-01 broker path: place a live STOP
+              order via gateway.place_stop_order(); persist broker_stop_order_id.
+          cfg.use_broker_stop_orders=False → D-02 fallback: subscribe the code to
+              quote ticks via gateway.subscribe_quote(); _on_quote fires an
+              immediate exit when bid <= trail_stop (tick-level invalidation).
+
+        No-op when self._gateway is None (test / paper env without gateway).
+        Non-fatal: broker placement failure is caught, logged, and swallowed — the
+        bar-close FSM (D-03) remains the backstop in all cases (D-01/D-02 comment).
+
+        Args:
+            pos: PositionState (ACTIVE phase) with entry_price and trail_stop set.
+        """
+        if self._gateway is None:
+            return
+
+        cfg = self._cfg
+        use_broker = getattr(cfg, "use_broker_stop_orders", False)
+        if not use_broker:
+            # D-02 fallback: subscribe to quote ticks for tick-level stop invalidation.
+            try:
+                await self._gateway.subscribe_quote(
+                    [pos.code],
+                    callback=lambda code, bid: asyncio.get_event_loop().create_task(
+                        self._on_quote(code, bid)
+                    ),
+                )
+                _logger.info(
+                    "quote_tick_armed",
+                    code=pos.code,
+                    trail_stop=pos.trail_stop,
+                )
+            except Exception:
+                _logger.warning(
+                    "quote_tick_arm_failed",
+                    code=pos.code,
+                    exc_info=True,
+                )
+            return
+
+        # D-01 broker path: place a live STOP order (protective sell).
+        try:
+            from moomoo import TrdSide  # deferred import: test-env compatibility
+            order_id = await self._gateway.place_stop_order(
+                code=pos.code,
+                qty=pos.remaining_quantity,
+                stop_price=pos.trail_stop,
+                trd_side=TrdSide.SELL,
+            )
+            pos.broker_stop_order_id = order_id
+            self._persist_position(pos, event="broker_stop_placed")
+            _logger.info(
+                "broker_stop_placed",
+                code=pos.code,
+                order_id=order_id,
+                stop_price=pos.trail_stop,
+            )
+        except Exception:
+            _logger.warning(
+                "broker_stop_placement_failed",
+                code=pos.code,
+                exc_info=True,
+            )
+            # Non-fatal: bar-close FSM (D-03) is the backstop.
+
+    async def _sync_broker_stop(self, pos) -> None:
+        """Cancel-replace the broker stop to mirror the updated trail_stop (D-04).
+
+        Called from _trigger_breakeven and _trigger_trail_up after evaluate_close has
+        already ratcheted pos.trail_stop via max() (D-11 never-loosen is enforced
+        upstream; this method always uses the current, non-loosened pos.trail_stop).
+
+        Pattern (finding-1.4): cancel existing stop → place new stop at trail_stop.
+        The brief no-stop window between cancel and replacement is an accepted cost
+        (D-04 Pitfall 5); the bar-close FSM stop check (D-03) remains the backstop.
+
+        No-op when pos.broker_stop_order_id is None or self._gateway is None.
+        Cancel exceptions are swallowed (already filled / already cancelled tolerance)
+        and the replacement is still placed.
+
+        Args:
+            pos: PositionState with broker_stop_order_id and trail_stop current.
+        """
+        if not getattr(pos, "broker_stop_order_id", None) or self._gateway is None:
+            return
+
+        old_id = pos.broker_stop_order_id
+
+        # Cancel step — swallow if already filled or cancelled (finding-1.4)
+        try:
+            await self._gateway.cancel_order(old_id)
+        except Exception:
+            pass  # already cancelled/filled — proceed to re-place
+
+        # Re-place at the CURRENT (ratcheted, never-loosened) trail_stop
+        from moomoo import TrdSide  # deferred import: test-env compatibility
+        order_id = await self._gateway.place_stop_order(
+            code=pos.code,
+            qty=pos.remaining_quantity,
+            stop_price=pos.trail_stop,
+            trd_side=TrdSide.SELL,
+        )
+        pos.broker_stop_order_id = order_id
+        self._persist_position(pos, event="broker_stop_replaced")
+        _logger.info(
+            "broker_stop_replaced",
+            code=pos.code,
+            old_order_id=old_id,
+            new_order_id=order_id,
+            trail_stop=pos.trail_stop,
+        )
+
+    async def _on_quote(self, code: str, bid_price: float) -> None:
+        """Handle a quote-tick push for D-02 bot-side stop invalidation.
+
+        Called from the QuoteTickHandler callback registered by arm_stop_protection
+        when use_broker_stop_orders=False. If a monitored position exists and
+        bid_price <= pos.trail_stop, fires an immediate exit (manage_exit) for
+        the remaining_quantity — replicating the bar-close stop-out but at tick
+        granularity (D-02).
+
+        One-shot guard (self._quote_exiting): once the exit has been initiated for
+        a code, subsequent ticks for the same code are silently discarded to prevent
+        double-fire (D-02 exactly-once semantics).
+
+        A bid above trail_stop is silently ignored.
+
+        Args:
+            code:      Moomoo-format stock code (e.g. "US.AAPL").
+            bid_price: Current best bid from the quote push.
+        """
+        pos = self._positions.get(code)
+        if pos is None or pos.phase.value in ("AWAITING_FILL", "CLOSED"):
+            return
+
+        # One-shot guard — don't fire again if already initiated
+        if code in self._quote_exiting:
+            return
+
+        if bid_price > pos.trail_stop:
+            return  # still above stop; no action
+
+        # bid <= trail_stop: fire the immediate exit (D-02 tick-level invalidation)
+        self._quote_exiting.add(code)
+        _logger.info(
+            "quote_stop_triggered",
+            code=code,
+            bid_price=bid_price,
+            trail_stop=pos.trail_stop,
+            remaining_quantity=pos.remaining_quantity,
+        )
+        try:
+            await self._engine.manage_exit(
+                code=code,
+                qty=pos.remaining_quantity,
+                pos=pos,
+            )
+        except Exception:
+            _logger.warning("quote_stop_exit_failed", code=code, exc_info=True)
+            # Non-fatal; the one-shot guard prevents repeated attempts.
 
     # ============================================================
     # Public API — startup reconciliation
@@ -648,11 +828,13 @@ class PositionManager:
             remaining=pos.remaining_quantity,
         )
 
-    def _trigger_breakeven(self, pos: PositionState, time_key: str) -> None:
+    async def _trigger_breakeven(self, pos: PositionState, time_key: str) -> None:
         """PARTIAL_TAKEN → BREAKEVEN: stop moved to entry_price.
 
         evaluate_close() has already set pos.trail_stop = entry_price and
         pos.phase = BREAKEVEN. We persist DB-first, then log.
+
+        Also cancel-replaces the broker stop (D-04) when use_broker_stop_orders=True.
 
         Args:
             pos:      PositionState (phase already BREAKEVEN, trail_stop = entry_price).
@@ -660,6 +842,10 @@ class PositionManager:
         """
         pos.updated_at = now_et()
         self._persist_position(pos, event="breakeven")
+
+        # D-04: mirror the new trail_stop to the broker stop (cancel-replace)
+        if getattr(self._cfg, "use_broker_stop_orders", False):
+            await self._sync_broker_stop(pos)
 
         _logger.info(
             "fsm_breakeven",
@@ -779,11 +965,13 @@ class PositionManager:
             time_key=time_key,
         )
 
-    def _trigger_trail_up(self, pos: PositionState, time_key: str) -> None:
+    async def _trigger_trail_up(self, pos: PositionState, time_key: str) -> None:
         """BREAKEVEN/TRAILING → TRAILING: stop ratcheted up to new swing-low.
 
         evaluate_close() has already updated pos.trail_stop = max(old, new_swing_low)
         and set pos.phase = TRAILING. We persist DB-first.
+
+        Also cancel-replaces the broker stop (D-04) when use_broker_stop_orders=True.
 
         Args:
             pos:      PositionState (trail_stop already updated by evaluate_close).
@@ -791,6 +979,10 @@ class PositionManager:
         """
         pos.updated_at = now_et()
         self._persist_position(pos, event="trail_up")
+
+        # D-04: mirror the ratcheted trail_stop to the broker stop (cancel-replace, D-11)
+        if getattr(self._cfg, "use_broker_stop_orders", False):
+            await self._sync_broker_stop(pos)
 
         _logger.info(
             "fsm_trail_up",
@@ -1133,4 +1325,5 @@ def _row_to_position_state(row: dict) -> PositionState:
         avg_fill_price=float(row["avg_fill_price"]) if row.get("avg_fill_price") is not None else None,
         opened_at=_parse_dt(row.get("opened_at")),
         updated_at=_parse_dt(row.get("updated_at")),
+        broker_stop_order_id=str(row["broker_stop_order_id"]) if row.get("broker_stop_order_id") else None,
     )
