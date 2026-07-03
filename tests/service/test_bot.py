@@ -601,3 +601,191 @@ async def test_process_bar_arm_stop_protection_not_called_on_abandon():
     mock_pm.arm_stop_protection.assert_not_called(), (
         "_process_bar must NOT call arm_stop_protection when consume_intent returns None"
     )
+
+
+# ============================================================
+# Task 3 (07-05): Bot orchestrator circuit-breaker side-effects (D-08)
+# ============================================================
+
+def _make_breaker_bot(today_str: str = "2026-07-03", breaker_date: str = None):
+    """Return a TradingBot with mocks configured for circuit-breaker side-effect tests.
+
+    Args:
+        today_str: The ET date string that now_et().date().isoformat() returns.
+        breaker_date: What store.get_circuit_breaker_date() returns (None = no trip).
+    """
+    from bot.service.bot import TradingBot
+
+    mock_cfg = MagicMock()
+    mock_cfg.premarket_scan_et = "08:30"
+    mock_cfg.market_open_et = "09:30"
+    mock_cfg.intraday_rescan_interval_min = 30
+    mock_cfg.intraday_rescan_start_et = "09:55"
+    mock_cfg.intraday_rescan_end_et = "12:55"
+    mock_cfg.eod_report_et = "15:55"
+    mock_cfg.force_close_et = "15:51"
+    mock_cfg.misfire_grace_scan_s = 3600
+    mock_cfg.misfire_grace_rescan_s = 600
+    mock_cfg.force_close_misfire_grace_s = 300
+
+    mock_store = MagicMock()
+    mock_store.get_circuit_breaker_date.return_value = breaker_date
+    # get_pending_intent_codes returns [(intent_id, code)] pairs
+    mock_store.get_pending_intent_codes.return_value = [
+        ("intent-001", "US.AAPL"),
+        ("intent-002", "US.MSFT"),
+    ]
+
+    mock_alerter = MagicMock()
+    mock_alerter.send = AsyncMock()
+
+    mock_gateway = MagicMock()
+    mock_gateway.get_global_state = AsyncMock(
+        return_value={"connected": True, "qot_logined": True, "trd_logined": True}
+    )
+
+    bot = TradingBot(
+        cfg=mock_cfg,
+        gateway=mock_gateway,
+        store=mock_store,
+        scanner=MagicMock(),
+        position_manager=MagicMock(),
+        execution_engine=MagicMock(),
+        kill_switch=MagicMock(),
+        alerter=mock_alerter,
+        watchdog=None,
+    )
+    return bot, mock_store, mock_alerter
+
+
+@pytest.mark.asyncio
+async def test_breaker_side_effects_on_fresh_trip_abandons_intents_and_alerts():
+    """On first trip this session, PENDING intents are marked ABANDONED and one alert fires.
+
+    Verifies (D-08):
+    - resolve_pending_intent called for each PENDING intent with status "ABANDONED"
+    - alerter.send called exactly once with a circuit-breaker message
+    - _breaker_handled becomes True after the first side-effect call
+    """
+    session_date = "2026-07-03"
+    # Breaker is tripped today (store returns today's date)
+    bot, mock_store, mock_alerter = _make_breaker_bot(
+        today_str=session_date,
+        breaker_date=session_date,
+    )
+    bot._breaker_handled = False  # not yet handled this session
+
+    await bot._handle_circuit_breaker_side_effects(session_date)
+
+    # Both PENDING intents must be abandoned
+    mock_store.resolve_pending_intent.assert_any_call("intent-001", "ABANDONED")
+    mock_store.resolve_pending_intent.assert_any_call("intent-002", "ABANDONED")
+    assert mock_store.resolve_pending_intent.call_count == 2, (
+        "resolve_pending_intent must be called for each PENDING intent (D-08)."
+    )
+
+    # Exactly one alert must be sent
+    mock_alerter.send.assert_called_once(), (
+        "alerter.send must be called exactly once on the first trip (D-08)."
+    )
+
+    # Flag must be set so subsequent bars don't repeat the side-effects
+    assert bot._breaker_handled is True, (
+        "_breaker_handled must be True after first side-effects run."
+    )
+
+
+@pytest.mark.asyncio
+async def test_breaker_side_effects_idempotent_on_subsequent_bars():
+    """On a subsequent bar (breaker still tripped, _breaker_handled=True), no further action.
+
+    Verifies the one-shot invariant: side-effects run only ONCE per session (D-08).
+    """
+    session_date = "2026-07-03"
+    bot, mock_store, mock_alerter = _make_breaker_bot(
+        today_str=session_date,
+        breaker_date=session_date,
+    )
+    bot._breaker_handled = True  # already handled on a prior bar
+
+    await bot._handle_circuit_breaker_side_effects(session_date)
+
+    # No additional abandonment or alert
+    mock_store.resolve_pending_intent.assert_not_called(), (
+        "No PENDING intents must be abandoned on repeat calls (_breaker_handled=True)."
+    )
+    mock_alerter.send.assert_not_called(), (
+        "alerter.send must NOT be called again when _breaker_handled is True."
+    )
+
+
+@pytest.mark.asyncio
+async def test_breaker_handled_initialized_from_store_on_startup():
+    """At startup (_readiness_gate), _breaker_handled is initialized from stored circuit breaker date.
+
+    - If store.get_circuit_breaker_date() == today's ET date → _breaker_handled = True
+      (restart does not re-alert or re-cancel — Pitfall 6).
+    - If stored date is None or a prior date → _breaker_handled = False.
+
+    This test drives _readiness_gate directly to simulate the startup sequence.
+    """
+    from bot.service.bot import TradingBot
+    from datetime import date as _date
+
+    today_str = "2026-07-03"
+
+    # Case 1: breaker was tripped today → _breaker_handled must start True after startup
+    bot_tripped, mock_store_tripped, _ = _make_breaker_bot(
+        today_str=today_str,
+        breaker_date=today_str,
+    )
+    with patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = _date(2026, 7, 3)
+        mock_now.return_value.time.return_value.replace.return_value = __import__("datetime").time(8, 0)
+        await bot_tripped._readiness_gate()
+
+    assert bot_tripped._breaker_handled is True, (
+        "After startup with today's breaker date, _breaker_handled must be True "
+        "so a mid-session restart does not re-alert or re-cancel (Pitfall 6)."
+    )
+
+    # Case 2: no breaker date → _breaker_handled must start False after startup
+    bot_clear, mock_store_clear, _ = _make_breaker_bot(
+        today_str=today_str,
+        breaker_date=None,  # no prior trip
+    )
+    with patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = _date(2026, 7, 3)
+        mock_now.return_value.time.return_value.replace.return_value = __import__("datetime").time(8, 0)
+        await bot_clear._readiness_gate()
+
+    assert bot_clear._breaker_handled is False, (
+        "After startup with no breaker date, _breaker_handled must be False."
+    )
+
+
+@pytest.mark.asyncio
+async def test_breaker_alert_failure_swallowed_alert04():
+    """alerter.send failures in _handle_circuit_breaker_side_effects must be swallowed (ALERT-04).
+
+    A failing alert must not propagate into the bar loop or prevent _breaker_handled
+    from being set True. The bot continues running normally after a send failure.
+    """
+    session_date = "2026-07-03"
+    bot, mock_store, mock_alerter = _make_breaker_bot(
+        today_str=session_date,
+        breaker_date=session_date,
+    )
+    bot._breaker_handled = False
+
+    # Alerter raises on send — must be swallowed (ALERT-04)
+    mock_alerter.send = AsyncMock(side_effect=Exception("Telegram timeout"))
+
+    # Must not raise
+    await bot._handle_circuit_breaker_side_effects(session_date)
+
+    # _breaker_handled must still be set True (side-effects ran, alert failed silently)
+    assert bot._breaker_handled is True, (
+        "_breaker_handled must be True even when alerter.send raises (ALERT-04: "
+        "alert failures must not interrupt the bar loop)."
+    )
