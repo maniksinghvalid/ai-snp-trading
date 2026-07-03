@@ -938,3 +938,90 @@ class TestDownloadBatchRetry:
             yf_shared._ERRORS.update(original_errors)
 
         assert "1/10 symbols failed" in str(exc_info.value)
+
+
+# ============================================================
+# Phase 7 SIG-RVOL-TOD: download_intraday_5m — 30-day 5m history downloader
+# ============================================================
+
+class TestDownloadIntraday5m:
+    """SCAN-06 extension: download_intraday_5m mirrors download_intraday_1m contract
+    for 30-day 5m regular-session bar history used in TOD baseline computation.
+
+    Verified behaviors:
+      (a) delegates to _download_batch with download_kwargs={"period":"30d","interval":"5m","prepost":False}
+      (b) passes through threads and degradation_threshold, returns (frame, failed_set) unchanged
+      (c) abort/partial event names are the tod_baseline_* names
+    """
+
+    def test_download_intraday_5m_kwargs(self):
+        """download_intraday_5m delegates to _download_batch with 5m/30d/prepost=False kwargs."""
+        from unittest.mock import patch, MagicMock
+
+        symbols = ["AAPL", "MSFT"]
+        sentinel_frame = {"AAPL": MagicMock(), "MSFT": MagicMock()}
+        sentinel_failed = set()
+
+        with patch("bot.scanner.fetcher._download_batch",
+                   return_value=(sentinel_frame, sentinel_failed)) as mock_batch:
+            from bot.scanner.fetcher import download_intraday_5m
+            frame, failed = download_intraday_5m(symbols, threads=3, degradation_threshold=0.15)
+
+        mock_batch.assert_called_once()
+        call_kwargs = mock_batch.call_args[1]
+        dl_kwargs = call_kwargs.get("download_kwargs", {})
+        assert dl_kwargs.get("interval") == "5m", (
+            f"download_intraday_5m must use interval='5m'; got {dl_kwargs.get('interval')!r}"
+        )
+        assert dl_kwargs.get("period") == "30d", (
+            f"download_intraday_5m must use period='30d'; got {dl_kwargs.get('period')!r}"
+        )
+        assert dl_kwargs.get("prepost") is False, (
+            f"download_intraday_5m must use prepost=False (regular-session only); "
+            f"got {dl_kwargs.get('prepost')!r}"
+        )
+
+    def test_download_intraday_5m_passthrough(self):
+        """threads and degradation_threshold are passed through to _download_batch unchanged."""
+        from unittest.mock import patch, MagicMock
+
+        symbols = ["NVDA"]
+        sentinel = ({"NVDA": MagicMock()}, {"FAIL1"})
+
+        with patch("bot.scanner.fetcher._download_batch",
+                   return_value=sentinel) as mock_batch:
+            from bot.scanner.fetcher import download_intraday_5m
+            result = download_intraday_5m(symbols, threads=7, degradation_threshold=0.25)
+
+        assert result == sentinel, "download_intraday_5m must return _download_batch output unchanged"
+
+        call_kwargs = mock_batch.call_args[1]
+        assert call_kwargs.get("threads") == 7, (
+            f"threads must be passed through to _download_batch; got {call_kwargs.get('threads')}"
+        )
+        assert call_kwargs.get("degradation_threshold") == 0.25, (
+            f"degradation_threshold must be passed through; "
+            f"got {call_kwargs.get('degradation_threshold')}"
+        )
+
+    def test_download_intraday_5m_event_names(self):
+        """Abort and partial event names must be the tod_baseline_* strings."""
+        from unittest.mock import patch, MagicMock
+
+        symbols = ["TSLA"]
+        sentinel = ({"TSLA": MagicMock()}, set())
+
+        with patch("bot.scanner.fetcher._download_batch",
+                   return_value=sentinel) as mock_batch:
+            from bot.scanner.fetcher import download_intraday_5m
+            download_intraday_5m(symbols)
+
+        call_kwargs = mock_batch.call_args[1]
+        assert call_kwargs.get("abort_event") == "tod_baseline_scan_aborted_data_degradation", (
+            f"abort_event must be 'tod_baseline_scan_aborted_data_degradation'; "
+            f"got {call_kwargs.get('abort_event')!r}"
+        )
+        assert call_kwargs.get("partial_event") == "tod_baseline_partial_data", (
+            f"partial_event must be 'tod_baseline_partial_data'; "
+            f"got {call_kwargs.get('partial_event')!r}"
+        )
