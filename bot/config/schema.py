@@ -79,7 +79,9 @@ SCHEMA = {
                 "I1_above_premarket_high": {"type": "boolean"},
                 "I2_above_today_hod": {"type": "boolean"},
                 "I3_rvol_min": {"type": "number"},
-                "I3_rvol_lookback_days": {"type": "integer"}
+                "I3_rvol_lookback_days": {"type": "integer"},
+                # Phase 7 addition (optional — loader provides default=14)
+                "I3_rvol_tod_lookback_days": {"type": "integer"}
             }
         },
 
@@ -133,7 +135,9 @@ SCHEMA = {
                 "max_position_size_pct_of_portfolio": {"type": "number"},
                 "max_concurrent_positions": {"type": "integer"},
                 "max_trades_per_day": {"type": "integer"},
-                "sizing_equity_usd": {"type": ["number", "null"]}
+                "sizing_equity_usd": {"type": ["number", "null"]},
+                # Phase 7 addition (optional — loader provides default=2.0)
+                "daily_circuit_breaker_r": {"type": "number"}
             }
         },
 
@@ -164,7 +168,9 @@ SCHEMA = {
                 "exit_escalation_step_usd":               {"type": "number"},
                 "exit_escalation_cadence_seconds":        {"type": "number"},
                 "force_close_escalation_step_usd":        {"type": "number"},
-                "force_close_escalation_cadence_seconds": {"type": "number"}
+                "force_close_escalation_cadence_seconds": {"type": "number"},
+                # Phase 7 addition (optional — loader provides default=True)
+                "use_broker_stop_orders":                 {"type": "boolean"}
             }
         },
 

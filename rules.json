@@ -18,7 +18,8 @@
     "I1_above_premarket_high": true,
     "I2_above_today_hod": true,
     "I3_rvol_min": 2.0,
-    "I3_rvol_lookback_days": 14
+    "I3_rvol_lookback_days": 14,
+    "I3_rvol_tod_lookback_days": 14
   },
 
   "time_filter": {
@@ -40,7 +41,8 @@
     "max_position_size_pct_of_portfolio": 10,
     "max_concurrent_positions": 5,
     "max_trades_per_day": 5,
-    "sizing_equity_usd": 100000
+    "sizing_equity_usd": 100000,
+    "daily_circuit_breaker_r": 2.0
   },
 
   "execution": {
@@ -53,7 +55,8 @@
     "exit_escalation_step_usd": 0.10,
     "exit_escalation_cadence_seconds": 10,
     "force_close_escalation_step_usd": 0.20,
-    "force_close_escalation_cadence_seconds": 15
+    "force_close_escalation_cadence_seconds": 15,
+    "use_broker_stop_orders": true
   },
 
   "service": {

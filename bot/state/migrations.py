@@ -217,15 +217,71 @@ def _migration_0004(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {decl}")
 
 
+# ============================================================
+# Migration 0005 — Phase 7 tod_baselines table + broker_stop_order_id column
+# ============================================================
+#
+# New table:
+#   tod_baselines  — 14-session average cumulative session volume per
+#                    (scan_date, code, time_bucket) for the RVOL-TOD gate.
+#                    Composite PRIMARY KEY (scan_date, code, time_bucket) enforces
+#                    one row per time bucket per candidate per scan date.
+#
+# New column on positions:
+#   broker_stop_order_id — TEXT, nullable. Set to the broker-assigned order_id
+#                          after place_stop_order() succeeds (D-01/D-04).
+#                          NULL before the first stop is placed.
+#
+# WR-03: callable (not SQL string) so CREATE TABLE and ALTER TABLE commit
+# atomically with the PRAGMA user_version bump in run_migrations().
+# Uses conn.execute() not executescript() (same pattern as 0003/0004).
+# CREATE TABLE IF NOT EXISTS is idempotent for the new table.
+# PRAGMA table_info guard makes the ALTER TABLE idempotent (same as 0002/0004).
+
+_POSITIONS_0005_COLUMNS = (
+    ("broker_stop_order_id", "TEXT"),   # broker order_id of the live protective stop (D-01/D-04)
+)
+
+
+def _migration_0005(conn: sqlite3.Connection) -> None:
+    """Add Phase 7 tod_baselines table + broker_stop_order_id column on positions.
+
+    tod_baselines: stores 14-day average cumulative session volume per
+    (scan_date, code, time_bucket) for the RVOL-TOD gate (SIG-RVOL-TOD).
+
+    broker_stop_order_id: nullable column on positions — null before the first
+    stop is placed; set to the broker order_id after place_stop_order() succeeds (D-01).
+
+    Uses CREATE TABLE IF NOT EXISTS for the new table (idempotent without a guard).
+    Uses PRAGMA table_info guard on the ALTER TABLE (WR-03 pattern from 0002/0004).
+    Uses conn.execute() (not executescript) for atomic commit with user_version
+    bump in run_migrations() (WR-03, see note at lines 143-152).
+
+    D-08: never edit shipped migrations 0001-0004 — new objects always in 0005.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS tod_baselines (
+        scan_date    TEXT NOT NULL,
+        code         TEXT NOT NULL,
+        time_bucket  TEXT NOT NULL,
+        cum_vol_mean REAL NOT NULL,
+        PRIMARY KEY (scan_date, code, time_bucket)
+    )""")
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(positions)")}
+    for col, decl in _POSITIONS_0005_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {decl}")
+
+
 MIGRATIONS = [
     _MIGRATION_0001,
     _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
     _migration_0003,   # adds daily_trade_count + pending_intents (Phase 3, D-08/D-12)
     _migration_0004,   # adds entry_order_id, exit_order_id, avg_fill_price (Phase 4)
+    _migration_0005,   # Phase 7: tod_baselines table + broker_stop_order_id on positions
 ]
 
 
-CURRENT_VERSION = 4
+CURRENT_VERSION = 5
 
 
 # ============================================================
