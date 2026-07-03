@@ -287,3 +287,104 @@ class TestSizingEquityUsd:
         assert cfg.sizing_equity_usd == 200_000, (
             f"Explicit value must be loaded; got {cfg.sizing_equity_usd}"
         )
+
+
+# ============================================================
+# Phase 7 config keys — daily_circuit_breaker_r, use_broker_stop_orders,
+# rvol_tod_lookback_days (CFG-01, D-02/D-05)
+# ============================================================
+
+# CANONICAL_RULES_WITH_PHASE7 extends the existing CANONICAL_RULES with the
+# three new Phase 7 keys so tests can load a fully-specified rules.json.
+CANONICAL_RULES_WITH_PHASE7 = {
+    **CANONICAL_RULES,
+    "risk": {**CANONICAL_RULES["risk"], "daily_circuit_breaker_r": 2.0},
+    "execution": {**CANONICAL_RULES["execution"], "use_broker_stop_orders": True},
+    "intraday_filters": {
+        **CANONICAL_RULES["intraday_filters"],
+        "I3_rvol_tod_lookback_days": 14,
+    },
+    "service": {
+        **CANONICAL_RULES["service"],
+        "premarket_scan_et": "08:30",
+        "market_open_et": "09:30",
+        "intraday_rescan_interval_min": 30,
+        "intraday_rescan_start_et": "09:55",
+        "intraday_rescan_end_et": "12:55",
+        "eod_report_et": "15:55",
+        "watchdog_poll_interval_s": 60,
+        "watchdog_reconnect_initial_s": 5,
+        "watchdog_reconnect_cap_s": 60,
+        "alerts_enabled": True,
+        "misfire_grace_scan_s": 3600,
+        "misfire_grace_rescan_s": 600,
+        "force_close_misfire_grace_s": 300,
+        "launchd_throttle_interval_s": 30,
+        "crash_loop_alert_threshold": 5,
+    },
+}
+
+
+@pytest.fixture
+def rules_file_phase7(tmp_path):
+    """Write Phase 7 extended rules.json (includes the 3 new keys) to a tmp file."""
+    path = tmp_path / "rules_phase7.json"
+    path.write_text(json.dumps(CANONICAL_RULES_WITH_PHASE7), encoding="utf-8")
+    return str(path)
+
+
+class TestPhase7ConfigKeys:
+    """Tests for the three new Phase 7 StrategyConfig fields (CFG-01, D-02/D-05)."""
+
+    def test_load_real_rules_json_has_daily_circuit_breaker_r(self):
+        """load_strategy_config on the real rules.json must yield cfg.daily_circuit_breaker_r == 2.0."""
+        cfg = load_strategy_config("rules.json")
+        assert cfg.daily_circuit_breaker_r == 2.0, (
+            f"Expected daily_circuit_breaker_r=2.0; got {cfg.daily_circuit_breaker_r}"
+        )
+
+    def test_load_real_rules_json_has_use_broker_stop_orders(self):
+        """load_strategy_config on the real rules.json must yield cfg.use_broker_stop_orders is True."""
+        cfg = load_strategy_config("rules.json")
+        assert cfg.use_broker_stop_orders is True, (
+            f"Expected use_broker_stop_orders=True; got {cfg.use_broker_stop_orders}"
+        )
+
+    def test_load_real_rules_json_has_rvol_tod_lookback_days(self):
+        """load_strategy_config on the real rules.json must yield cfg.rvol_tod_lookback_days == 14."""
+        cfg = load_strategy_config("rules.json")
+        assert cfg.rvol_tod_lookback_days == 14, (
+            f"Expected rvol_tod_lookback_days=14; got {cfg.rvol_tod_lookback_days}"
+        )
+
+    def test_daily_circuit_breaker_r_wrong_type_raises_config_error(self, tmp_path):
+        """risk.daily_circuit_breaker_r set to a string must raise ConfigError (type=number)."""
+        bad = json.loads(json.dumps(CANONICAL_RULES_WITH_PHASE7))
+        bad["risk"]["daily_circuit_breaker_r"] = "two"  # wrong type
+        path = tmp_path / "bad_cbr.json"
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_strategy_config(str(path))
+
+    def test_use_broker_stop_orders_wrong_type_raises_config_error(self, tmp_path):
+        """execution.use_broker_stop_orders set to a string must raise ConfigError (type=boolean)."""
+        bad = json.loads(json.dumps(CANONICAL_RULES_WITH_PHASE7))
+        bad["execution"]["use_broker_stop_orders"] = "yes"  # wrong type
+        path = tmp_path / "bad_ubso.json"
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_strategy_config(str(path))
+
+    def test_phase7_keys_absent_use_safe_defaults(self, tmp_path):
+        """When the three new keys are absent, loader must use safe defaults (no KeyError).
+
+        defaults: daily_circuit_breaker_r=2.0, use_broker_stop_orders=True,
+                  rvol_tod_lookback_days=14.
+        """
+        # CANONICAL_RULES does NOT contain the three new Phase 7 keys
+        path = tmp_path / "rules_no_p7.json"
+        path.write_text(json.dumps(CANONICAL_RULES), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.daily_circuit_breaker_r == 2.0
+        assert cfg.use_broker_stop_orders is True
+        assert cfg.rvol_tod_lookback_days == 14
