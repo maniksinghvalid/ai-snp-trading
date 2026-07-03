@@ -541,3 +541,39 @@ def download_intraday_1m(
         partial_event="intraday_partial_data",
         degradation_message="Intraday data degradation",
     )
+
+
+def download_intraday_5m(
+    yf_symbols: list,
+    threads: int = 5,
+    degradation_threshold: float = 0.10,
+) -> Tuple[object, Set[str]]:
+    """Download ~30-calendar-day 5m intraday OHLCV bars for TOD baseline computation (SIG-RVOL-TOD).
+
+    Uses yf.download(interval="5m", period="30d", prepost=False) — gives ~21 trading
+    sessions, sufficient for the 14-session TOD lookback (cfg.rvol_tod_lookback_days).
+    prepost=False: only regular-session bars feed the cumulative-volume baseline
+    (RESEARCH Assumption A2 / Pitfall 4 — ET-bucketing of pre/post bars is unreliable).
+
+    Mirrors download_intraday_1m contract exactly: same _download_batch delegate,
+    same bounded-concurrency (threads) and degradation-gate (degradation_threshold)
+    semantics, same (frame, failed_set) return. Event names are distinct:
+      abort: "tod_baseline_scan_aborted_data_degradation"
+      partial: "tod_baseline_partial_data"
+
+    yf_symbols: list of str — yfinance-format symbols (e.g. ["AAPL", "BRK-B"]).
+    threads: int — number of download threads (default 5, bounded concurrency).
+    degradation_threshold: float — fraction of failures that triggers abort (D-06).
+    Returns (data, failed_set): data is the yf.download result; failed_set is the
+        set of ticker strings with no usable 5m data.
+    Raises ScanDegradationError when failure_rate >= degradation_threshold.
+    """
+    return _download_batch(
+        yf_symbols,
+        threads=threads,
+        degradation_threshold=degradation_threshold,
+        download_kwargs={"period": "30d", "interval": "5m", "prepost": False},
+        abort_event="tod_baseline_scan_aborted_data_degradation",
+        partial_event="tod_baseline_partial_data",
+        degradation_message="TOD baseline 5m data degradation",
+    )

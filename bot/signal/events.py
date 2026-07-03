@@ -29,7 +29,7 @@ class BarEvent:
         high: Highest price of the closed bar.
         low: Lowest price of the closed bar.
         close: Closing price of the closed bar.
-        volume: Volume of the closed bar.
+        volume: Volume of the closed bar (single bar — not cumulative).
         hod: Session running max of all pushed highs (mid-bar and bar-close) accumulated
              up to and INCLUDING this bar's last push, EXCLUDING the new bar's first tick.
              Updated eagerly on every K_5M push during bar A's lifetime, then snapshotted
@@ -38,6 +38,10 @@ class BarEvent:
              INCLUDING this bar's last push, EXCLUDING the new bar's first tick.
              Equivalent to the cumulative session low-of-day at the moment bar A closed
              (D-02, RESEARCH Pitfall 3; feeds compute_initial_stop(lod) in RiskEngine).
+        cum_volume: Cumulative session volume through and including this bar (Phase 7 RVOL-TOD).
+             Accumulated by BarAggregator._session_volume per code; reset to 0 at reset_session().
+             Defaults to 0 so existing BarEvent constructions without this field remain valid.
+             Consumed by SignalEngine Gate I3-TOD in plan 07-05.
     """
 
     code: str
@@ -49,6 +53,7 @@ class BarEvent:
     volume: int
     hod: float
     lod: float
+    cum_volume: int = 0   # cumulative session volume through and including this bar (Phase 7 RVOL-TOD)
 
 
 @dataclass

@@ -460,3 +460,186 @@ class TestBarAggregatorMalformed:
         assert len(calls) == 0, (
             f"Malformed rows must not fire on_bar_closed; got {len(calls)} call(s)"
         )
+
+
+# ============================================================
+# Phase 7 SIG-RVOL-TOD: cumulative session volume (cum_volume)
+# ============================================================
+
+class TestCumulativeSessionVolume:
+    """BarEvent.cum_volume and BarAggregator._session_volume accumulator (Phase 7 SIG-RVOL-TOD).
+
+    Verified behaviors:
+      (a) BarEvent defaults cum_volume=0 so existing positional constructions remain valid.
+      (b) A sequence of closed bars for one code accumulates cum_volume monotonically.
+      (c) Two codes accumulate independently (per-code isolation).
+      (d) reset_session() clears _session_volume — next closed bar restarts at its own volume.
+    """
+
+    def test_bar_event_cum_volume_defaults_to_zero(self):
+        """BarEvent constructed without cum_volume argument must have cum_volume=0 (backward compat)."""
+        from bot.signal.events import BarEvent
+        event = BarEvent(
+            code="US.AAPL",
+            time_key="2026-07-03 10:05:00",
+            open=150.0,
+            high=155.0,
+            low=149.0,
+            close=154.0,
+            volume=100_000,
+            hod=155.0,
+            lod=149.0,
+        )
+        assert event.cum_volume == 0, (
+            f"BarEvent without cum_volume must default to 0; got {event.cum_volume}"
+        )
+
+    def test_cum_volume_accumulates_monotonically(self, event_loop_and_counter):
+        """Feeding successive closed bars for one code makes cum_volume increase by each bar's volume.
+
+        Three bars with volumes 100_000, 200_000, 300_000 must emit:
+          bar1.cum_volume = 100_000
+          bar2.cum_volume = 300_000 (100_000 + 200_000)
+          bar3.cum_volume = 600_000 (300_000 + 300_000)
+        """
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+
+        bar1 = _make_row(time_key="2026-07-03 10:05:00", volume=100_000)
+        bar2 = _make_row(time_key="2026-07-03 10:10:00", volume=200_000)
+        bar3 = _make_row(time_key="2026-07-03 10:15:00", volume=300_000)
+        bar4 = _make_row(time_key="2026-07-03 10:20:00", volume=50_000)
+
+        agg.on_recv_rsp(bar1)  # seeds T1 — no emit yet
+        agg.on_recv_rsp(bar2)  # T1 closes (vol=100_000) → fire #1
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+
+        agg.on_recv_rsp(bar3)  # T2 closes (vol=200_000) → fire #2
+        _drain(loop, calls, expected_count=2, timeout=0.5)
+
+        agg.on_recv_rsp(bar4)  # T3 closes (vol=300_000) → fire #3
+        _drain(loop, calls, expected_count=3, timeout=0.5)
+
+        assert len(calls) == 3, f"Expected 3 bar-close events, got {len(calls)}"
+
+        assert calls[0]["cum_volume"] == 100_000, (
+            f"bar1 cum_volume must be 100_000 (first bar), got {calls[0]['cum_volume']}"
+        )
+        assert calls[1]["cum_volume"] == 300_000, (
+            f"bar2 cum_volume must be 300_000 (100k+200k), got {calls[1]['cum_volume']}"
+        )
+        assert calls[2]["cum_volume"] == 600_000, (
+            f"bar3 cum_volume must be 600_000 (300k+300k), got {calls[2]['cum_volume']}"
+        )
+        # Verify per-bar volume field is unchanged (still the individual bar's volume)
+        assert calls[2]["volume"] == 300_000, (
+            f"Individual bar volume must be 300_000 (not cumulative), got {calls[2]['volume']}"
+        )
+
+    def test_cum_volume_is_per_code_isolated(self, event_loop_and_counter):
+        """Two codes must accumulate cum_volume independently; one code's bars don't affect the other."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+
+        aapl1 = _make_row(code="US.AAPL", time_key="2026-07-03 10:05:00", volume=100_000)
+        aapl2 = _make_row(code="US.AAPL", time_key="2026-07-03 10:10:00", volume=200_000)
+        msft1 = _make_row(code="US.MSFT", time_key="2026-07-03 10:05:00", volume=50_000)
+        msft2 = _make_row(code="US.MSFT", time_key="2026-07-03 10:10:00", volume=75_000)
+        aapl3 = _make_row(code="US.AAPL", time_key="2026-07-03 10:15:00", volume=10_000)
+        msft3 = _make_row(code="US.MSFT", time_key="2026-07-03 10:15:00", volume=10_000)
+
+        # Interleave AAPL and MSFT feeds — each code must accumulate its own session volume
+        agg.on_recv_rsp(aapl1)   # seeds AAPL T1
+        agg.on_recv_rsp(msft1)   # seeds MSFT T1
+        agg.on_recv_rsp(aapl2)   # AAPL T1 closes (vol=100_000) → fire
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+        agg.on_recv_rsp(msft2)   # MSFT T1 closes (vol=50_000) → fire
+        _drain(loop, calls, expected_count=2, timeout=0.5)
+        agg.on_recv_rsp(aapl3)   # AAPL T2 closes (vol=200_000) → fire
+        _drain(loop, calls, expected_count=3, timeout=0.5)
+        agg.on_recv_rsp(msft3)   # MSFT T2 closes (vol=75_000) → fire
+        _drain(loop, calls, expected_count=4, timeout=0.5)
+
+        assert len(calls) == 4, f"Expected 4 bar-close events, got {len(calls)}"
+
+        # Separate calls by code
+        aapl_calls = [c for c in calls if c["code"] == "US.AAPL"]
+        msft_calls = [c for c in calls if c["code"] == "US.MSFT"]
+
+        assert len(aapl_calls) == 2, f"Expected 2 AAPL closes, got {len(aapl_calls)}"
+        assert len(msft_calls) == 2, f"Expected 2 MSFT closes, got {len(msft_calls)}"
+
+        # AAPL: 100_000, then 300_000 (100k+200k)
+        assert aapl_calls[0]["cum_volume"] == 100_000, (
+            f"AAPL bar1 cum_volume must be 100_000, got {aapl_calls[0]['cum_volume']}"
+        )
+        assert aapl_calls[1]["cum_volume"] == 300_000, (
+            f"AAPL bar2 cum_volume must be 300_000, got {aapl_calls[1]['cum_volume']}"
+        )
+        # MSFT: 50_000, then 125_000 (50k+75k)
+        assert msft_calls[0]["cum_volume"] == 50_000, (
+            f"MSFT bar1 cum_volume must be 50_000, got {msft_calls[0]['cum_volume']}"
+        )
+        assert msft_calls[1]["cum_volume"] == 125_000, (
+            f"MSFT bar2 cum_volume must be 125_000, got {msft_calls[1]['cum_volume']}"
+        )
+
+    def test_reset_session_clears_cum_volume(self, event_loop_and_counter):
+        """reset_session() must clear _session_volume so the next bar restarts from its own volume.
+
+        Sequence:
+          1. Feed two bars (cum_volume = 100k + 200k = 300k after bar1 closes).
+          2. Call reset_session().
+          3. Feed two more bars for the same code.
+          4. The first bar after reset must have cum_volume == just that bar's volume.
+
+        This is Pitfall 1 (RESEARCH): cross-session carryover would give a wrong RVOL-TOD
+        numerator on day 2 — reset_session() must be idempotent and zero-out the accumulator.
+        """
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+
+        # Session 1: two bars
+        bar1 = _make_row(code="US.AAPL", time_key="2026-07-03 10:05:00", volume=100_000)
+        bar2 = _make_row(code="US.AAPL", time_key="2026-07-03 10:10:00", volume=200_000)
+        bar3 = _make_row(code="US.AAPL", time_key="2026-07-03 10:15:00", volume=999)  # trigger bar2 close
+
+        agg.on_recv_rsp(bar1)
+        agg.on_recv_rsp(bar2)  # closes bar1
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+
+        agg.on_recv_rsp(bar3)  # closes bar2
+        _drain(loop, calls, expected_count=2, timeout=0.5)
+
+        # bar2 close must carry the session-cumulative volume (100k + 200k = 300k)
+        assert calls[1]["cum_volume"] == 300_000, (
+            f"Before reset, bar2 cum_volume must be 300_000; got {calls[1]['cum_volume']}"
+        )
+
+        # --- reset session (simulates start of new trading day) ---
+        agg.reset_session()
+
+        # Session 2: two more bars — cum_volume must restart from the first bar's own volume
+        bar4 = _make_row(code="US.AAPL", time_key="2026-07-04 10:05:00", volume=555_000)
+        bar5 = _make_row(code="US.AAPL", time_key="2026-07-04 10:10:00", volume=111_000)
+        bar6 = _make_row(code="US.AAPL", time_key="2026-07-04 10:15:00", volume=1)
+
+        agg.on_recv_rsp(bar4)
+        agg.on_recv_rsp(bar5)  # closes bar4 → must be 555_000 (NOT 300_000 + 555_000)
+        _drain(loop, calls, expected_count=3, timeout=0.5)
+
+        agg.on_recv_rsp(bar6)  # closes bar5
+        _drain(loop, calls, expected_count=4, timeout=0.5)
+
+        assert len(calls) == 4, f"Expected 4 total bar-close events, got {len(calls)}"
+
+        # After reset, bar4 close must carry ONLY bar4's volume (no carryover from session 1)
+        assert calls[2]["cum_volume"] == 555_000, (
+            f"After reset_session, bar4 cum_volume must be 555_000 (no carryover), "
+            f"got {calls[2]['cum_volume']}"
+        )
+        # bar5 close must carry 555_000 + 111_000 = 666_000
+        assert calls[3]["cum_volume"] == 666_000, (
+            f"After reset_session, bar5 cum_volume must be 666_000, "
+            f"got {calls[3]['cum_volume']}"
+        )
