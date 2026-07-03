@@ -122,6 +122,7 @@ class BarAggregator(CurKlineHandlerBase):
         self._lod: Dict[str, float] = {}
         self._cur_bar: Dict[str, dict] = {}  # in-progress bar snapshot (SIG-02 no-repaint)
         self._bar_buffer: Dict[str, deque] = {}
+        self._session_volume: Dict[str, int] = {}  # cumulative session volume per code (Phase 7 RVOL-TOD)
 
     def reset_session(self) -> None:
         """Clear all per-session state at market open (called once at start of day).
@@ -136,6 +137,7 @@ class BarAggregator(CurKlineHandlerBase):
         self._lod.clear()
         self._cur_bar.clear()
         self._bar_buffer.clear()
+        self._session_volume.clear()  # Phase 7: reset cumulative volume for new session (Pitfall 1)
         _logger.info("bar_aggregator_session_reset")
 
     def on_recv_rsp(self, rsp_pb):
@@ -285,6 +287,12 @@ class BarAggregator(CurKlineHandlerBase):
                 "close": close, "volume": volume,
             }
 
+            # Accumulate per-code session volume BEFORE building bar_data (Phase 7 RVOL-TOD).
+            # Uses bar A's FINAL volume from closed_ohlcv (the no-repaint snapshot).
+            # Assumption A2 (RESEARCH): K_5M volume is per-bar, NOT cumulative — safe to sum.
+            closed_vol = closed_ohlcv["volume"]
+            self._session_volume[code] = self._session_volume.get(code, 0) + closed_vol
+
             # Build the closed-bar event dict using bar A's FINAL values.
             bar_data = {
                 "code": code,
@@ -296,6 +304,7 @@ class BarAggregator(CurKlineHandlerBase):
                 "volume": closed_ohlcv["volume"],
                 "hod": snap_hod,  # session max EXCLUDING bar B's first tick
                 "lod": snap_lod,  # session min EXCLUDING bar B's first tick
+                "cum_volume": self._session_volume[code],  # cumulative session volume (Phase 7 RVOL-TOD)
             }
 
             # Add to per-code rolling bar buffer (consumed by SignalEngine).

@@ -241,7 +241,7 @@ class TradingBot:
           3. D-06 gate: if not _entries_enabled, return (entry branch blocked).
           4. Entry branch: signal_engine.on_bar -> risk_engine.on_signal -> consume_intent.
 
-        bar_data keys: code, time_key, open, high, low, close, volume, hod, lod.
+        bar_data keys: code, time_key, open, high, low, close, volume, hod, lod, cum_volume.
         """
         from bot.signal.events import BarEvent
         try:
@@ -255,6 +255,7 @@ class TradingBot:
                 volume=bar_data["volume"],
                 hod=bar_data["hod"],
                 lod=bar_data["lod"],
+                cum_volume=bar_data.get("cum_volume", 0),  # Phase 7 RVOL-TOD cumulative volume
             )
         except Exception:
             _logger.warning(
