@@ -1899,3 +1899,306 @@ class TestExternalCodeExclusion:
             "run_intraday_rescan: on GatewayError must proceed with full list (fail-open)"
         )
         assert "US.AAPL" in result
+
+
+# ============================================================
+# Phase 7 SIG-RVOL-TOD: TOD baseline computation (Plan 07-02)
+# ============================================================
+
+def _make_5m_frame(sessions: list, volume_per_bar: float = 100_000.0) -> "pd.DataFrame":
+    """Build a synthetic 5m OHLCV DataFrame with ET-timezone-aware DatetimeIndex.
+
+    sessions: list of date objects, one per trading session.
+    Each session gets 13 regular-session 5m bars (09:30–16:00 ET: 13 bars per session).
+    volume_per_bar: uniform Volume value per bar.
+
+    Returns DataFrame with ET-aware DatetimeIndex and 'Volume' column (capital V,
+    matching yfinance output).
+    """
+    from zoneinfo import ZoneInfo
+    import datetime as _dt
+    _ET = ZoneInfo("America/New_York")
+    rows = []
+    # 13 bars: 09:30, 09:35, 09:40, ..., 10:30 ET (one session subset for simplicity)
+    bar_times = [
+        _dt.time(9, 30), _dt.time(9, 35), _dt.time(9, 40), _dt.time(9, 45),
+        _dt.time(9, 50), _dt.time(9, 55), _dt.time(10, 0), _dt.time(10, 5),
+        _dt.time(10, 10), _dt.time(10, 15), _dt.time(10, 20), _dt.time(10, 25),
+        _dt.time(10, 30),
+    ]
+    for sess_date in sessions:
+        for t in bar_times:
+            dt_et = _dt.datetime.combine(sess_date, t, tzinfo=_ET)
+            rows.append({"timestamp": dt_et, "Volume": volume_per_bar,
+                         "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5})
+    df = pd.DataFrame(rows)
+    df = df.set_index("timestamp")
+    return df
+
+
+class TestComputeTodBaselines:
+    """Unit tests for scanner._compute_tod_baselines helper (Phase 7 SIG-RVOL-TOD).
+
+    Tests the pure function in isolation — no store, no network.
+    """
+
+    def test_baseline_dict_structure_and_values(self):
+        """_compute_tod_baselines returns {"HH:MM": float} dict with correct cumulative means.
+
+        Setup: 3 sessions, each with 4 bars at 09:30, 09:35, 09:40, 09:45 ET.
+        Volume per bar: 100_000. Cumulative volumes per session:
+          09:30 → 100_000 (cumsum after first bar)
+          09:35 → 200_000
+          09:40 → 300_000
+          09:45 → 400_000
+        Expected baselines (mean over 3 identical sessions): same values.
+        """
+        from bot.scanner.scanner import _compute_tod_baselines
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+
+        sessions = [
+            date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3),
+        ]
+        bar_times = [_dt.time(9, 30), _dt.time(9, 35), _dt.time(9, 40), _dt.time(9, 45)]
+        rows = []
+        for sess in sessions:
+            for t in bar_times:
+                dt_et = _dt.datetime.combine(sess, t, tzinfo=_ET)
+                rows.append({"Volume": 100_000.0, "Open": 100.0, "High": 101.0,
+                             "Low": 99.0, "Close": 100.5})
+                # Store as index
+        idx = []
+        for sess in sessions:
+            for t in bar_times:
+                idx.append(_dt.datetime.combine(sess, t, tzinfo=_ET))
+
+        df = pd.DataFrame(rows, index=idx)
+        df.index.name = "timestamp"
+
+        baselines = _compute_tod_baselines(df, lookback_days=14)
+
+        assert isinstance(baselines, dict), "Must return a dict"
+        assert "09:30" in baselines, "Must have '09:30' bucket"
+        assert "09:45" in baselines, "Must have '09:45' bucket"
+        # First bucket: cumsum after bar 1 = 100_000 (mean over 3 identical sessions)
+        assert abs(baselines["09:30"] - 100_000.0) < 1.0, (
+            f"09:30 baseline must be ~100_000; got {baselines['09:30']}"
+        )
+        # Last bucket: cumsum after bar 4 = 400_000
+        assert abs(baselines["09:45"] - 400_000.0) < 1.0, (
+            f"09:45 baseline must be ~400_000; got {baselines['09:45']}"
+        )
+
+    def test_lookback_days_limits_sessions(self):
+        """_compute_tod_baselines uses only the most recent lookback_days sessions.
+
+        Setup: 5 sessions available. lookback_days=2. Only the 2 most recent sessions
+        should be averaged. The oldest 3 sessions have volume 50_000/bar; the 2 newest
+        have volume 200_000/bar. Mean of 2 newest ≠ mean of all 5.
+        """
+        from bot.scanner.scanner import _compute_tod_baselines
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+
+        # 5 sessions: first 3 have volume=50k, last 2 have volume=200k
+        sessions_old = [date(2026, 6, 28), date(2026, 6, 29), date(2026, 6, 30)]
+        sessions_new = [date(2026, 7, 1), date(2026, 7, 2)]
+        bar_time = _dt.time(9, 30)
+
+        rows = []
+        idx = []
+        for sess in sessions_old:
+            dt_et = _dt.datetime.combine(sess, bar_time, tzinfo=_ET)
+            idx.append(dt_et)
+            rows.append({"Volume": 50_000.0, "Open": 100.0, "High": 101.0,
+                         "Low": 99.0, "Close": 100.5})
+        for sess in sessions_new:
+            dt_et = _dt.datetime.combine(sess, bar_time, tzinfo=_ET)
+            idx.append(dt_et)
+            rows.append({"Volume": 200_000.0, "Open": 100.0, "High": 101.0,
+                         "Low": 99.0, "Close": 100.5})
+
+        df = pd.DataFrame(rows, index=idx)
+
+        baselines = _compute_tod_baselines(df, lookback_days=2)
+
+        # Mean of 2 newest sessions: 200_000 each (cumsum after single bar = 200_000)
+        assert abs(baselines.get("09:30", -1) - 200_000.0) < 1.0, (
+            f"lookback_days=2 must average only the 2 newest sessions (200k each); "
+            f"got {baselines.get('09:30')}"
+        )
+
+    def test_utc_indexed_frame_bucketed_in_et(self):
+        """UTC-indexed 5m frame must be converted to ET before time-bucket assignment (Pitfall 4).
+
+        A bar at 14:30 UTC == 10:30 ET. If we bucket by UTC the key is '14:30';
+        if we bucket by ET the key is '10:30'. The baseline dict must use '10:30'.
+        """
+        from bot.scanner.scanner import _compute_tod_baselines
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _UTC = ZoneInfo("UTC")
+
+        # 14:30 UTC = 10:30 ET (EDT, UTC-4 in summer)
+        dt_utc = _dt.datetime(2026, 7, 1, 14, 30, tzinfo=_UTC)
+        df = pd.DataFrame(
+            [{"Volume": 100_000.0, "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5}],
+            index=[dt_utc],
+        )
+
+        baselines = _compute_tod_baselines(df, lookback_days=14)
+
+        assert "10:30" in baselines, (
+            f"UTC 14:30 must bucket as ET '10:30' (EDT UTC-4); "
+            f"got keys: {list(baselines.keys())}"
+        )
+        assert "14:30" not in baselines, (
+            "UTC '14:30' bucket must NOT appear — index was not properly converted to ET"
+        )
+
+
+class TestTodBaselineIntegration:
+    """Integration tests: premarket scan calls upsert_tod_baselines per candidate (Phase 7).
+
+    Tests the full run_daily_scan path with mocked fetcher/store to verify:
+      - upsert_tod_baselines is called once per passing candidate with 5m data
+      - empty/missing 5m frame does NOT call upsert_tod_baselines and does not raise
+    """
+
+    def test_premarket_scan_calls_upsert_tod_baselines_for_passing_candidate(self, tmp_state_db):
+        """upsert_tod_baselines is called once per passing candidate that has 5m data."""
+        from bot.scanner.scanner import run_daily_scan
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+
+        scan_date = date(2026, 7, 3)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+        premarket_now_et = _dt.datetime(2026, 7, 3, 8, 30, tzinfo=_ET)
+
+        # Build a passing AAPL frame (220 days to satisfy SMA200 + RVOL lookback)
+        prior_frame = _make_daily_frame(
+            n_days=220,
+            prior_close=100.0,
+            prior_high=105.0,
+            today_open=107.0,
+            today_close=108.0,
+            volume_today=3_000_000.0,
+            volume_prior=1_000_000.0,
+            scan_date=scan_date,
+        )
+        # 1m premarket data that resolves to 107.0 (above prior_high 105 → D1 ✓)
+        from bot.scanner.fetcher import TodayPrice as _TP
+
+        # Build a 5m frame for 3 sessions (enough for TOD baseline)
+        sessions_5m = [date(2026, 6, 30), date(2026, 7, 1), date(2026, 7, 2)]
+        frame_5m = _make_5m_frame(sessions=sessions_5m, volume_per_bar=100_000.0)
+
+        daily_sentinel = {"_type": "daily"}
+        intraday_1m_sentinel = {"_type": "1m"}
+
+        def _gtf_by_data(data, sym):
+            if isinstance(data, dict) and data.get("_type") == "1m":
+                return None  # force resolve_today_price to return None
+            return prior_frame
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+             patch("bot.scanner.scanner.download_daily_bars",
+                   return_value=(daily_sentinel, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m",
+                   return_value=(intraday_1m_sentinel, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=_gtf_by_data), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   return_value=_TP(today_open=107.0, today_price=107.0, today_high=108.0)), \
+             patch("bot.scanner.scanner.download_intraday_5m",
+                   return_value=({"AAPL": frame_5m}, set())) as mock_5m_dl, \
+             patch("bot.scanner.scanner.now_et", return_value=premarket_now_et), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        # upsert_tod_baselines should have been called for US.AAPL
+        tod_rows = store.conn.execute(
+            "SELECT COUNT(*) FROM tod_baselines WHERE scan_date=? AND code=?",
+            (scan_date.isoformat(), "US.AAPL"),
+        ).fetchone()[0]
+        store.close()
+
+        assert "US.AAPL" in result, "AAPL must be in watchlist (gap 7% > 3% threshold)"
+        assert tod_rows > 0, (
+            f"tod_baselines must have at least 1 row for US.AAPL after premarket scan; "
+            f"got {tod_rows}"
+        )
+
+    def test_missing_5m_data_does_not_call_upsert_and_does_not_raise(self, tmp_state_db):
+        """If 5m download returns no frame for a candidate, upsert_tod_baselines is NOT called
+        and the scan does not raise (graceful degradation to legacy RVOL path)."""
+        from bot.scanner.scanner import run_daily_scan
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+
+        scan_date = date(2026, 7, 3)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+        premarket_now_et = _dt.datetime(2026, 7, 3, 8, 30, tzinfo=_ET)
+
+        prior_frame = _make_daily_frame(
+            n_days=220,
+            prior_close=100.0,
+            prior_high=105.0,
+            today_open=107.0,
+            today_close=108.0,
+            volume_today=3_000_000.0,
+            volume_prior=1_000_000.0,
+            scan_date=scan_date,
+        )
+        from bot.scanner.fetcher import TodayPrice as _TP
+
+        daily_sentinel = {"_type": "daily"}
+        intraday_1m_sentinel = {"_type": "1m"}
+
+        def _gtf_by_data(data, sym):
+            if isinstance(data, dict) and data.get("_type") == "1m":
+                return None
+            return prior_frame
+
+        store = StateStore()
+        store.open()
+
+        # Patch upsert_tod_baselines to detect if it's called
+        called_codes = []
+        original_upsert = store.upsert_tod_baselines
+
+        def _track_upsert(scan_date_str, code, baselines):
+            called_codes.append(code)
+            original_upsert(scan_date_str, code, baselines)
+
+        store.upsert_tod_baselines = _track_upsert
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+             patch("bot.scanner.scanner.download_daily_bars",
+                   return_value=(daily_sentinel, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m",
+                   return_value=(intraday_1m_sentinel, set())), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=_gtf_by_data), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   return_value=_TP(today_open=107.0, today_price=107.0, today_high=108.0)), \
+             patch("bot.scanner.scanner.download_intraday_5m",
+                   return_value=({}, set())) as mock_5m_dl, \
+             patch("bot.scanner.scanner.now_et", return_value=premarket_now_et), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+            # Must NOT raise even though 5m data is empty
+            result = run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+
+        assert "US.AAPL" in result, "AAPL must still be in watchlist (graceful degradation)"
+        assert "US.AAPL" not in called_codes, (
+            f"upsert_tod_baselines must NOT be called when 5m frame is missing; "
+            f"called for: {called_codes}"
+        )
