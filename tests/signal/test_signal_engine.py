@@ -1226,3 +1226,245 @@ class TestTodNormalizedI3Gate:
             "I3 must fail when cum_volume (1.8×) / tod_baseline < rvol_min=2.0. "
             "Old code uses legacy rvol=2.0 and emits a signal (RED failure)."
         )
+
+
+# ============================================================
+# Task 2 (07-05): Circuit-breaker gate in SignalEngine (RISK-CIRCUIT)
+# ============================================================
+
+class TestCircuitBreakerGate:
+    """Daily -2R circuit breaker: detect, persist, block new entries (RISK-CIRCUIT, D-05/D-06/D-07).
+
+    Gate 7 (after Gate 3 entry-window, before Gate 4 broker get_positions):
+    _is_circuit_breaker_tripped(session_date_str) → blocks signal, skips SDK call.
+    """
+
+    def _make_breaker_store(
+        self,
+        session_date: str = "2026-07-03",
+        realized_pnl: float = 0.0,
+        breaker_date: str = None,
+    ) -> StateStore:
+        """Open an in-memory store seeded for circuit breaker tests.
+
+        Args:
+            realized_pnl: Closed-trade P&L for today; written via trades table if non-zero.
+            breaker_date: If set, writes the circuit_breaker_tripped_date meta key.
+        """
+        store = StateStore(db_path=":memory:")
+        store.open()
+        # Seed daily_scan so Gate 2 passes (no rvol_baseline skip)
+        store.conn.execute(
+            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_date, "US.AAPL", 2.0, 1, f"{session_date}T09:30:00", 500_000),
+        )
+        store.conn.commit()
+        # Seed a closed trade so get_daily_trade_stats returns realized_pnl.
+        # realized_pnl = (exit_price - entry_price) * quantity (store computes it via SQL).
+        # Schema: trade_id, position_id, code, entry_price, exit_price, quantity,
+        #         exit_reason, r_multiple, closed_at
+        if realized_pnl != 0.0:
+            # Compute entry/exit prices that yield realized_pnl for 100 shares:
+            # entry_price = 175, exit_price = 175 + realized_pnl/100
+            entry_price = 175.0
+            exit_price = entry_price + realized_pnl / 100.0
+            r_multiple = -1.0 if realized_pnl < 0 else 1.0
+            store.conn.execute(
+                """INSERT INTO trades
+                   (trade_id, position_id, code, entry_price, exit_price,
+                    quantity, r_multiple, exit_reason, closed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "trade-001", "pos-001", "US.AAPL",
+                    entry_price, exit_price,
+                    100, r_multiple, "stop",
+                    f"{session_date}T11:00:00",  # DATE(closed_at) = session_date
+                ),
+            )
+            store.conn.commit()
+        if breaker_date is not None:
+            store.set_circuit_breaker_date(breaker_date)
+        return store
+
+    def _make_in_window_engine(self, cfg, store, premarket_highs):
+        """Return a SignalEngine with get_positions mock returning empty DataFrame."""
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        return make_engine(cfg=cfg, gateway=gateway, store=store,
+                           premarket_highs=premarket_highs)
+
+    def _make_passing_bar(self, session_date="2026-07-03") -> BarEvent:
+        """BarEvent that passes all non-breaker gates (I1/I2/I3, premarket_high<close)."""
+        return BarEvent(
+            code="US.AAPL",
+            time_key=f"{session_date} 10:10:00",
+            open=150.0, high=156.0, low=149.0, close=155.0,
+            volume=1_000_000,   # legacy rvol=2.0 → I3 passes
+            hod=154.0,
+            lod=148.0,
+        )
+
+    def test_breaker_trips_on_loss_persists_and_blocks(self):
+        """With realized_pnl <= -2R threshold, on_bar returns None and breaker date is persisted.
+
+        1R = (max_risk_per_trade_pct/100) * sizing_equity_usd = 1% * $100K = $1,000.
+        Threshold = -daily_circuit_breaker_r * 1R = -2.0 * $1,000 = -$2,000.
+        realized_pnl = -$2,000 <= -$2,000 → breaker trips.
+
+        Verifies:
+        - on_bar returns None (blocked).
+        - set_circuit_breaker_date called (persisted) — checked via get_circuit_breaker_date.
+        - circuit_breaker_tripped log fires (not testable directly; gate behavior is the proxy).
+        """
+        session_date = "2026-07-03"
+        one_r = 1_000.0          # 1% of $100K
+        realized_pnl = -2_000.0  # = -2R → exactly at threshold (tripped)
+
+        cfg = make_cfg(
+            max_risk_per_trade_pct=1.0,
+            sizing_equity_usd=100_000.0,
+            daily_circuit_breaker_r=2.0,
+        )
+        store = self._make_breaker_store(session_date=session_date, realized_pnl=realized_pnl)
+        premarket_highs = {"US.AAPL": 150.0}
+        engine = self._make_in_window_engine(cfg, store, premarket_highs)
+
+        bar = self._make_passing_bar(session_date=session_date)
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is None, (
+            "Circuit breaker must block on_bar when realized_pnl <= -2R threshold "
+            "(RISK-CIRCUIT / D-06). No _is_circuit_breaker_tripped in old code → RED."
+        )
+        # Breaker date must have been persisted
+        assert store.get_circuit_breaker_date() == session_date, (
+            "set_circuit_breaker_date must be called on first trip so restart survives (D-07)."
+        )
+
+    def test_breaker_not_tripped_above_threshold_passes(self):
+        """With realized_pnl above the threshold, the breaker does not trip and gate passes through."""
+        session_date = "2026-07-03"
+        realized_pnl = -500.0    # -0.5R < threshold of -2R → no trip
+
+        cfg = make_cfg(
+            max_risk_per_trade_pct=1.0,
+            sizing_equity_usd=100_000.0,
+            daily_circuit_breaker_r=2.0,
+        )
+        store = self._make_breaker_store(session_date=session_date, realized_pnl=realized_pnl)
+        premarket_highs = {"US.AAPL": 150.0}
+        engine = self._make_in_window_engine(cfg, store, premarket_highs)
+
+        bar = self._make_passing_bar(session_date=session_date)
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is not None, (
+            "Circuit breaker must NOT block when realized_pnl (-$500) > -2R threshold (-$2K)."
+        )
+        assert store.get_circuit_breaker_date() is None, (
+            "No breaker date must be stored when threshold not reached."
+        )
+
+    def test_already_tripped_short_circuits_without_pnl_requery(self):
+        """If circuit_breaker_tripped_date == today, on_bar returns None WITHOUT re-querying P&L.
+
+        The already-tripped path must avoid a DB round-trip for trade stats on every bar.
+        Verified by patching get_daily_trade_stats to raise — if it is called, the test fails.
+        """
+        session_date = "2026-07-03"
+        cfg = make_cfg(
+            max_risk_per_trade_pct=1.0,
+            sizing_equity_usd=100_000.0,
+            daily_circuit_breaker_r=2.0,
+        )
+        # Pre-set the breaker date to today → already tripped
+        store = self._make_breaker_store(session_date=session_date, realized_pnl=0.0,
+                                         breaker_date=session_date)
+        premarket_highs = {"US.AAPL": 150.0}
+        engine = self._make_in_window_engine(cfg, store, premarket_highs)
+
+        bar = self._make_passing_bar(session_date=session_date)
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+
+        # Patch get_daily_trade_stats to raise — must NOT be called on the already-tripped path
+        with patch.object(store, "get_daily_trade_stats",
+                          side_effect=AssertionError("get_daily_trade_stats must not be called on already-tripped day")), \
+             patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is None, (
+            "on_bar must return None when breaker is already tripped for today. "
+            "Old code has no _is_circuit_breaker_tripped → does not block (RED)."
+        )
+
+    def test_auto_reset_prior_date_clears_breaker(self):
+        """If stored breaker date is from a PRIOR session, clear_circuit_breaker is called (D-07).
+
+        Auto-reset: a stale entry from yesterday must not block today's trading.
+        After clear, and with realized_pnl above threshold, gate passes.
+        """
+        session_date = "2026-07-03"
+        prior_date = "2026-07-02"
+
+        cfg = make_cfg(
+            max_risk_per_trade_pct=1.0,
+            sizing_equity_usd=100_000.0,
+            daily_circuit_breaker_r=2.0,
+        )
+        # Store a PRIOR date (yesterday's trip) and no today realized loss
+        store = self._make_breaker_store(session_date=session_date, realized_pnl=0.0,
+                                         breaker_date=prior_date)
+        premarket_highs = {"US.AAPL": 150.0}
+        engine = self._make_in_window_engine(cfg, store, premarket_highs)
+
+        bar = self._make_passing_bar(session_date=session_date)
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        # Gate should pass (auto-reset) and clear_circuit_breaker must have been called
+        assert result is not None, (
+            "Stale prior-date breaker must auto-reset (clear_circuit_breaker) and "
+            "NOT block today's trading (D-07)."
+        )
+        # clear_circuit_breaker removes the meta row
+        assert store.get_circuit_breaker_date() is None, (
+            "clear_circuit_breaker must have removed the stale prior-date entry (D-07)."
+        )
+
+    def test_breaker_gate_before_get_positions_no_sdk_call_on_tripped_day(self):
+        """Gate 7 is evaluated before Gate 4 (get_positions) — no broker SDK call on a tripped day.
+
+        On a tripped day, get_positions must NOT be called (avoids network round-trip every bar).
+        """
+        session_date = "2026-07-03"
+        cfg = make_cfg(
+            max_risk_per_trade_pct=1.0,
+            sizing_equity_usd=100_000.0,
+            daily_circuit_breaker_r=2.0,
+        )
+        # Already tripped today
+        store = self._make_breaker_store(session_date=session_date, realized_pnl=0.0,
+                                         breaker_date=session_date)
+        premarket_highs = {"US.AAPL": 150.0}
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs=premarket_highs)
+
+        bar = self._make_passing_bar(session_date=session_date)
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is None, "Tripped breaker must block on_bar."
+        gateway.get_positions.assert_not_called(), (
+            "get_positions must NOT be called when circuit breaker is tripped "
+            "(Gate 7 before Gate 4 — T-07-18 mitigation)."
+        )
