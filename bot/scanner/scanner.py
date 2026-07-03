@@ -25,6 +25,7 @@ from bot.scanner.calendar import is_trading_day
 from bot.scanner.fetcher import (
     download_daily_bars,
     download_intraday_1m,
+    download_intraday_5m,
     get_ticker_frame,
     resolve_today_price,
     TodayPrice,
@@ -39,6 +40,72 @@ _logger = get_logger(__name__)
 
 # Maximum watchlist size (SCAN-08)
 _WATCHLIST_CAP = 20
+
+
+# ============================================================
+# TOD baseline computation (Phase 7 SIG-RVOL-TOD)
+# ============================================================
+
+def _compute_tod_baselines(daily_frame_5m, lookback_days: int = 14) -> dict:
+    """Compute 14-session average cumulative volume at each 5m ET time bucket.
+
+    Implements the RVOL-TOD denominator: a per-time-bucket baseline that captures
+    how much cumulative volume typically exists at each 5m timestamp of the session.
+    The live BarAggregator._session_volume provides the numerator (plan 07-02 Task 1).
+
+    Algorithm:
+      1. Copy the frame; localise/convert index to ET (Pitfall 4 / T-07-06 mitigation).
+      2. Derive date and bucket ("%H:%M") per row.
+      3. Compute running cumsum of Volume within each session date.
+      4. For each (date, bucket), take the last cum_vol (= cumulative up to that bucket).
+      5. Average across the most recent lookback_days sessions.
+    Returns {"HH:MM": float} — time_bucket → 14-session avg cumulative volume.
+    Returns {} if the frame is empty or all-NaN.
+
+    daily_frame_5m: DataFrame with DatetimeIndex (ET, UTC, or naive-UTC) and
+        "Volume" column (capital V — yfinance convention). prepost=False assumed:
+        only regular-session bars needed.
+    lookback_days: number of sessions to average (default 14, cfg.rvol_tod_lookback_days).
+    """
+    from bot.safety.et_helpers import ET  # ZoneInfo("America/New_York")
+
+    try:
+        df = daily_frame_5m.copy()
+        if df.empty or "Volume" not in df.columns:
+            return {}
+
+        # Step 1: localise/convert index to ET (Pitfall 4 / T-07-06)
+        if df.index.tzinfo is None:
+            # Treat naive index as UTC (RESEARCH convention; mirrors to_et() in et_helpers)
+            df.index = df.index.tz_localize("UTC").tz_convert(ET)
+        else:
+            df.index = df.index.tz_convert(ET)
+
+        # Step 2: derive date and HH:MM bucket per bar
+        df = df.copy()  # ensure writable after tz conversion
+        df["_date"] = df.index.date
+        df["_bucket"] = df.index.strftime("%H:%M")
+
+        # Step 3: running cumulative volume within each session
+        df["_cum_vol"] = df.groupby("_date")["Volume"].cumsum()
+
+        # Step 4: for each (date, bucket), keep only the last cum_vol value
+        # (= cumulative volume through the end of that time bucket)
+        pivot = (
+            df.groupby(["_date", "_bucket"])["_cum_vol"]
+            .last()
+            .unstack(level="_bucket")
+        )
+        if pivot.empty:
+            return {}
+
+        # Step 5: average across the most recent lookback_days sessions
+        recent = pivot.tail(lookback_days)
+        result = recent.mean().dropna().to_dict()
+        return result
+    except Exception:
+        _logger.warning("tod_baseline_compute_error", exc_info=True)
+        return {}
 
 
 # ============================================================
@@ -468,6 +535,53 @@ def run_daily_scan(
         candidate["rank"] = rank_idx
 
     store.persist_watchlist(scan_date, top20, scan_pass)
+
+    # Step 5b: compute and persist TOD cumulative-volume baselines (SIG-RVOL-TOD).
+    # Runs at premarket only (not intraday rescan — RESEARCH Open Q4 / T-07-08).
+    # Batch download 5m history for the capped top-20, then compute per-candidate.
+    # Failure of any per-candidate step logs and continues — never aborts the scan.
+    scan_date_str = scan_date.isoformat()
+    if top20:
+        # Convert Moomoo codes to yfinance symbols (strip "US." prefix)
+        yf_syms_top20 = [c["code"].removeprefix("US.") for c in top20]
+        try:
+            data_5m, _failed_5m = download_intraday_5m(yf_syms_top20)
+        except Exception:
+            _logger.warning(
+                "tod_baseline_5m_download_failed",
+                exc_info=True,
+                reason="5m batch download failed — TOD baselines skipped for this scan",
+            )
+            data_5m = {}
+
+        for candidate in top20:
+            yf_sym = candidate["code"].removeprefix("US.")
+            try:
+                frame_5m = data_5m.get(yf_sym) if isinstance(data_5m, dict) else None
+                if frame_5m is None or (
+                    hasattr(frame_5m, "empty") and frame_5m.empty
+                ):
+                    continue  # graceful degradation — no 5m data for this candidate
+                tod_baselines = _compute_tod_baselines(
+                    frame_5m, lookback_days=cfg.rvol_tod_lookback_days
+                )
+                if tod_baselines:
+                    store.upsert_tod_baselines(
+                        scan_date_str, candidate["code"], tod_baselines
+                    )
+                    _logger.info(
+                        "tod_baseline_stored",
+                        code=candidate["code"],
+                        bucket_count=len(tod_baselines),
+                        scan_date=scan_date_str,
+                    )
+            except Exception:
+                _logger.warning(
+                    "tod_baseline_candidate_error",
+                    code=candidate["code"],
+                    exc_info=True,
+                    reason="per-candidate TOD baseline failed — skipping (does not abort scan)",
+                )
 
     # Step 6: return moomoo codes
     result = [c["code"] for c in top20]
