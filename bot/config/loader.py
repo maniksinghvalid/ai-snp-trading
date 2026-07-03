@@ -133,6 +133,19 @@ class StrategyConfig:
     # Set to None to fall back to live gateway.get_equity() on each sizing decision.
     sizing_equity_usd: Optional[float] = 100_000.0
 
+    # ---- risk (Phase 7 additions) ----
+    # daily_circuit_breaker_r: how many 1R losses trigger the daily circuit breaker (D-05).
+    # Consumers must read cfg.daily_circuit_breaker_r — never hardcode 2.0 (CFG-01).
+    daily_circuit_breaker_r: float = 2.0
+
+    # ---- execution (Phase 7 additions) ----
+    # use_broker_stop_orders: True = place a broker-side stop order after fill (D-02 path selector).
+    use_broker_stop_orders: bool = True
+
+    # ---- intraday_filters (Phase 7 additions) ----
+    # rvol_tod_lookback_days: number of sessions to average for TOD volume baseline (SIG-RVOL-TOD).
+    rvol_tod_lookback_days: int = 14
+
 
 # ============================================================
 # Loader
@@ -207,6 +220,8 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         max_concurrent_positions=int(rk["max_concurrent_positions"]),
         max_trades_per_day=int(rk["max_trades_per_day"]),
         sizing_equity_usd=rk.get("sizing_equity_usd", 100_000),
+        # Phase 7 risk additions (CFG-01, D-05)
+        daily_circuit_breaker_r=float(rk.get("daily_circuit_breaker_r", 2.0)),
         # execution (Phase 4 tunables — CFG-01, D-05/D-07/D-08)
         entry_limit_buffer_usd=float(ex_cfg["entry_limit_buffer_usd"]),
         entry_ttl_seconds=float(ex_cfg["entry_ttl_seconds"]),
@@ -218,6 +233,9 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         exit_escalation_cadence_seconds=float(ex_cfg["exit_escalation_cadence_seconds"]),
         force_close_escalation_step_usd=float(ex_cfg["force_close_escalation_step_usd"]),
         force_close_escalation_cadence_seconds=float(ex_cfg["force_close_escalation_cadence_seconds"]),
+        # Phase 7 execution + intraday_filters additions (CFG-01, D-02)
+        use_broker_stop_orders=bool(ex_cfg.get("use_broker_stop_orders", True)),
+        rvol_tod_lookback_days=int(inf.get("I3_rvol_tod_lookback_days", 14)),
         # service (Phase 5 tunables — CFG-01, D-01/D-03/D-06/D-10)
         premarket_scan_et=str(svc_cfg["premarket_scan_et"]),
         market_open_et=str(svc_cfg["market_open_et"]),
