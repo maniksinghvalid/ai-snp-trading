@@ -1021,3 +1021,208 @@ class TestNoteIntentResolved:
         assert engine._pending_count == 0, (
             "note_intent_resolved on count=0 must leave count=0 (underflow guard)"
         )
+
+
+# ============================================================
+# Task 1 (07-05): TOD-normalized I3 RVOL gate (SIG-RVOL-TOD)
+# ============================================================
+
+class TestTodNormalizedI3Gate:
+    """TOD-normalized I3 gate: event.cum_volume / tod_baseline when baseline present,
+    legacy event.volume / rvol_baseline fallback when absent (SIG-RVOL-TOD, Pitfall 4).
+    """
+
+    def _make_tod_store(
+        self,
+        session_date: str = "2026-07-03",
+        code: str = "US.AAPL",
+        rvol_baseline: int = 500_000,
+        tod_baseline: float = None,
+        time_bucket: str = "10:10",
+    ) -> StateStore:
+        """Open an in-memory store seeded with a daily_scan row and optional TOD baseline."""
+        store = StateStore(db_path=":memory:")
+        store.open()
+        store.conn.execute(
+            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_date, code, 2.0, 1, f"{session_date}T09:30:00", rvol_baseline),
+        )
+        store.conn.commit()
+        if tod_baseline is not None:
+            store.upsert_tod_baselines(session_date, code, {time_bucket: tod_baseline})
+        return store
+
+    def test_tod_baseline_present_uses_cum_volume(self):
+        """When TOD baseline exists, rvol = event.cum_volume / tod_baseline; passing at 2× (I3 passes).
+
+        The key distinction from legacy: event.volume is small (0.4× rvol_baseline, which
+        would fail I3 in legacy mode), but cum_volume is 2× tod_baseline, so I3 passes via
+        the TOD-normalized path. Proves that the primary path is cum_volume / tod_baseline.
+        """
+        session_date = "2026-07-03"
+        tod_baseline = 500_000     # 14-session avg cumulative volume at 10:10
+        cum_volume = 1_000_000    # 2× tod_baseline → rvol=2.0 → I3 passes
+
+        store = self._make_tod_store(
+            session_date=session_date,
+            rvol_baseline=500_000,
+            tod_baseline=tod_baseline,
+            time_bucket="10:10",
+        )
+        bar = BarEvent(
+            code="US.AAPL",
+            time_key=f"{session_date} 10:10:00",
+            open=150.0, high=156.0, low=149.0, close=155.0,
+            volume=200_000,        # legacy: 200K/500K = 0.4 → I3 fails (proves TOD is primary)
+            hod=154.0,
+            lod=148.0,
+            cum_volume=cum_volume,
+        )
+        premarket_highs = {"US.AAPL": 150.0}
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        cfg = make_cfg(rvol_min=2.0)
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs=premarket_highs)
+
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is not None, (
+            "I3 must pass when cum_volume (2×) / tod_baseline ≥ rvol_min=2.0. "
+            "Old code uses event.volume/rvol_baseline = 0.4 → I3 fails (RED)."
+        )
+
+    def test_no_tod_baseline_falls_back_to_legacy(self):
+        """When no TOD baseline exists (get_tod_baseline returns 0.0), fallback to legacy path.
+
+        Legacy: rvol = event.volume / rvol_baseline. Existing behavior must be preserved.
+        """
+        session_date = "2026-07-03"
+        # No TOD baseline stored → get_tod_baseline returns 0.0 → legacy path
+        # event.volume=1_000_000, rvol_baseline=500_000 → rvol=2.0 → I3 passes
+        store = self._make_tod_store(
+            session_date=session_date,
+            rvol_baseline=500_000,
+            tod_baseline=None,    # no TOD baseline → forces legacy path
+        )
+        bar = BarEvent(
+            code="US.AAPL",
+            time_key=f"{session_date} 10:10:00",
+            open=150.0, high=156.0, low=149.0, close=155.0,
+            volume=1_000_000,     # legacy: 1M/500K = 2.0 → I3 passes
+            hod=154.0,
+            lod=148.0,
+            cum_volume=100_000,   # irrelevant when no TOD baseline
+        )
+        premarket_highs = {"US.AAPL": 150.0}
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        cfg = make_cfg(rvol_min=2.0)
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs=premarket_highs)
+
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is not None, (
+            "Legacy fallback: rvol = event.volume / rvol_baseline = 2.0 must pass I3 "
+            "when no TOD baseline is stored (existing behavior preserved)."
+        )
+
+    def test_tod_time_bucket_extraction(self):
+        """time_bucket is extracted as time_key[11:16] ('HH:MM') using ET session date (Pitfall 4).
+
+        TOD baseline is stored ONLY for bucket '10:05'. A bar with time_key '10:05:00' must
+        look up bucket '10:05' and find the baseline; a bar with a different bucket would miss it.
+        """
+        session_date = "2026-07-03"
+        time_bucket = "10:05"
+        tod_baseline = 400_000
+        cum_volume = 800_001      # just over 2× tod_baseline → I3 passes
+
+        store = self._make_tod_store(
+            session_date=session_date,
+            rvol_baseline=500_000,
+            tod_baseline=tod_baseline,
+            time_bucket=time_bucket,
+        )
+        bar = BarEvent(
+            code="US.AAPL",
+            time_key=f"{session_date} 10:05:00",   # time_key[11:16] == "10:05"
+            open=150.0, high=156.0, low=149.0, close=155.0,
+            volume=200_000,    # legacy: 200K/500K = 0.4 → I3 fails (proves bucket is resolved)
+            hod=154.0,
+            lod=148.0,
+            cum_volume=cum_volume,
+        )
+        premarket_highs = {"US.AAPL": 150.0}
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        cfg = make_cfg(rvol_min=2.0)
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs=premarket_highs)
+
+        # Patch now_et so session_date_str matches session_date
+        in_window = datetime(2026, 7, 3, 10, 5, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is not None, (
+            "Bucket '10:05' (time_key[11:16]) must resolve the TOD baseline and "
+            "make I3 pass via cum_volume / tod_baseline > 2.0. "
+            "Old code ignores the bucket and uses legacy rvol=0.4 → I3 fails (RED)."
+        )
+
+    def test_tod_baseline_present_below_threshold_i3_fails(self):
+        """TOD baseline present but cum_volume below 2× → I3 fails (gate is real, not always-pass).
+
+        event.volume=1_000_000 / rvol_baseline=500_000 = 2.0 → I3 would PASS via legacy.
+        But cum_volume=900_000 / tod_baseline=500_000 = 1.8 < 2.0 → I3 must FAIL via TOD.
+        Proves that TOD normalization tightens (not loosens) the gate when session volume is below baseline.
+        """
+        session_date = "2026-07-03"
+        tod_baseline = 500_000
+        cum_volume = 900_000      # 1.8× tod_baseline → rvol=1.8 < rvol_min=2.0 → I3 fails
+
+        store = self._make_tod_store(
+            session_date=session_date,
+            rvol_baseline=500_000,
+            tod_baseline=tod_baseline,
+            time_bucket="10:10",
+        )
+        bar = BarEvent(
+            code="US.AAPL",
+            time_key=f"{session_date} 10:10:00",
+            open=150.0, high=156.0, low=149.0, close=155.0,
+            volume=1_000_000,     # legacy: 1M/500K = 2.0 → would PASS (old code emits signal)
+            hod=154.0,
+            lod=148.0,
+            cum_volume=cum_volume,  # TOD: 900K/500K = 1.8 < 2.0 → I3 fails (new code blocks)
+        )
+        premarket_highs = {"US.AAPL": 150.0}
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+
+        cfg = make_cfg(rvol_min=2.0)
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs=premarket_highs)
+
+        in_window = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result = run(engine.on_bar(bar))
+
+        assert result is None, (
+            "I3 must fail when cum_volume (1.8×) / tod_baseline < rvol_min=2.0. "
+            "Old code uses legacy rvol=2.0 and emits a signal (RED failure)."
+        )
