@@ -444,3 +444,84 @@ class TestMigration0003Idempotency:
         names = {r[0] for r in rows}
         assert "daily_trade_count" in names
         assert "pending_intents" in names
+
+
+# ============================================================
+# Migration 0005 tests (Phase 7: tod_baselines + broker_stop_order_id)
+# ============================================================
+
+class TestMigration0005FreshDb:
+    """Migration 0005 adds the tod_baselines table and broker_stop_order_id column."""
+
+    def test_migration_0005_user_version_is_5(self, in_memory_conn):
+        """PRAGMA user_version must equal 5 after all migrations (migration 0005 added)."""
+        run_migrations(in_memory_conn)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 5
+
+    def test_migration_0005_tod_baselines_table_exists(self, in_memory_conn):
+        """After run_migrations, sqlite_master must contain a table named tod_baselines."""
+        run_migrations(in_memory_conn)
+        rows = in_memory_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        names = {r[0] for r in rows}
+        assert "tod_baselines" in names, "tod_baselines table missing after migration 0005"
+
+    def test_migration_0005_tod_baselines_columns(self, in_memory_conn):
+        """tod_baselines must have scan_date, code, time_bucket, cum_vol_mean columns."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(tod_baselines)").fetchall()
+        col_names = {row[1] for row in info}
+        required = {"scan_date", "code", "time_bucket", "cum_vol_mean"}
+        assert required.issubset(col_names), (
+            f"Missing tod_baselines columns: {required - col_names}"
+        )
+
+    def test_migration_0005_tod_baselines_composite_pk(self, in_memory_conn):
+        """tod_baselines must enforce the composite PRIMARY KEY (scan_date, code, time_bucket).
+
+        Attempting to insert a duplicate (scan_date, code, time_bucket) triple must raise
+        sqlite3.IntegrityError.
+        """
+        run_migrations(in_memory_conn)
+        in_memory_conn.execute(
+            "INSERT INTO tod_baselines (scan_date, code, time_bucket, cum_vol_mean) "
+            "VALUES ('2026-07-03', 'US.AAPL', '10:05', 50000.0)"
+        )
+        in_memory_conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            in_memory_conn.execute(
+                "INSERT INTO tod_baselines (scan_date, code, time_bucket, cum_vol_mean) "
+                "VALUES ('2026-07-03', 'US.AAPL', '10:05', 75000.0)"
+            )
+
+    def test_migration_0005_broker_stop_order_id_on_positions(self, in_memory_conn):
+        """PRAGMA table_info(positions) must include a broker_stop_order_id column (TEXT)."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(positions)").fetchall()
+        col_names = {row[1] for row in info}
+        assert "broker_stop_order_id" in col_names, (
+            "broker_stop_order_id column missing from positions after migration 0005"
+        )
+
+
+class TestMigration0005Idempotency:
+    """Running run_migrations twice after migration 0005 must be a no-op (WR-03)."""
+
+    def test_migration_0005_idempotent_run_twice_no_raise(self, in_memory_conn):
+        """run_migrations twice must not raise and must leave user_version at 5."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)  # second call — idempotent (WR-03)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 5
+
+    def test_migration_0005_idempotent_broker_stop_order_id_not_duplicated(self, in_memory_conn):
+        """broker_stop_order_id must appear exactly once after two run_migrations calls."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(positions)").fetchall()
+        col_list = [row[1] for row in info]
+        assert col_list.count("broker_stop_order_id") == 1, (
+            "broker_stop_order_id must not be duplicated on re-apply"
+        )
