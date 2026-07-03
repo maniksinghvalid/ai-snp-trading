@@ -415,3 +415,111 @@ class TestGetOrderStatusRateLimit:
         assert mock_trade_ctx.order_list_query.call_count == 1, (
             "order_list_query must be called exactly once on a non-rate-limit error"
         )
+
+
+# ============================================================
+# Test: place_stop_order — Stop-Market protective SELL (EXEC-02 amendment D-01)
+# ============================================================
+
+class TestPlaceStopOrder:
+    """Asserts place_stop_order behaviour: STOP order type with aux_price=stop_price."""
+
+    def _patch_moomoo_stop(self):
+        """Return a moomoo module stub with OrderType.STOP + TrdSide.SELL sentinels."""
+        import sys
+        import types
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.OrderType = MagicMock()
+        moomoo_mod.OrderType.STOP = "STOP_SENTINEL"
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+        return moomoo_mod
+
+    def test_stop_order_returns_order_id(self):
+        """place_stop_order returns the broker-assigned order_id string."""
+        mock_trade_ctx = MagicMock()
+        df = pd.DataFrame([{"order_id": "STOP-98765", "code": "US.AAPL"}])
+        mock_trade_ctx.place_order.return_value = (0, df)
+
+        gw = _make_gateway(mock_trade_ctx=mock_trade_ctx)
+        moomoo_mod = self._patch_moomoo_stop()
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            order_id = _run(gw.place_stop_order(
+                code="US.AAPL",
+                qty=100,
+                stop_price=180.00,
+                trd_side=moomoo_mod.TrdSide.SELL,
+            ))
+
+        assert order_id == "STOP-98765"
+
+    def test_stop_order_uses_order_type_stop_and_aux_price(self):
+        """place_stop_order calls place_order with OrderType.STOP, price=0.0, aux_price=stop_price."""
+        mock_trade_ctx = MagicMock()
+        df = pd.DataFrame([{"order_id": "STOP-11111"}])
+        mock_trade_ctx.place_order.return_value = (0, df)
+
+        gw = _make_gateway(mock_trade_ctx=mock_trade_ctx)
+        moomoo_mod = self._patch_moomoo_stop()
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            _run(gw.place_stop_order(
+                code="US.AAPL",
+                qty=50,
+                stop_price=180.00,
+                trd_side=moomoo_mod.TrdSide.SELL,
+            ))
+
+        call_kwargs = mock_trade_ctx.place_order.call_args
+        assert call_kwargs.kwargs.get("order_type") == "STOP_SENTINEL", (
+            "place_stop_order must use OrderType.STOP (EXEC-02 amendment D-01)"
+        )
+        assert call_kwargs.kwargs.get("aux_price") == 180.00, (
+            "place_stop_order must pass stop_price as aux_price"
+        )
+        assert call_kwargs.kwargs.get("price") == 0.0, (
+            "place_stop_order must pass price=0.0 for Stop-Market semantics"
+        )
+
+    def test_stop_order_raises_gateway_error_on_failure(self):
+        """place_stop_order raises GatewayError when SDK returns non-RET_OK."""
+        mock_trade_ctx = MagicMock()
+        mock_trade_ctx.place_order.return_value = (-1, "stop order rejected")
+
+        gw = _make_gateway(mock_trade_ctx=mock_trade_ctx)
+        moomoo_mod = self._patch_moomoo_stop()
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            with pytest.raises(GatewayError):
+                _run(gw.place_stop_order(
+                    code="US.AAPL",
+                    qty=50,
+                    stop_price=180.00,
+                    trd_side=moomoo_mod.TrdSide.SELL,
+                ))
+
+    def test_stop_order_writes_audit_event_stop_order_placed(self):
+        """place_stop_order writes an audit entry with event='stop_order_placed' (T-07-12)."""
+        mock_trade_ctx = MagicMock()
+        df = pd.DataFrame([{"order_id": "STOP-AUDIT-001"}])
+        mock_trade_ctx.place_order.return_value = (0, df)
+
+        gw = _make_gateway(mock_trade_ctx=mock_trade_ctx)
+        moomoo_mod = self._patch_moomoo_stop()
+
+        audit_entries = []
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}), \
+             patch("bot.safety.audit_log.append_audit",
+                   side_effect=audit_entries.append):
+            _run(gw.place_stop_order(
+                code="US.AAPL",
+                qty=50,
+                stop_price=180.00,
+                trd_side=moomoo_mod.TrdSide.SELL,
+            ))
+
+        stop_events = [e for e in audit_entries if e.get("event") == "stop_order_placed"]
+        assert len(stop_events) == 1, (
+            f"Expected exactly one 'stop_order_placed' audit event; got: {audit_entries}"
+        )

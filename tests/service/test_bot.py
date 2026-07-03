@@ -547,3 +547,56 @@ async def test_process_bar_resolves_intent_on_abandon():
     )
     # note_intent_resolved called on BOTH paths
     mock_se.note_intent_resolved.assert_called_once()
+
+
+# ============================================================
+# 07-03: arm_stop_protection post-fill hook (D-01/D-03)
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_process_bar_arm_stop_protection_called_after_on_fill():
+    """_process_bar must call position_manager.arm_stop_protection(pos) after on_fill on fill path.
+
+    Broker stop placement (D-01) must be armed immediately after the entry fill is
+    confirmed. The test asserts that arm_stop_protection is called exactly once on
+    the fill path and not at all on the abandon path.
+    """
+    from bot.execution.events import FillEvent
+    from datetime import datetime as _dt
+
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+
+    # arm_stop_protection is a new async method on the position_manager mock
+    mock_pm.arm_stop_protection = AsyncMock()
+
+    fill = FillEvent(
+        order_id="ord-stop-test-001",
+        intent_id=mock_intent.intent_id,
+        code="US.AAPL",
+        filled_qty=100,
+        avg_fill_price=182.60,
+        is_entry=True,
+        fill_time=_dt(2026, 6, 24, 10, 5, 0),
+    )
+    mock_ee.consume_intent = AsyncMock(return_value=fill)
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    mock_pm.arm_stop_protection.assert_called_once(), (
+        "_process_bar must call arm_stop_protection exactly once after on_fill"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_bar_arm_stop_protection_not_called_on_abandon():
+    """_process_bar must NOT call arm_stop_protection on the abandon path (consume_intent=None)."""
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+
+    mock_pm.arm_stop_protection = AsyncMock()
+    mock_ee.consume_intent = AsyncMock(return_value=None)
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    mock_pm.arm_stop_protection.assert_not_called(), (
+        "_process_bar must NOT call arm_stop_protection when consume_intent returns None"
+    )
