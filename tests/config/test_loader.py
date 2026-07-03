@@ -229,3 +229,74 @@ class TestLoadStrategyConfigFailure:
         import bot.config.loader as loader_mod
         src = inspect.getsource(loader_mod)
         assert "sys.exit" not in src
+
+
+# ============================================================
+# Exit-model config tests (CFG-01, EXIT-MODEL, plan 07-04)
+# ============================================================
+
+import os as _os
+_RULES_JSON = _os.path.join(_os.path.dirname(__file__), "..", "..", "rules.json")
+
+
+class TestExitModelConfig:
+    """Exit-model config surface (exit.model in rules.json, schema enum, StrategyConfig.exit_model).
+
+    Tests cover:
+    1. Real rules.json: exit_model == "partial_be_trail" (the explicit default / current behavior)
+    2. Config with exit.model omitted: defaults to "partial_be_trail" (no KeyError)
+    3. exit.model = "fixed_2r": raises ConfigError referencing Phase 6 / backtester
+    4. exit.model = "full_to_1p5r_trail": raises ConfigError (fail-closed)
+    5. exit.model = unknown string ("moon"): fails jsonschema enum validation (ConfigError)
+    """
+
+    def test_real_rules_json_exit_model_is_partial_be_trail(self):
+        """Load the canonical rules.json; cfg.exit_model must equal 'partial_be_trail'."""
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.exit_model == "partial_be_trail"
+
+    def test_exit_model_omitted_defaults_to_partial_be_trail(self, tmp_path):
+        """When exit.model key is absent the loader must default to 'partial_be_trail'."""
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"].pop("model", None)  # ensure key is absent
+        path = tmp_path / "no_model.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.exit_model == "partial_be_trail"
+
+    def test_exit_model_fixed_2r_raises_config_error(self, tmp_path):
+        """exit.model='fixed_2r' is not yet implemented — loader must fail closed."""
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["model"] = "fixed_2r"
+        path = tmp_path / "fixed_2r.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        msg = str(exc_info.value)
+        # Must mention the model value and point to Phase 6 / plan 07-06
+        assert "fixed_2r" in msg
+        assert "phase 6" in msg.lower() or "07-06" in msg
+
+    def test_exit_model_full_to_1p5r_trail_raises_config_error(self, tmp_path):
+        """exit.model='full_to_1p5r_trail' is not yet implemented — loader must fail closed."""
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["model"] = "full_to_1p5r_trail"
+        path = tmp_path / "full_trail.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        msg = str(exc_info.value)
+        assert "full_to_1p5r_trail" in msg
+        assert "phase 6" in msg.lower() or "07-06" in msg
+
+    def test_exit_model_unknown_string_fails_schema_validation(self, tmp_path):
+        """An unknown exit.model value (e.g. 'moon') must fail jsonschema enum check."""
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["model"] = "moon"
+        path = tmp_path / "unknown_model.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        msg = str(exc_info.value)
+        # Schema validation error must mention enum or the invalid value
+        assert "moon" in msg or "enum" in msg.lower() or "schema" in msg.lower()
