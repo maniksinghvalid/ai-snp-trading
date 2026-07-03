@@ -747,27 +747,27 @@ bar_data = {
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does SIMULATE honor OrderType.STOP orders?**
    - What we know: SIMULATE rejects `deal_list_query` ("Paper trading does not support deal data"). Other complex order types may similarly be unsupported.
    - What's unclear: No empirical test or Futu documentation to confirm stop order support on SIMULATE.
-   - Recommendation: Build both the broker-stop path and the quote-monitor fallback. Test empirically on first live run: place a small test stop order and verify it appears in `order_list_query`. The config flag (`use_broker_stop_orders`) selects the path.
+   - RESOLVED: Build both the broker-stop path and the quote-monitor fallback. Test empirically on first live run: place a small test stop order and verify it appears in `order_list_query`. The config flag (`use_broker_stop_orders`) selects the path.
 
 2. **Should the circuit breaker trip detection happen in SignalEngine or in the bot orchestrator?**
    - What we know: SignalEngine already reads realized P&L state; adding a Store dependency for the circuit breaker is minimal.
    - What's unclear: Whether injecting `alerter` + `engine` into SignalEngine (for the D-08 cancellation) violates the separation of concerns or creates circular dependencies.
-   - Recommendation: SignalEngine owns the GATE (read meta flag → block signals). The trip DETECTION + D-08 cancellation lives in `bot.service.bot` (a periodic P&L check or a post-fill hook). This avoids injecting alerter/engine into SignalEngine.
+   - RESOLVED: SignalEngine owns the GATE (read meta flag → block signals). The trip DETECTION + D-08 cancellation lives in `bot.service.bot` (a periodic P&L check or a post-fill hook). This avoids injecting alerter/engine into SignalEngine.
 
 3. **What time-bucket granularity for TOD baselines?**
    - What we know: Signal fires on 5m bar closes, so 5m buckets match exactly.
    - What's unclear: Whether fine-grained 5m buckets have enough history (14 sessions = 14 data points per bucket) for a stable mean.
-   - Recommendation: 5m buckets are sufficient. 14 data points per bucket is standard for RVOL lookbacks (the existing daily RVOL uses 14 days). No smoothing needed.
+   - RESOLVED: 5m buckets are sufficient. 14 data points per bucket is standard for RVOL lookbacks (the existing daily RVOL uses 14 days). No smoothing needed.
 
 4. **Does the TOD baseline need to be computed at each intraday rescan or only at premarket?**
    - What we know: New intraday-rescan candidates are added to `daily_scan` throughout the day. These candidates need TOD baselines too.
    - What's unclear: Whether downloading 5m history per rescan candidate (at ~30-min intervals) creates yfinance rate-limit pressure.
-   - Recommendation: Download 5m history only at premarket scan. Intraday rescan candidates use legacy full-day `rvol_baseline` (already stored in `daily_scan`). This is a graceful degradation; premarket candidates (the primary path) get TOD normalization; rescan candidates get the legacy gate.
+   - RESOLVED: Download 5m history only at premarket scan. Intraday rescan candidates use legacy full-day `rvol_baseline` (already stored in `daily_scan`). This is a graceful degradation; premarket candidates (the primary path) get TOD normalization; rescan candidates get the legacy gate.
 
 ---
 
