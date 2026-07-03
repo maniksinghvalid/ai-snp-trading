@@ -2704,6 +2704,7 @@ class TestSyncBrokerStop:
         is cancel-replaced at the new (higher) trail_stop."""
         import sys
         import types
+        from collections import deque
 
         cancel_mock = AsyncMock()
         new_stop_prices = []
@@ -2719,9 +2720,19 @@ class TestSyncBrokerStop:
         cfg = _minimal_cfg()
         cfg.use_broker_stop_orders = True
 
-        # Strategy returns swing-low at 103.0 (above current 100.0 breakeven stop)
+        # Strategy returns swing-low at 103.0 (above current 100.0 breakeven stop).
+        # bar_buffer must be non-empty so _compute_swing_low reaches the strategy mock.
         mock_strategy_trail = MagicMock()
         mock_strategy_trail.compute_swing_low_2_2 = MagicMock(return_value=103.0)
+
+        # Provide a minimal bar_buffer so _compute_swing_low doesn't short-circuit.
+        bar_buf = deque([
+            {"time_key": "2026-06-24 10:00:00", "open": 100.0, "high": 104.0,
+             "low": 99.0, "close": 103.0, "volume": 10000},
+            {"time_key": "2026-06-24 10:05:00", "open": 103.0, "high": 106.0,
+             "low": 102.0, "close": 105.0, "volume": 8000},
+        ])
+        bar_buffer = {"US.AAPL": bar_buf}
 
         manager = PositionManager(
             store=open_store,
@@ -2729,6 +2740,7 @@ class TestSyncBrokerStop:
             cfg=cfg,
             strategy=mock_strategy_trail,
             gateway=mock_gateway,
+            bar_buffer=bar_buffer,
         )
 
         # BREAKEVEN: trail_stop at entry (100.0); swing-low 103.0 will ratchet it up

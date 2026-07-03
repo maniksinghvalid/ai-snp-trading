@@ -230,9 +230,9 @@ class PositionManager:
         elif action == FSM_ACTION_PARTIAL:
             await self._trigger_partial_profit(pos, qty, bar.time_key)
         elif action == FSM_ACTION_BREAKEVEN:
-            self._trigger_breakeven(pos, bar.time_key)
+            await self._trigger_breakeven(pos, bar.time_key)
         elif action == FSM_ACTION_TRAIL_UP:
-            self._trigger_trail_up(pos, bar.time_key)
+            await self._trigger_trail_up(pos, bar.time_key)
 
     # ============================================================
     # Public API — broker stop placement (D-01/D-03)
@@ -289,6 +289,53 @@ class PositionManager:
                 exc_info=True,
             )
             # Non-fatal: bar-close FSM (D-03) is the backstop.
+
+    async def _sync_broker_stop(self, pos) -> None:
+        """Cancel-replace the broker stop to mirror the updated trail_stop (D-04).
+
+        Called from _trigger_breakeven and _trigger_trail_up after evaluate_close has
+        already ratcheted pos.trail_stop via max() (D-11 never-loosen is enforced
+        upstream; this method always uses the current, non-loosened pos.trail_stop).
+
+        Pattern (finding-1.4): cancel existing stop → place new stop at trail_stop.
+        The brief no-stop window between cancel and replacement is an accepted cost
+        (D-04 Pitfall 5); the bar-close FSM stop check (D-03) remains the backstop.
+
+        No-op when pos.broker_stop_order_id is None or self._gateway is None.
+        Cancel exceptions are swallowed (already filled / already cancelled tolerance)
+        and the replacement is still placed.
+
+        Args:
+            pos: PositionState with broker_stop_order_id and trail_stop current.
+        """
+        if not getattr(pos, "broker_stop_order_id", None) or self._gateway is None:
+            return
+
+        old_id = pos.broker_stop_order_id
+
+        # Cancel step — swallow if already filled or cancelled (finding-1.4)
+        try:
+            await self._gateway.cancel_order(old_id)
+        except Exception:
+            pass  # already cancelled/filled — proceed to re-place
+
+        # Re-place at the CURRENT (ratcheted, never-loosened) trail_stop
+        from moomoo import TrdSide  # deferred import: test-env compatibility
+        order_id = await self._gateway.place_stop_order(
+            code=pos.code,
+            qty=pos.remaining_quantity,
+            stop_price=pos.trail_stop,
+            trd_side=TrdSide.SELL,
+        )
+        pos.broker_stop_order_id = order_id
+        self._persist_position(pos, event="broker_stop_replaced")
+        _logger.info(
+            "broker_stop_replaced",
+            code=pos.code,
+            old_order_id=old_id,
+            new_order_id=order_id,
+            trail_stop=pos.trail_stop,
+        )
 
     # ============================================================
     # Public API — startup reconciliation
@@ -708,11 +755,13 @@ class PositionManager:
             remaining=pos.remaining_quantity,
         )
 
-    def _trigger_breakeven(self, pos: PositionState, time_key: str) -> None:
+    async def _trigger_breakeven(self, pos: PositionState, time_key: str) -> None:
         """PARTIAL_TAKEN → BREAKEVEN: stop moved to entry_price.
 
         evaluate_close() has already set pos.trail_stop = entry_price and
         pos.phase = BREAKEVEN. We persist DB-first, then log.
+
+        Also cancel-replaces the broker stop (D-04) when use_broker_stop_orders=True.
 
         Args:
             pos:      PositionState (phase already BREAKEVEN, trail_stop = entry_price).
@@ -720,6 +769,10 @@ class PositionManager:
         """
         pos.updated_at = now_et()
         self._persist_position(pos, event="breakeven")
+
+        # D-04: mirror the new trail_stop to the broker stop (cancel-replace)
+        if getattr(self._cfg, "use_broker_stop_orders", False):
+            await self._sync_broker_stop(pos)
 
         _logger.info(
             "fsm_breakeven",
@@ -839,11 +892,13 @@ class PositionManager:
             time_key=time_key,
         )
 
-    def _trigger_trail_up(self, pos: PositionState, time_key: str) -> None:
+    async def _trigger_trail_up(self, pos: PositionState, time_key: str) -> None:
         """BREAKEVEN/TRAILING → TRAILING: stop ratcheted up to new swing-low.
 
         evaluate_close() has already updated pos.trail_stop = max(old, new_swing_low)
         and set pos.phase = TRAILING. We persist DB-first.
+
+        Also cancel-replaces the broker stop (D-04) when use_broker_stop_orders=True.
 
         Args:
             pos:      PositionState (trail_stop already updated by evaluate_close).
@@ -851,6 +906,10 @@ class PositionManager:
         """
         pos.updated_at = now_et()
         self._persist_position(pos, event="trail_up")
+
+        # D-04: mirror the ratcheted trail_stop to the broker stop (cancel-replace, D-11)
+        if getattr(self._cfg, "use_broker_stop_orders", False):
+            await self._sync_broker_stop(pos)
 
         _logger.info(
             "fsm_trail_up",
