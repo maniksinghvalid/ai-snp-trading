@@ -88,13 +88,22 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **BT-03**: Backtester produces a performance report (win rate, avg R, max drawdown, profit factor, per-trade CSV)
 - [ ] **BT-04**: Backtest historical data is sourced from yfinance (or flat CSV/Parquet export), not Moomoo, avoiding broker historical-quota limits at 500-symbol scale
 
+### Strategy Optimization (Phase 7)
+
+Formalized 2026-07-03 from the quant-feedback phase. All four are config-driven (CFG-01). RISK-CIRCUIT promotes and supersedes the v2 CB-01 sketch (realized-only −2R halt rather than a −2% session-PnL rule).
+
+- [ ] **SIG-RVOL-TOD**: Intraday RVOL compares cumulative session volume at time T against the 14-day average of cumulative volume at the same time-of-day bucket (no full-day-average denominator before the close); falls back to the legacy ratio only when no TOD baseline exists
+- [ ] **RISK-TICK-STOP**: A stop violation is acted on at tick/quote granularity — a broker-side Stop-Market protective order (EXEC-02 amended to allow protective stop-market orders, D-01) or, on accounts that do not honor stop orders, a bot-side quote-tick monitor (D-02) — not at the next 5m bar close; the bar-close stop check is retained as a redundant backstop (D-03)
+- [ ] **RISK-CIRCUIT**: When cumulative daily realized loss reaches −2R (realized-only, from the trades table; −$2,000 at the fixed $100k basis), all new entries are halted for the rest of the session; the trip is persisted (survives restart), auto-resets next trading day with no intraday re-arm, cancels working entry intents (D-08), and fires a Telegram alert + structured log event (D-05/D-06/D-07)
+- [ ] **EXIT-MODEL**: The exit model shipped in rules.json is chosen from a backtest comparison (current partial/BE/trail vs no-scale/fixed-2R vs full-size-to-1.5R+trail) using the Phase 6 backtester — not by default; Phase 7 ships the config-driven, fail-closed `exit.model` selector, and the evidence-based selection is gated on Phase 6 (plan 07-06)
+
 ## v2 Requirements
 
 Acknowledged but deferred — not in the current roadmap.
 
 ### Reliability & Reporting
 
-- **CB-01**: Daily max-loss circuit breaker (halt new entries if session PnL < −2%)
+- **CB-01**: Daily max-loss circuit breaker (halt new entries if session PnL < −2%) — *superseded by RISK-CIRCUIT (Phase 7), reframed as realized-only −2R*
 - **REP-01**: Per-trade R-multiple tracking computed from the audit log
 - **ALERT-05**: Richer Telegram exit alerts (R achieved, stop level, which exit rule fired)
 - **REP-02**: Backtest performance report extras / parameter sweeps
@@ -168,12 +177,17 @@ Which phases cover which requirements.
 | BT-02 | Phase 6 | Pending |
 | BT-03 | Phase 6 | Pending |
 | BT-04 | Phase 6 | Pending |
+| SIG-RVOL-TOD | Phase 7 | Planned (07-01, 07-02, 07-05) |
+| RISK-TICK-STOP | Phase 7 | Planned (07-01, 07-03) |
+| RISK-CIRCUIT | Phase 7 | Planned (07-01, 07-05) |
+| EXIT-MODEL | Phase 7 | Config seam planned (07-04); backtest selection gated on Phase 6 (07-06) |
 
 **Coverage:**
 
 - v1 requirements: 47 total (1 CFG + 8 SCAN + 4 SIG + 5 RISK + 5 EXEC + 5 POS + 1 STATE + 5 SAFE + 4 SVC + 4 ALERT + 1 DASH + 4 BT)
 - Mapped to phases: 47 ✓
 - Unmapped: 0 ✓
+- Phase 7 strategy-optimization requirements (added 2026-07-03): SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — 4 total, all mapped to Phase 7 ✓
 
 ---
 *Requirements defined: 2026-06-23*

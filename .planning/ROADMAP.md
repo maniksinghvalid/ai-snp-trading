@@ -204,7 +204,7 @@ Plans:
 
 **Goal**: The live strategy's four structural weaknesses identified by quant feedback (2026-07-03) are closed: the RVOL gate is time-of-day normalized (restoring realistic signal frequency), exits stop feeding the left tail (model selected by backtest evidence), stop invalidation moves from 5m bar-close to tick/broker-side (eliminating fat-tail losses past 1R), and a -2R daily circuit breaker halts new entries on adverse days
 **Depends on**: Phase 6 (Backtester — required to validate exit-model change and RVOL-TOD threshold), Phase 06.2 (code-review remediation)
-**Requirements**: TBD at planning (candidate IDs: SIG-RVOL-TOD, EXIT-MODEL, RISK-TICK-STOP, RISK-CIRCUIT)
+**Requirements**: SIG-RVOL-TOD, EXIT-MODEL, RISK-TICK-STOP, RISK-CIRCUIT
 **Success Criteria** (what must be TRUE):
 
   1. Intraday RVOL compares cumulative volume at time T against the 14-day average of cumulative volume at the same time-of-day bucket (no full-day-average denominator before the close); signal frequency increases materially without loosening the institutional-interest intent
@@ -213,11 +213,26 @@ Plans:
   4. When cumulative daily realized loss reaches -2R, all new entries are halted for the rest of the session (existing positions continue to be managed); the halt is logged, alerted, and resets next trading day
   5. All thresholds (RVOL-TOD min, circuit-breaker R, exit-model parameters) live in rules.json — no hardcoded strategy literals
 
-**Plans**: TBD
+**Plans**: 6 plans (4 waves)
 
 Plans:
+**Wave 1**
 
-- [ ] 07-01: TBD at planning
+- [ ] 07-01-PLAN.md — Foundation: migration 0005 (tod_baselines + broker_stop_order_id) + StateStore TOD/circuit-breaker methods + rules.json/schema/loader config keys [Wave 1]
+
+**Wave 2** *(blocked on 07-01)*
+
+- [ ] 07-02-PLAN.md — RVOL-TOD data path: BarEvent.cum_volume + BarAggregator session-volume accumulator, fetcher.download_intraday_5m, scanner TOD baseline compute+persist [Wave 2]
+- [ ] 07-03-PLAN.md — Broker-side tick stop (RISK-TICK-STOP): gateway.place_stop_order (D-01), arm-on-fill + trail-sync cancel-replace (D-04), D-02 quote-tick fallback behind use_broker_stop_orders [Wave 2]
+- [ ] 07-04-PLAN.md — Exit-model config seam (EXIT-MODEL crit 5): rules.json exit.model enum + schema + fail-closed loader (only partial_be_trail implemented) [Wave 2]
+
+**Wave 3** *(blocked on 07-01, 07-02)*
+
+- [ ] 07-05-PLAN.md — Signal-engine gates: TOD-normalized I3 RVOL gate + -2R circuit-breaker gate (persist/auto-reset) + bot-orchestrator trip side-effects (D-08 abandon + Telegram alert) [Wave 3]
+
+**Wave 4** *(blocked on Phase 6 backtester — unbuilt)*
+
+- [ ] 07-06-PLAN.md — Exit-model SELECTION gate (EXIT-MODEL crit 2): blocking decision — backtest comparison requires the Phase 6 backtester; defer vs proceed-if-ready [Wave 4]
 
 ## Progress
 
@@ -232,7 +247,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |
-| 7. Strategy Optimization | 0/? | Not started | - |
+| 7. Strategy Optimization | 0/6 | Planned | - |
 
 ### Phase 06.2: Code review remediation (INSERTED)
 
