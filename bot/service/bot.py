@@ -109,6 +109,11 @@ class TradingBot:
 
         self._scheduler = AsyncIOScheduler(timezone=ZoneInfo("America/New_York"))
         self._entries_enabled: bool = False
+        # D-07 / Pitfall 6: one-shot circuit-breaker side-effect flag (RISK-CIRCUIT).
+        # Prevents re-alerting and re-abandoning on each bar of an already-handled trip.
+        # Initialized to False; set True on first trip or at startup when a persisted
+        # trip date matches today (restart safety — _readiness_gate reads the store).
+        self._breaker_handled: bool = False
         # These are initialised here so they're always present on the instance.
         # In production (no running loop at __init__ time) they stay None until
         # run() completes its post-readiness-gate startup block.
@@ -273,6 +278,13 @@ class TradingBot:
             return
 
         signal = await self._signal_engine.on_bar(bar)
+
+        # D-08: one-shot circuit-breaker side-effects (abandon PENDING intents + alert).
+        # Runs unconditionally so the breaker always triggers the handler even when
+        # signal_engine.on_bar returned None due to Gate 7 blocking a new entry.
+        _session_date_str = now_et().date().isoformat()
+        await self._handle_circuit_breaker_side_effects(_session_date_str)
+
         if signal is None:
             return
 
@@ -307,6 +319,66 @@ class TradingBot:
         # new entries after max_concurrent_positions fills (note_intent_emitted
         # was already called by RiskEngine; this resolves the slot).
         self._signal_engine.note_intent_resolved()
+
+    async def _handle_circuit_breaker_side_effects(self, session_date_str: str) -> None:
+        """One-shot handler for D-08 side-effects when the circuit breaker trips.
+
+        On the FIRST bar of a session in which the -2R breaker has fired:
+          1. Mark every PENDING pending_intent as ABANDONED via resolve_pending_intent.
+          2. Send exactly one Telegram alert (best-effort — ALERT-04: failure swallowed).
+          3. Set self._breaker_handled = True so subsequent bars are no-ops.
+
+        On subsequent bars in the same session (self._breaker_handled == True):
+          No action — the side-effects are one-shot (idempotent D-08 invariant).
+
+        Existing positions are NOT force-closed — management continues via
+        position_manager.on_bar (D-06: the breaker only halts NEW entries).
+
+        Called from _process_bar after signal_engine.on_bar so the gate has by then
+        persisted any new trip date via set_circuit_breaker_date.
+
+        Args:
+            session_date_str: Today's ET ISO date string (e.g. "2026-07-03").
+        """
+        # Guard: only act if breaker is tripped today AND not yet handled this session
+        if self._store.get_circuit_breaker_date() != session_date_str:
+            return
+        if self._breaker_handled:
+            return  # already handled — idempotent one-shot
+
+        # D-08: mark all PENDING entry intents as ABANDONED
+        for intent_id, code in self._store.get_pending_intent_codes("PENDING"):
+            try:
+                self._store.resolve_pending_intent(intent_id, "ABANDONED")
+                _logger.info(
+                    "circuit_breaker_intent_abandoned",
+                    intent_id=intent_id,
+                    code=code,
+                )
+            except Exception:
+                _logger.warning(
+                    "circuit_breaker_abandon_error",
+                    intent_id=intent_id,
+                    code=code,
+                    exc_info=True,
+                )
+
+        # D-08: dispatch one Telegram alert (fire-and-forget, ALERT-04)
+        try:
+            await self._alerter.send(
+                "<b>CIRCUIT BREAKER</b>: Daily -2R realized loss reached — "
+                "no new entries for the rest of the session. "
+                "Existing positions continue to be managed."
+            )
+        except Exception:
+            _logger.warning("circuit_breaker_alert_failed", exc_info=True)
+
+        self._breaker_handled = True
+        _logger.info(
+            "circuit_breaker_alert",
+            session_date=session_date_str,
+            reason="D-08: PENDING intents abandoned + one Telegram alert sent",
+        )
 
     @staticmethod
     def _parse_hhmm(s: str):
@@ -461,6 +533,24 @@ class TradingBot:
         # Step 5: Enable entries — gate has passed
         self._entries_enabled = True
         _logger.info("readiness_gate_passed", entries_enabled=True)
+
+        # Step 6: Initialize _breaker_handled from persistent store (Pitfall 6 / D-07).
+        # If the bot is restarted mid-session after a -2R trip, the stored trip date
+        # equals today → mark as already handled so the restart does not re-cancel
+        # PENDING intents or re-send the circuit-breaker Telegram alert.
+        try:
+            stored_breaker = self._store.get_circuit_breaker_date()
+            today_et = now_et().date().isoformat()
+            self._breaker_handled = (stored_breaker == today_et)
+            _logger.info(
+                "breaker_handled_initialized",
+                stored_breaker_date=stored_breaker,
+                today_et=today_et,
+                breaker_handled=self._breaker_handled,
+            )
+        except Exception:
+            self._breaker_handled = False
+            _logger.warning("breaker_handled_init_error", exc_info=True)
 
     # ============================================================
     # Lifecycle jobs (async coroutines, non-blocking via run_in_executor)
