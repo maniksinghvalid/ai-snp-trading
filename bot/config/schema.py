@@ -111,6 +111,13 @@ SCHEMA = {
                 "post_breakeven_trail"
             ],
             "properties": {
+                # model is optional (defaults to "partial_be_trail" in the loader);
+                # only the three candidate strings from the research phase are valid.
+                # Unknown strings fail here before the implemented-set guard in the loader.
+                "model": {
+                    "type": "string",
+                    "enum": ["partial_be_trail", "fixed_2r", "full_to_1p5r_trail"]
+                },
                 "initial_stop_rule": {"type": "string"},
                 "partial_profit_trigger_R": {"type": "number"},
                 "partial_profit_fraction": {"type": "number"},

@@ -27,6 +27,18 @@ class ConfigError(Exception):
 
 
 # ============================================================
+# Exit-model constants (CFG-01, EXIT-MODEL, plan 07-04)
+# ============================================================
+
+# Only the model that has been validated against live paper-account behaviour
+# is permitted to run. The other two candidates ('fixed_2r' and
+# 'full_to_1p5r_trail') are defined in the schema enum so unknown garbage is
+# rejected early, but they require Phase 6 backtester evidence before they can
+# be enabled. The loader FAILS CLOSED for any value outside this set.
+_IMPLEMENTED_EXIT_MODELS = ("partial_be_trail",)
+
+
+# ============================================================
 # Stop-rule parsing (CFG-01 / D-12)
 # ============================================================
 
@@ -146,6 +158,12 @@ class StrategyConfig:
     # rvol_tod_lookback_days: number of sessions to average for TOD volume baseline (SIG-RVOL-TOD).
     rvol_tod_lookback_days: int = 14
 
+    # ---- exit model (CFG-01, EXIT-MODEL, plan 07-04) ----
+    # Placed last so the default value does not violate Python dataclass ordering rules
+    # (fields with defaults must follow fields without defaults).  The default matches
+    # the loader's own default so direct StrategyConfig construction in tests stays valid.
+    exit_model: str = "partial_be_trail"  # exit.model — the selected exit FSM variant
+
 
 # ============================================================
 # Loader
@@ -197,6 +215,18 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
     ex_cfg = data.get("execution", {})
     svc_cfg = data.get("service", {})
 
+    # --- Step 4a: Exit-model fail-closed guard (T-07-14) ---
+    # Schema validation (Step 3) already rejected unknown strings via enum.
+    # This guard blocks the two valid-but-not-yet-implemented candidates until
+    # Phase 6 backtester evidence exists (plan 07-06).
+    model_raw = ex.get("model", "partial_be_trail")
+    if model_raw not in _IMPLEMENTED_EXIT_MODELS:
+        raise ConfigError(
+            f"exit.model '{model_raw}' requires Phase 6 backtester validation "
+            f"and is not yet implemented (see plan 07-06); "
+            f"set exit.model to 'partial_be_trail'"
+        )
+
     return StrategyConfig(
         # universe
         min_price_usd=float(uf["min_price_usd"]),
@@ -210,6 +240,7 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         latest_entry_et=str(tf["latest_entry_et"]),
         force_close_et=str(tf["force_close_et"]),
         # exit
+        exit_model=model_raw,
         initial_stop_pct=parse_initial_stop_rule(str(ex["initial_stop_rule"])),
         partial_profit_trigger_r=float(ex["partial_profit_trigger_R"]),
         partial_profit_fraction=float(ex["partial_profit_fraction"]),
