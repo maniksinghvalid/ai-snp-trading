@@ -455,15 +455,26 @@ class SignalEngine:
         session_date_str = now_et().date().isoformat()
         rvol_baseline = self._store.get_rvol_baseline(session_date_str, code)
 
-        if rvol_baseline <= 0.0:
-            _logger.info(
-                "signal_skipped_no_rvol_baseline",
-                code=code,
-                reason="no rvol_baseline in daily_scan for today",
-            )
-            return None
-
-        rvol = event.volume / rvol_baseline
+        # I3-TOD: look up the time-of-day bucketed baseline when available.
+        # time_key format is "YYYY-MM-DD HH:MM:00" — extract "HH:MM" for bucket lookup.
+        # When tod_baseline > 0, use TOD-normalized primary path (SIG-RVOL-TOD).
+        # When absent (0.0), fall back to the legacy event.volume / rvol_baseline ratio.
+        # TOD is the primary path: do NOT skip the signal when tod_baseline > 0
+        # even if rvol_baseline is missing (CFG-01, Pitfall 4).
+        time_bucket = event.time_key[11:16]  # "HH:MM"
+        tod_baseline = self._store.get_tod_baseline(session_date_str, code, time_bucket)
+        if tod_baseline > 0.0:
+            rvol = event.cum_volume / tod_baseline   # TOD-normalized (primary path)
+        else:
+            # Legacy fallback: skip only when BOTH baselines are absent
+            if rvol_baseline <= 0.0:
+                _logger.info(
+                    "signal_skipped_no_rvol_baseline",
+                    code=code,
+                    reason="no rvol_baseline in daily_scan for today",
+                )
+                return None
+            rvol = event.volume / rvol_baseline   # legacy fallback
 
         # Build the single-row DataFrame for passes_intraday_filters (reads iloc[-1]["close"])
         bars_5m = pd.DataFrame([{
