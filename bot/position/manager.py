@@ -31,6 +31,7 @@ Usage:
     manager.flush_all()                 # called by KillSwitch on shutdown (04-04)
 """
 
+import asyncio
 import datetime as _dt
 import pandas as pd
 from collections import deque
@@ -167,6 +168,10 @@ class PositionManager:
         # SAFE-03 reconcile_once reads this via getattr to skip mid-exit positions.
         self._exiting: set = set()
 
+        # One-shot guard for D-02 quote-tick fallback: prevents repeated tick callbacks
+        # from firing manage_exit multiple times for the same position (D-02 single-exit).
+        self._quote_exiting: set = set()
+
     # ============================================================
     # Public API — fill processing
     # ============================================================
@@ -239,19 +244,20 @@ class PositionManager:
     # ============================================================
 
     async def arm_stop_protection(self, pos) -> None:
-        """Place or register protective stop for an entry fill (D-01/D-03).
+        """Place or register protective stop for an entry fill (D-01/D-02/D-03).
 
         Called immediately after on_fill() confirms an entry fill (post-fill hook
         in bot.service.bot). Two dispatch paths:
 
           cfg.use_broker_stop_orders=True  → D-01 broker path: place a live STOP
               order via gateway.place_stop_order(); persist broker_stop_order_id.
-          cfg.use_broker_stop_orders=False → D-03 fallback: no-op here; bar-close
-              FSM is the sole stop mechanism.
+          cfg.use_broker_stop_orders=False → D-02 fallback: subscribe the code to
+              quote ticks via gateway.subscribe_quote(); _on_quote fires an
+              immediate exit when bid <= trail_stop (tick-level invalidation).
 
         No-op when self._gateway is None (test / paper env without gateway).
         Non-fatal: broker placement failure is caught, logged, and swallowed — the
-        bar-close FSM (D-03) remains the backstop in all cases (D-01 comment).
+        bar-close FSM (D-03) remains the backstop in all cases (D-01/D-02 comment).
 
         Args:
             pos: PositionState (ACTIVE phase) with entry_price and trail_stop set.
@@ -262,7 +268,25 @@ class PositionManager:
         cfg = self._cfg
         use_broker = getattr(cfg, "use_broker_stop_orders", False)
         if not use_broker:
-            # D-03 fallback active; bar-close FSM is the sole stop mechanism.
+            # D-02 fallback: subscribe to quote ticks for tick-level stop invalidation.
+            try:
+                await self._gateway.subscribe_quote(
+                    [pos.code],
+                    callback=lambda code, bid: asyncio.get_event_loop().create_task(
+                        self._on_quote(code, bid)
+                    ),
+                )
+                _logger.info(
+                    "quote_tick_armed",
+                    code=pos.code,
+                    trail_stop=pos.trail_stop,
+                )
+            except Exception:
+                _logger.warning(
+                    "quote_tick_arm_failed",
+                    code=pos.code,
+                    exc_info=True,
+                )
             return
 
         # D-01 broker path: place a live STOP order (protective sell).
@@ -336,6 +360,55 @@ class PositionManager:
             new_order_id=order_id,
             trail_stop=pos.trail_stop,
         )
+
+    async def _on_quote(self, code: str, bid_price: float) -> None:
+        """Handle a quote-tick push for D-02 bot-side stop invalidation.
+
+        Called from the QuoteTickHandler callback registered by arm_stop_protection
+        when use_broker_stop_orders=False. If a monitored position exists and
+        bid_price <= pos.trail_stop, fires an immediate exit (manage_exit) for
+        the remaining_quantity — replicating the bar-close stop-out but at tick
+        granularity (D-02).
+
+        One-shot guard (self._quote_exiting): once the exit has been initiated for
+        a code, subsequent ticks for the same code are silently discarded to prevent
+        double-fire (D-02 exactly-once semantics).
+
+        A bid above trail_stop is silently ignored.
+
+        Args:
+            code:      Moomoo-format stock code (e.g. "US.AAPL").
+            bid_price: Current best bid from the quote push.
+        """
+        pos = self._positions.get(code)
+        if pos is None or pos.phase.value in ("AWAITING_FILL", "CLOSED"):
+            return
+
+        # One-shot guard — don't fire again if already initiated
+        if code in self._quote_exiting:
+            return
+
+        if bid_price > pos.trail_stop:
+            return  # still above stop; no action
+
+        # bid <= trail_stop: fire the immediate exit (D-02 tick-level invalidation)
+        self._quote_exiting.add(code)
+        _logger.info(
+            "quote_stop_triggered",
+            code=code,
+            bid_price=bid_price,
+            trail_stop=pos.trail_stop,
+            remaining_quantity=pos.remaining_quantity,
+        )
+        try:
+            await self._engine.manage_exit(
+                code=code,
+                qty=pos.remaining_quantity,
+                pos=pos,
+            )
+        except Exception:
+            _logger.warning("quote_stop_exit_failed", code=code, exc_info=True)
+            # Non-fatal; the one-shot guard prevents repeated attempts.
 
     # ============================================================
     # Public API — startup reconciliation

@@ -235,6 +235,55 @@ def _safe_close(ctx) -> None:
 
 
 # ============================================================
+# QuoteTickHandler — D-02 quote-tick fallback push handler
+# ============================================================
+
+class QuoteTickHandler:
+    """Quote push handler for the D-02 bot-side tick-level stop fallback.
+
+    Registered on the OpenQuoteContext via set_handler() before subscribing to
+    SubType.QUOTE. Each incoming quote push invokes the callback with (code, bid_price)
+    so PositionManager._on_quote can fire an immediate exit when the bid touches the
+    trail_stop (D-02 quote-tick invalidation).
+
+    Design mirrors the BarAggregator pattern: a stateless handler that bridges
+    the moomoo SDK push thread to the async event loop via a callback.
+
+    The QuoteHandlerBase mixin is imported lazily to avoid a top-level moomoo
+    import failure when moomoo-api is absent (test-env compatibility).
+
+    Args:
+        callback: Callable(code: str, bid_price: float) invoked per push.
+    """
+
+    def __init__(self, callback) -> None:
+        self._callback = callback
+
+    def on_recv_rsp(self, rsp_pb):
+        """SDK push callback — called on the moomoo receive thread.
+
+        Parses the quote data to extract code and bid_price, then invokes
+        the registered callback. Non-fatal: any exception is logged and
+        suppressed so a bad tick does not crash the push thread.
+        """
+        try:
+            ret, data = super(QuoteTickHandler, self).on_recv_rsp(rsp_pb)
+            if ret != RET_OK or data is None or len(data) == 0:
+                return
+            for _, row in data.iterrows():
+                code = str(row.get("code", "") or "")
+                bid_price_raw = row.get("bid_price", None) or row.get("last_price", None)
+                if code and bid_price_raw is not None:
+                    try:
+                        bid_price = float(bid_price_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    self._callback(code, bid_price)
+        except Exception:
+            _logger.warning("quote_tick_handler_error", exc_info=True)
+
+
+# ============================================================
 # Gateway
 # ============================================================
 
@@ -539,6 +588,45 @@ class MoomooGateway:
 
         await loop.run_in_executor(None, _subscribe_blocking)
         _logger.info("subscribed_k5m", codes=codes, count=len(codes))
+
+    async def subscribe_quote(self, codes: list, callback) -> None:
+        """Subscribe to real-time bid/ask quote ticks for the D-02 fallback path.
+
+        Requests SubType.QUOTE on the provided codes and registers a QuoteTickHandler
+        that bridges each incoming bid_price to the provided callback. The callback
+        signature is: callback(code: str, bid_price: float) -> None (sync or async;
+        called from the QuoteTickHandler.on_recv_rsp on the push thread).
+
+        Used by PositionManager.arm_stop_protection when use_broker_stop_orders=False
+        to arm tick-level stop invalidation without a broker stop order (D-02).
+
+        Parameters:
+            codes:    List of Moomoo-format codes (e.g. ["US.AAPL"]).
+            callback: Callable invoked on each quote push with (code, bid_price).
+
+        Raises:
+            GatewayError: if subscribe() returns non-RET_OK.
+        """
+        # Deferred import — test-env compatibility (no moomoo-api in CI).
+        from moomoo import SubType
+
+        # Register the handler BEFORE subscribing so the first push is not lost.
+        handler = QuoteTickHandler(callback=callback)
+        self._quote_ctx.set_handler(handler)
+
+        loop = asyncio.get_running_loop()
+
+        def _subscribe_blocking():
+            ret, msg = self._quote_ctx.subscribe(
+                codes,
+                [SubType.QUOTE],
+                is_first_push=True,
+                subscribe_push=True,
+            )
+            _check_ret(ret, msg, "subscribe_quote")
+
+        await loop.run_in_executor(None, _subscribe_blocking)
+        _logger.info("subscribed_quote", codes=codes, count=len(codes))
 
     async def unsubscribe(self, codes: list, subtypes: list = None) -> None:
         """Unsubscribe K_5M pushes for codes evicted from the watchlist (SIG-01).
