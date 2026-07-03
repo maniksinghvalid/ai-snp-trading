@@ -27,6 +27,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
+from typing import Optional
 
 from bot.state.migrations import run_migrations
 
@@ -789,4 +790,95 @@ class StateStore:
                         scan_pass,
                     ),
                 )
+            self._conn.commit()
+
+    # ============================================================
+    # Phase 7 — TOD Baseline CRUD (SIG-RVOL-TOD)
+    # ============================================================
+
+    def get_tod_baseline(self, scan_date: str, code: str, time_bucket: str) -> float:
+        """Return TOD cumulative-volume baseline for (scan_date, code, time_bucket).
+
+        Returns 0.0 when no row exists (caller falls back to legacy RVOL).
+        scan_date:   ET date ISO string (e.g. "2026-07-03").
+        time_bucket: "HH:MM" bucket label (e.g. "10:05").
+
+        Uses the same lock + parameterized query pattern as get_rvol_baseline
+        (lines 601–619).  All placeholders are '?' — no value interpolation.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cum_vol_mean FROM tod_baselines "
+                "WHERE scan_date=? AND code=? AND time_bucket=?",
+                (scan_date, code, time_bucket),
+            ).fetchone()
+        return float(row[0]) if row is not None else 0.0
+
+    def upsert_tod_baselines(self, scan_date: str, code: str, baselines: dict) -> None:
+        """Upsert TOD cumulative-volume baselines for a scan candidate.
+
+        baselines: dict of {"HH:MM": float} — time_bucket → 14-day avg cum_vol.
+        Uses INSERT OR REPLACE for batch upsert so re-running the premarket scan
+        for the same (scan_date, code) replaces stale values without leaving
+        duplicate rows.  Commits once after the batch (not per row).
+
+        All placeholders are '?' — no value interpolation into SQL text (T-07-02).
+        """
+        with self._lock:
+            self._conn.executemany(
+                """INSERT OR REPLACE INTO tod_baselines
+                   (scan_date, code, time_bucket, cum_vol_mean)
+                   VALUES (?, ?, ?, ?)""",
+                [(scan_date, code, bucket, val) for bucket, val in baselines.items()],
+            )
+            self._conn.commit()
+
+    # ============================================================
+    # Phase 7 — Circuit-breaker meta persistence (RISK-CIRCUIT, D-07)
+    # ============================================================
+
+    def get_circuit_breaker_date(self) -> Optional[str]:
+        """Return the ET date string when the daily -2R circuit breaker last tripped.
+
+        Returns None when no breaker row exists in the meta table (D-07).
+        The stored value is the ET calendar date string (e.g. "2026-07-03").
+        A stale date from a prior session is NOT auto-reset here; the caller
+        (signal_engine._is_circuit_breaker_tripped) is responsible for comparing
+        against today and calling clear_circuit_breaker() when appropriate.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key='circuit_breaker_tripped_date'"
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_circuit_breaker_date(self, date_str: str) -> None:
+        """Persist the circuit-breaker trip date to the meta table (upsert, D-07).
+
+        Uses INSERT ... ON CONFLICT(key) DO UPDATE so both first-trip (INSERT)
+        and same-session re-trips (UPDATE) work without raising IntegrityError.
+        Commits immediately for durability across process restart (D-07).
+
+        date_str: ET calendar date ISO string (e.g. "2026-07-03").
+        All placeholders are '?' — no value interpolation (T-07-02).
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO meta(key, value) VALUES('circuit_breaker_tripped_date', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (date_str,),
+            )
+            self._conn.commit()
+
+    def clear_circuit_breaker(self) -> None:
+        """Remove the circuit-breaker state row from the meta table (D-07 auto-reset).
+
+        Called by signal_engine._is_circuit_breaker_tripped when stored_date is
+        from a prior session — auto-resets the breaker for the new trading day.
+        Commits immediately.
+        """
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM meta WHERE key='circuit_breaker_tripped_date'"
+            )
             self._conn.commit()
