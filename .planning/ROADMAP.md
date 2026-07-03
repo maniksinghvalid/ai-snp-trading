@@ -222,8 +222,8 @@ Plans:
 
 **Wave 2** *(blocked on 07-01)*
 
-- [ ] 07-02-PLAN.md — RVOL-TOD data path: BarEvent.cum_volume + BarAggregator session-volume accumulator, fetcher.download_intraday_5m, scanner TOD baseline compute+persist [Wave 2]
-- [ ] 07-03-PLAN.md — Broker-side tick stop (RISK-TICK-STOP): gateway.place_stop_order (D-01), arm-on-fill + trail-sync cancel-replace (D-04), D-02 quote-tick fallback behind use_broker_stop_orders [Wave 2]
+- [x] 07-02-PLAN.md — RVOL-TOD data path: BarEvent.cum_volume + BarAggregator session-volume accumulator, fetcher.download_intraday_5m, scanner TOD baseline compute+persist [Wave 2]
+- [x] 07-03-PLAN.md — Broker-side tick stop (RISK-TICK-STOP): gateway.place_stop_order (D-01), arm-on-fill + trail-sync cancel-replace (D-04), D-02 quote-tick fallback behind use_broker_stop_orders [Wave 2]
 - [ ] 07-04-PLAN.md — Exit-model config seam (EXIT-MODEL crit 5): rules.json exit.model enum + schema + fail-closed loader (only partial_be_trail implemented) [Wave 2]
 
 **Wave 3** *(blocked on 07-01, 07-02)*
@@ -247,14 +247,14 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |
-| 7. Strategy Optimization | 1/6 | In Progress|  |
+| 7. Strategy Optimization | 3/6 | In Progress|  |
 
 ### Phase 06.2: Code review remediation (INSERTED)
 
 **Goal:** Close all 16 confirmed findings from the 2026-07-02 multi-agent code review (develop vs main) so the bot is safe for an unattended live paper run (Tier 1 blockers), behaviorally correct (Tier 2), and maintainable (Tier 3). Spec: `.planning/phases/06.2-code-review-remediation/06.2-SPEC.md`
 **Requirements**: Regression-test-first (TDD) per finding; full suite green per tier; live premarket UAT gates Tier 1 sign-off
 **Depends on:** Phase 06.1 (wire core trade loop) — NOT Phase 6 (backtester, unbuilt)
-**Plans:** 1/6 plans executed
+**Plans:** 3/6 plans executed
 Plans:
 **Wave 1**
 
