@@ -376,6 +376,7 @@ def _make_bot_with_full_pipeline():
 
     mock_position_manager = MagicMock()
     mock_position_manager.on_bar = AsyncMock()
+    mock_position_manager.arm_stop_protection = AsyncMock()  # D-01 post-fill hook
 
     bot = TradingBot(
         cfg=mock_cfg,

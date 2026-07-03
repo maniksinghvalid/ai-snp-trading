@@ -296,6 +296,7 @@ class TradingBot:
             )
             self._position_manager.register_position(pos)   # DB-first (manager.py:1003)
             self._position_manager.on_fill(fill)            # FSM AWAITING_FILL → ACTIVE
+            await self._position_manager.arm_stop_protection(pos)  # D-01: broker stop post-fill
         else:
             # Abandon path: intent was not filled; resolve it in state store.
             self._store.resolve_pending_intent(intent.intent_id, "ABANDONED")

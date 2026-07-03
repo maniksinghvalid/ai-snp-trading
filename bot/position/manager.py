@@ -127,6 +127,7 @@ class PositionManager:
         bar_buffer=None,
         on_entry_alert: Optional[Callable] = None,
         on_exit_alert: Optional[Callable] = None,
+        gateway=None,
     ) -> None:
         """Initialise PositionManager.
 
@@ -145,6 +146,8 @@ class PositionManager:
                             Signature: on_exit_alert(code, exit_reason, r_multiple).
                             None by default — backward compatible with existing call sites.
                             Invocation failures are logged and never propagate (ALERT-04).
+            gateway:        Optional MoomooGateway for broker-side stop management (D-01/D-04).
+                            None by default — all stop logic falls back to bar-close FSM.
         """
         self._store = store
         self._engine = engine
@@ -153,6 +156,7 @@ class PositionManager:
         self._bar_buffer: Optional[Dict[str, deque]] = bar_buffer
         self._on_entry_alert: Optional[Callable] = on_entry_alert
         self._on_exit_alert: Optional[Callable] = on_exit_alert
+        self._gateway = gateway
 
         # In-memory dict keyed by stock code (e.g. "US.AAPL" → PositionState).
         # Only one live position per code is supported at a time (EXEC-04 guard).
@@ -229,6 +233,62 @@ class PositionManager:
             self._trigger_breakeven(pos, bar.time_key)
         elif action == FSM_ACTION_TRAIL_UP:
             self._trigger_trail_up(pos, bar.time_key)
+
+    # ============================================================
+    # Public API — broker stop placement (D-01/D-03)
+    # ============================================================
+
+    async def arm_stop_protection(self, pos) -> None:
+        """Place or register protective stop for an entry fill (D-01/D-03).
+
+        Called immediately after on_fill() confirms an entry fill (post-fill hook
+        in bot.service.bot). Two dispatch paths:
+
+          cfg.use_broker_stop_orders=True  → D-01 broker path: place a live STOP
+              order via gateway.place_stop_order(); persist broker_stop_order_id.
+          cfg.use_broker_stop_orders=False → D-03 fallback: no-op here; bar-close
+              FSM is the sole stop mechanism.
+
+        No-op when self._gateway is None (test / paper env without gateway).
+        Non-fatal: broker placement failure is caught, logged, and swallowed — the
+        bar-close FSM (D-03) remains the backstop in all cases (D-01 comment).
+
+        Args:
+            pos: PositionState (ACTIVE phase) with entry_price and trail_stop set.
+        """
+        if self._gateway is None:
+            return
+
+        cfg = self._cfg
+        use_broker = getattr(cfg, "use_broker_stop_orders", False)
+        if not use_broker:
+            # D-03 fallback active; bar-close FSM is the sole stop mechanism.
+            return
+
+        # D-01 broker path: place a live STOP order (protective sell).
+        try:
+            from moomoo import TrdSide  # deferred import: test-env compatibility
+            order_id = await self._gateway.place_stop_order(
+                code=pos.code,
+                qty=pos.remaining_quantity,
+                stop_price=pos.trail_stop,
+                trd_side=TrdSide.SELL,
+            )
+            pos.broker_stop_order_id = order_id
+            self._persist_position(pos, event="broker_stop_placed")
+            _logger.info(
+                "broker_stop_placed",
+                code=pos.code,
+                order_id=order_id,
+                stop_price=pos.trail_stop,
+            )
+        except Exception:
+            _logger.warning(
+                "broker_stop_placement_failed",
+                code=pos.code,
+                exc_info=True,
+            )
+            # Non-fatal: bar-close FSM (D-03) is the backstop.
 
     # ============================================================
     # Public API — startup reconciliation
@@ -1133,4 +1193,5 @@ def _row_to_position_state(row: dict) -> PositionState:
         avg_fill_price=float(row["avg_fill_price"]) if row.get("avg_fill_price") is not None else None,
         opened_at=_parse_dt(row.get("opened_at")),
         updated_at=_parse_dt(row.get("updated_at")),
+        broker_stop_order_id=str(row["broker_stop_order_id"]) if row.get("broker_stop_order_id") else None,
     )

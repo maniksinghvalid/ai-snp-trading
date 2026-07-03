@@ -673,6 +673,66 @@ class MoomooGateway:
         _logger.info("order_placed", code=code, qty=qty, price=price, order_id=order_id)
         return order_id
 
+    async def place_stop_order(self, code: str, qty: int, stop_price: float, trd_side) -> str:
+        """Place a broker-side protective stop order and return the order_id (D-01/EXEC-02).
+
+        Uses OrderType.STOP (the ONLY allowed stop-order path — EXEC-02 amendment D-01).
+        price=0.0 and aux_price=stop_price match the moomoo SDK stop-order semantics:
+        the SDK triggers the order when the market touches aux_price, then fills at
+        the next available price (market). Deferred import of OrderType/TrdSide for
+        test-env compatibility. Every placed stop is appended to the audit log (SAFE-05).
+
+        Parameters:
+            code:       Moomoo-format code (e.g. "US.AAPL").
+            qty:        Integer share quantity to protect.
+            stop_price: The trigger price for the stop (trail_stop or initial_stop).
+            trd_side:   TrdSide.SELL for long-only protective stops (caller supplies).
+
+        Returns:
+            str — broker-assigned order_id from the SDK response row.
+
+        Raises:
+            GatewayError — if SDK returns non-RET_OK.
+        """
+        # Deferred import — test-env compatibility (moomoo-api not installed in CI).
+        from moomoo import OrderType  # noqa: F401
+
+        loop = asyncio.get_running_loop()
+
+        def _stop_blocking():
+            ret, data = self._trade_ctx.place_order(
+                price=0.0,                              # ignored for STOP orders (SDK semantic)
+                qty=int(qty),
+                code=code,
+                trd_side=trd_side,
+                order_type=OrderType.STOP,              # EXEC-02 amendment D-01: only allowed STOP path
+                aux_price=float(stop_price),            # trigger price for the stop
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+            )
+            _check_ret(ret, data, "place_stop_order")
+            row = data.iloc[0] if hasattr(data, "iloc") else data[0]
+            order_id = str(row.get("order_id", "") or row.get("orderID", ""))
+            from bot.safety.audit_log import append_audit
+            append_audit({
+                "event": "stop_order_placed",
+                "code": code,
+                "qty": int(qty),
+                "stop_price": float(stop_price),
+                "order_id": order_id,
+            })
+            return order_id
+
+        order_id = await loop.run_in_executor(None, _stop_blocking)
+        _logger.info(
+            "stop_order_placed",
+            code=code,
+            qty=qty,
+            stop_price=stop_price,
+            order_id=order_id,
+        )
+        return order_id
+
     async def cancel_order(self, order_id: str) -> None:
         """Cancel an open order via modify_order(op=CANCEL) (EXEC-03).
 

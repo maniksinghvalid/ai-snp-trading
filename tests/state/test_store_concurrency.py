@@ -351,6 +351,7 @@ def _seed_positions(store: StateStore) -> None:
         avg_fill_price=175.0,
         opened_at=datetime(2026, 1, 15, 14, 30, 0, tzinfo=timezone.utc),
         updated_at=datetime(2026, 1, 15, 14, 30, 0, tzinfo=timezone.utc),
+        broker_stop_order_id=None,
     )
     store.upsert_position(pos)
 
