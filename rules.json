@@ -28,6 +28,7 @@
   },
 
   "exit": {
+    "model": "partial_be_trail",
     "initial_stop_rule": "lod_minus_1pct",
     "partial_profit_trigger_R": 0.75,
     "partial_profit_fraction": 0.3333,
