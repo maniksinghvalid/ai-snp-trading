@@ -399,6 +399,57 @@ class SignalEngine:
         """
         return self._store.has_pending_intent(code)
 
+    def _is_circuit_breaker_tripped(self, session_date_str: str) -> bool:
+        """Return True if the -2R daily circuit breaker is active for this session.
+
+        Check order (D-07 restart-persistence):
+          1. If meta.circuit_breaker_tripped_date == today → already tripped, return True
+             (short-circuit: no P&L re-query on subsequent bars of a tripped day).
+          2. If stored date is from a prior session → auto-reset (D-07, clear_circuit_breaker).
+          3. Query today's realized P&L (closed trades only — Pitfall 3, never mark-to-market).
+          4. If realized <= -(daily_circuit_breaker_r * 1R) → trip: persist + return True.
+          5. Otherwise return False.
+
+        1R = (cfg.max_risk_per_trade_pct / 100) * cfg.sizing_equity_usd.
+        All values read from cfg.* — no hardcoded 1000/2000/2.0 (CFG-01).
+
+        Callers: on_bar Gate 7 only. Never increments _pending_count.
+        Side-effect on first trip: set_circuit_breaker_date + circuit_breaker_tripped log.
+
+        Args:
+            session_date_str: Today's ET ISO date string (e.g. "2026-07-03").
+
+        Returns:
+            bool: True if entries must be blocked for this session.
+        """
+        stored_date = self._store.get_circuit_breaker_date()
+        if stored_date == session_date_str:
+            # Already tripped today — fast path: no P&L lookup (T-07-18 mitigation)
+            return True
+        if stored_date is not None and stored_date < session_date_str:
+            # Stale prior-session entry → auto-reset (D-07)
+            self._store.clear_circuit_breaker()
+
+        # Check today's realized P&L (closed trades only — Pitfall 3)
+        stats = self._store.get_daily_trade_stats(session_date_str)
+        realized = stats.get("realized_pnl", 0.0)
+        one_r = (self._cfg.max_risk_per_trade_pct / 100.0) * (
+            self._cfg.sizing_equity_usd if self._cfg.sizing_equity_usd else 100_000.0
+        )
+        threshold = -self._cfg.daily_circuit_breaker_r * one_r
+
+        if realized <= threshold:
+            self._store.set_circuit_breaker_date(session_date_str)
+            _logger.warning(
+                "circuit_breaker_tripped",
+                realized_pnl=realized,
+                threshold=threshold,
+                session_date=session_date_str,
+            )
+            return True
+
+        return False
+
     # ============================================================
     # Main Signal Evaluation (on_bar)
     # ============================================================
@@ -410,6 +461,7 @@ class SignalEngine:
           1. Premarket-high present and > 0 (D-03)
           2. passes_intraday_filters() → I1/I2/I3 (SIG-03)
           3. Entry window [earliest_entry_et, latest_entry_et) (SIG-03)
+          7. Daily -2R circuit breaker (RISK-CIRCUIT / D-05/D-06/D-07) — before Gate 4 to skip broker SDK call on tripped days
           4. Concurrent-position cap < max_concurrent_positions (SIG-04/RISK-04)
           5. Re-entry: code broker-flat AND no live PENDING intent (D-10)
           6. Daily cap: filled_count + pending_count < max_trades_per_day (RISK-05/D-09)
@@ -511,6 +563,21 @@ class SignalEngine:
                 "signal_skipped_outside_window",
                 code=code,
                 reason="current ET time is outside the entry window",
+            )
+            return None
+
+        # --------------------------------------------------------
+        # Gate 7: Daily -2R circuit breaker (RISK-CIRCUIT / D-05/D-06/D-07)
+        # Placed BEFORE Gate 4 to skip the broker get_positions SDK call on
+        # a tripped day — no network round-trip on every bar (T-07-18).
+        # Side effects (D-08: cancel PENDING intents + Telegram alert) are
+        # handled in bot.service.bot to keep SignalEngine dependency-light.
+        # --------------------------------------------------------
+        if self._is_circuit_breaker_tripped(session_date_str):
+            _logger.info(
+                "signal_skipped_circuit_breaker",
+                code=code,
+                reason="daily -2R circuit breaker tripped — no new entries this session",
             )
             return None
 
