@@ -523,3 +523,69 @@ class TestPlaceStopOrder:
         assert len(stop_events) == 1, (
             f"Expected exactly one 'stop_order_placed' audit event; got: {audit_entries}"
         )
+
+
+# ============================================================
+# Tests: subscribe_quote (D-02 quote-tick fallback subscription)
+# ============================================================
+
+class TestSubscribeQuote:
+    """Tests for MoomooGateway.subscribe_quote (07-03 D-02 quote-tick fallback).
+
+    subscribe_quote must:
+    - Request SubType.QUOTE on the provided codes via _quote_ctx.subscribe
+    - Register a QuoteTickHandler (callback-based) on the quote context
+    - Raise GatewayError on non-RET_OK
+    """
+
+    def test_subscribe_quote_uses_subtype_quote(self):
+        """subscribe_quote calls _quote_ctx.subscribe with SubType.QUOTE."""
+        import sys
+        import types
+
+        mock_quote_ctx = MagicMock()
+        mock_quote_ctx.subscribe = MagicMock(return_value=(0, "ok"))  # RET_OK=0
+
+        gw = _make_gateway(mock_quote_ctx=mock_quote_ctx)
+
+        # Stub SubType with QUOTE sentinel
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        quote_sentinel = object()
+        moomoo_mod.SubType = MagicMock()
+        moomoo_mod.SubType.QUOTE = quote_sentinel
+
+        def _noop_callback(code, bid_price):
+            pass
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            _run(gw.subscribe_quote(["US.AAPL"], callback=_noop_callback))
+
+        mock_quote_ctx.subscribe.assert_called_once()
+        call_args = mock_quote_ctx.subscribe.call_args
+        # Second positional arg (or kwarg subtypes) must include SubType.QUOTE
+        all_args = list(call_args.args) + list(call_args.kwargs.values())
+        assert any(
+            quote_sentinel in (a if isinstance(a, (list, tuple)) else [a])
+            for a in all_args
+        ), f"subscribe_quote must pass SubType.QUOTE; actual args: {call_args}"
+
+    def test_subscribe_quote_raises_gateway_error_on_failure(self):
+        """subscribe_quote raises GatewayError when _quote_ctx.subscribe returns non-RET_OK."""
+        import sys
+        import types
+
+        mock_quote_ctx = MagicMock()
+        mock_quote_ctx.subscribe = MagicMock(return_value=(1, "quota exceeded"))  # non-RET_OK
+
+        gw = _make_gateway(mock_quote_ctx=mock_quote_ctx)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.SubType = MagicMock()
+        moomoo_mod.SubType.QUOTE = "QUOTE_SENTINEL"
+
+        def _noop_callback(code, bid_price):
+            pass
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            with pytest.raises(GatewayError):
+                _run(gw.subscribe_quote(["US.AAPL"], callback=_noop_callback))

@@ -2770,3 +2770,143 @@ class TestSyncBrokerStop:
         assert new_stop_prices[0] == 103.0, (
             f"Replacement must use ratcheted trail_stop=103.0, got {new_stop_prices[0]}"
         )
+
+
+# ============================================================
+# Test: _on_quote + quote-tick fallback arm path (D-02)
+# ============================================================
+
+class TestQuoteTickFallback:
+    """Tests for arm_stop_protection else-branch (use_broker_stop_orders=False)
+    and _on_quote one-shot tick-level stop (07-03 D-02)."""
+
+    def test_fallback_path_does_not_call_place_stop_order(self, open_store, mock_strategy):
+        """With use_broker_stop_orders=False, arm_stop_protection must NOT call
+        place_stop_order; instead it arms the quote-tick monitor."""
+        import sys
+        import types
+
+        mock_gateway = MagicMock()
+        mock_gateway.place_stop_order = AsyncMock(return_value="SHOULD-NOT-BE-CALLED")
+        mock_gateway.subscribe_quote = AsyncMock()
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False  # quote-fallback path
+
+        manager = PositionManager(
+            store=open_store,
+            engine=MagicMock(),
+            cfg=cfg,
+            strategy=mock_strategy,
+            gateway=mock_gateway,
+        )
+
+        pos = _make_pos(phase=PositionPhase.ACTIVE, remaining_quantity=100, trail_stop=98.0)
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        moomoo_mod = sys.modules.get("moomoo") or types.ModuleType("moomoo")
+        moomoo_mod.TrdSide = MagicMock()
+        moomoo_mod.TrdSide.SELL = "SELL_SENTINEL"
+
+        with patch.dict("sys.modules", {"moomoo": moomoo_mod}):
+            asyncio.run(manager.arm_stop_protection(pos))
+
+        mock_gateway.place_stop_order.assert_not_called()
+        mock_gateway.subscribe_quote.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_quote_below_trail_stop_fires_manage_exit(self, open_store, mock_strategy):
+        """_on_quote with bid_price <= pos.trail_stop invokes engine.manage_exit
+        once for the remaining_quantity."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=100)
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        manager = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=200,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # bid at exactly trail_stop — should fire
+        await manager._on_quote(pos.code, bid_price=98.0)
+
+        mock_engine.manage_exit.assert_called_once()
+        call_kwargs = mock_engine.manage_exit.call_args
+        assert 200 in (call_kwargs.args + tuple(call_kwargs.kwargs.values())), (
+            "_on_quote must pass remaining_quantity=200 to manage_exit"
+        )
+
+    @pytest.mark.asyncio
+    async def test_on_quote_above_trail_stop_does_nothing(self, open_store, mock_strategy):
+        """_on_quote with bid_price > pos.trail_stop must NOT invoke manage_exit."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=0)
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        manager = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=200,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+
+        # bid above trail_stop — should NOT fire
+        await manager._on_quote(pos.code, bid_price=100.0)
+
+        mock_engine.manage_exit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_quote_fires_at_most_once(self, open_store, mock_strategy):
+        """_on_quote fires the exit at most once per position (one-shot guard).
+        A second tick at the same or lower bid must NOT call manage_exit again."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=200)
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        manager = PositionManager(
+            store=open_store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+        )
+
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            remaining_quantity=200,
+            trail_stop=98.0,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # First tick: fires
+        await manager._on_quote(pos.code, bid_price=97.5)
+        # Second tick: same bid — must NOT fire again
+        await manager._on_quote(pos.code, bid_price=97.0)
+
+        assert mock_engine.manage_exit.call_count == 1, (
+            "_on_quote one-shot guard must prevent double-fire on repeated ticks"
+        )
