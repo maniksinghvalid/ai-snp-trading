@@ -232,7 +232,7 @@ Plans:
 
 **Wave 4** *(blocked on Phase 6 backtester — unbuilt)*
 
-- [ ] 07-06-PLAN.md — Exit-model SELECTION gate (EXIT-MODEL crit 2): blocking decision — backtest comparison requires the Phase 6 backtester; defer vs proceed-if-ready [Wave 4]
+- [x] 07-06-PLAN.md — Exit-model SELECTION gate (EXIT-MODEL crit 2): blocking decision — backtest comparison requires the Phase 6 backtester; defer vs proceed-if-ready [Wave 4]
 
 ## Progress
 
@@ -247,14 +247,14 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Order and Position Management | 0/4 | Not started | - |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |
-| 7. Strategy Optimization | 4/6 | In Progress|  |
+| 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 06.2: Code review remediation (INSERTED)
 
 **Goal:** Close all 16 confirmed findings from the 2026-07-02 multi-agent code review (develop vs main) so the bot is safe for an unattended live paper run (Tier 1 blockers), behaviorally correct (Tier 2), and maintainable (Tier 3). Spec: `.planning/phases/06.2-code-review-remediation/06.2-SPEC.md`
 **Requirements**: Regression-test-first (TDD) per finding; full suite green per tier; live premarket UAT gates Tier 1 sign-off
 **Depends on:** Phase 06.1 (wire core trade loop) — NOT Phase 6 (backtester, unbuilt)
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 Plans:
 **Wave 1**
 
