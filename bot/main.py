@@ -108,6 +108,7 @@ def main() -> None:
         on_exit_alert=lambda code, reason, r: asyncio.create_task(
             alerter.send_exit_alert(code, reason, r)
         ),
+        gateway=gateway,
     )
 
     # Step 6: Construct KillSwitch (flush registration happens inside TradingBot)
