@@ -178,7 +178,7 @@ Which phases cover which requirements.
 | BT-03 | Phase 6 | Pending |
 | BT-04 | Phase 6 | Pending |
 | SIG-RVOL-TOD | Phase 7 | Planned (07-01, 07-02, 07-05) |
-| RISK-TICK-STOP | Phase 7 | Planned (07-01, 07-03) |
+| RISK-TICK-STOP | Phase 7 | Built (07-01, 07-03) but dead in production — wiring gap tracked as Phase 07.1 |
 | RISK-CIRCUIT | Phase 7 | Planned (07-01, 07-05) |
 | EXIT-MODEL | Phase 7 | Config seam planned (07-04); backtest selection gated on Phase 6 (07-06) |
 

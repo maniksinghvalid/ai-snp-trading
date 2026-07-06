@@ -249,6 +249,23 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 6. Backtester | 0/4 | Not started | - |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
+### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
+
+**Goal**: `bot/main.py`'s `PositionManager(...)` construction actually receives `gateway=`, so `arm_stop_protection()` runs live instead of silently no-op'ing — RISK-TICK-STOP (broker Stop-Market + quote-tick fallback) becomes real on the live/paper path instead of dead code, with a regression test that fails if the wiring is ever dropped again
+**Requirements**: RISK-TICK-STOP (completes the wiring gap left by 07-03; v1.0-MILESTONE-AUDIT.md Gap 1, discovered 2026-07-06)
+**Depends on:** Phase 7 (07-03-PLAN.md built `arm_stop_protection`/`gateway.place_stop_order`; this phase wires it into production construction)
+**Success Criteria** (what must be TRUE):
+
+  1. `bot/main.py`'s `PositionManager(...)` call passes `gateway=gateway` (or an equivalent late-bind in `bot/service/bot.py::_do_startup_wiring`, mirroring the existing `_bar_buffer` pattern), so `position_manager._gateway is not None` after the real construction sequence — not just in a manually-injected test
+  2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
+  3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.1 to break down)
+
 ### Phase 06.2: Code review remediation (INSERTED)
 
 **Goal:** Close all 16 confirmed findings from the 2026-07-02 multi-agent code review (develop vs main) so the bot is safe for an unattended live paper run (Tier 1 blockers), behaviorally correct (Tier 2), and maintainable (Tier 3). Spec: `.planning/phases/06.2-code-review-remediation/06.2-SPEC.md`
