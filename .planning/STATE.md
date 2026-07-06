@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 07 context gathered
-last_updated: "2026-07-06T19:39:11.430Z"
-last_activity: 2026-07-03 -- Phase 07 execution started
+stopped_at: Completed 07.1-01-PLAN.md
+last_updated: "2026-07-06T00:00:00.000Z"
+last_activity: 2026-07-06 -- Plan 07.1-01 executed (gateway wired into PositionManager)
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 17
+  completed_plans: 18
   percent: 33
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 07.1
-Plan: 1 of 6
-Status: Ready to execute
-Last activity: 2026-07-03 -- Phase 07 execution started
+Plan: 1 of 1 (complete)
+Status: Plan 07.1-01 executed — RISK-TICK-STOP wiring closed
+Last activity: 2026-07-06 -- Plan 07.1-01 executed (gateway wired into PositionManager)
 
 Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
 
@@ -59,6 +59,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 03-intraday-signal-and-risk-engine P01 | 11 minutes | 3 tasks | 14 files |
 | Phase 03 P02 | 272 | 2 tasks | 2 files |
 | Phase 03-intraday-signal-and-risk-engine P03 | 310 | 2 tasks | 4 files |
+| Phase 07.1 P01 | 6 minutes | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,8 @@ Recent decisions affecting current work:
 - 03-03: math.floor used for both risk_qty and notional_cap_qty — explicit floor semantics (D-07, T-03-08)
 - 03-03: RiskEngine optional signal_engine parameter wires note_intent_emitted() for D-09 burst guard (RISK-05)
 - 03-03: Both _IMPLAUSIBLE_LOW ($1k) and _IMPLAUSIBLE_HIGH ($10M) as named constants — no inline literals (T-03-07)
+- 07.1-01: RISK-TICK-STOP Gap 1 closed — bot/main.py now passes gateway=gateway into PositionManager(...); direct constructor-kwarg fix (not a bot/service/bot.py late-bind) since gateway is in scope at construction (main.py:75)
+- 07.1-01: Wiring-regression pattern — drive real bot.main.main() with only I/O seams patched (MoomooGateway/StateStore/asyncio.run), capture the real PositionManager, assert _gateway identity + arm_stop_protection→subscribe_quote dispatch; hand-built PositionManager(gateway=mock) is what let this ship broken
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -144,6 +147,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-03T17:24:38.271Z
-Stopped at: Phase 07 context gathered
-Resume file: .planning/phases/07-strategy-optimization/07-CONTEXT.md
+Last session: 2026-07-06
+Stopped at: Completed 07.1-01-PLAN.md
+Resume file: None

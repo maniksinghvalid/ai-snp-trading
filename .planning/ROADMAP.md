@@ -265,7 +265,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 Plans:
 **Wave 1**
 
-- [ ] 07.1-01-PLAN.md — RED regression test driving bot/main.py's real construction path (asserts position_manager._gateway wired + arm_stop_protection dispatches to gateway.subscribe_quote) + one-line gateway=gateway fix; full suite green [Wave 1]
+- [x] 07.1-01-PLAN.md — RED regression test driving bot/main.py's real construction path (asserts position_manager._gateway wired + arm_stop_protection dispatches to gateway.subscribe_quote) + one-line gateway=gateway fix; full suite green [Wave 1] ✅ 2026-07-06 (5cc61eb, a8b2418)
 
 ### Phase 06.2: Code review remediation (INSERTED)
 
