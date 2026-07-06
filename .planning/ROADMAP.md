@@ -33,7 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Foundation** - Gateway, StateStore, StrategyCore, and safety primitives that everything else depends on
 - [x] **Phase 2: Premarket Scanner** - Daily watchlist generation via S&P 500 constituent fetch and D1/D2/D3 filters (completed 2026-06-23)
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
-- [ ] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close
+- [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [ ] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging
 - [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
@@ -146,14 +146,14 @@ Plans:
   6. After a simulated restart with positions in StateStore, the bot reconstructs all PositionState objects, re-subscribes bar feeds for those codes, and resumes stop management without re-entering any position
 
 **Research flag**: Needs research-phase. Paper account order flow behavior (push reliability, fill model, stop order support) must be validated empirically against the SIMULATE environment before task planning.
-**Plans**: TBD
+**Plans**: 4/4 plans executed
 
 Plans:
 
-- [ ] 04-01: PositionState FSM — five states, on_bar() transitions, all exit rules; unit-tested with synthetic events
-- [ ] 04-02: PositionManager — owns all PositionState objects, processes fills and bar events, persists every transition
-- [ ] 04-03: ExecutionEngine — OrderIntent to moomoo API translation, limit orders, TTL with cancel-replace, order_id-keyed fill reconciliation (EXEC-05), FillEvent emission
-- [ ] 04-04: Startup reconciliation, duplicate-order guard, EOD force-close (calendar-aware), kill switch state flush
+- [x] 04-01: PositionState FSM — five states, on_bar() transitions, all exit rules; unit-tested with synthetic events ✅ 2026-06-24
+- [x] 04-02: PositionManager — owns all PositionState objects, processes fills and bar events, persists every transition ✅ 2026-06-24
+- [x] 04-03: ExecutionEngine — OrderIntent to moomoo API translation, limit orders, TTL with cancel-replace, order_id-keyed fill reconciliation (EXEC-05), FillEvent emission ✅ 2026-06-24
+- [x] 04-04: Startup reconciliation, duplicate-order guard, EOD force-close (calendar-aware), kill switch state flush ✅ 2026-06-24
 
 ### Phase 5: Service Orchestration and Reliability
 
@@ -244,7 +244,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 1. Foundation | 2/4 | In progress | - |
 | 2. Premarket Scanner | 4/4 | Complete   | 2026-06-23 |
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
-| 4. Order and Position Management | 0/4 | Not started | - |
+| 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 0/4 | Not started | - |
 | 6. Backtester | 0/4 | Not started | - |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
