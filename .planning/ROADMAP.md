@@ -193,14 +193,26 @@ Plans:
   4. Historical 5m data is sourced from yfinance (or a flat CSV/Parquet export) rather than Moomoo (BT-04), avoiding broker historical-quota limits; the loader handles yfinance's 5m date-range window (≈60 days) and the strategy's ticker-format normalization
 
 **Resolved (was research flag):** historical data comes from yfinance/flat-file (BT-04), not Moomoo, removing the broker historical-quota concern. Remaining light research at Phase 6 planning: yfinance 5m history window/limits and whether a Parquet cache is needed for repeated multi-symbol backtests.
-**Plans**: TBD
+**Plans**: 6 plans (4 waves)
 
 Plans:
+**Wave 1**
 
-- [ ] 06-01: SimulatedBarFeed — loads historical 5m data from yfinance/CSV/Parquet (BT-04); replays bars as BarEvents in chronological order
-- [ ] 06-02: SimulatedExecution — fills at bar N+1 open with configurable slippage; replaces MoomooGateway
-- [ ] 06-03: Backtester harness — wires feed through SignalEngine + RiskEngine + PositionManager (shared classes, shared `rules.json`); produces trade log
-- [ ] 06-04: Performance report — win rate, avg R, max drawdown, profit factor, per-trade CSV output
+- [ ] 06-01-PLAN.md — Wave-0 foundation: backtester/ + tests/backtester/ packages, 4 importorskip-guarded failing test stubs, synthetic ahead-only 5m fixture (BT-02 look-ahead proof) + trade-log fixture (BT-03), gitignore cache/runs [Wave 1]
+
+**Wave 2** *(blocked on 06-01)*
+
+- [ ] 06-02-PLAN.md — SimulatedBarFeed (BT-04): yfinance+CSV read-through cache, get_ticker_frame casing, yfinance_to_moomoo normalization, chronological replay with point-in-time hod/lod/cum_volume, next_bar(N+1), out-of-window BacktestWindowError; + point-in-time setup accessors (daily bars, synthetic TodayPrice, 5m-for-TOD, prepost=True premarket highs) [Wave 2]
+- [ ] 06-03-PLAN.md — SimulatedExecution (BT-02): N+1-open entry/exit fills + slippage (never intent.entry_price), fill capture for the trade log, D-05 abandon on no-next-bar; + SimulatedGateway stub (get_positions/get_equity only) [Wave 2]
+- [ ] 06-04-PLAN.md — Performance report (BT-03): compute_metrics (win rate, avg R, profit factor, max drawdown; realized_pnl DERIVED — trades table never written by bot/), write_report per-trade CSV + summary.json [Wave 2]
+
+**Wave 3** *(blocked on 06-02/03/04)*
+
+- [ ] 06-05-PLAN.md — BacktestHarness (BT-01): ports TradingBot._process_bar; reused SignalEngine/RiskEngine/PositionManager/TrendJoinLong (gateway=None); per-day point-in-time baselines via _evaluate_symbol/_compute_tod_baselines; per-bar CLOCK CONTROL (patch signal_engine.now_et to bar time — entry-window + baseline keys point-in-time); harness-owned bar_buffer (swing-low trail); closed-position trade-log capture [Wave 3]
+
+**Wave 4** *(blocked on 06-05)*
+
+- [ ] 06-06-PLAN.md — run.py CLI (BT-01/03/04): argparse (--symbols/--start/--end/--rules-json/--output-dir), shared rules.json loader + ConfigError→exit(1), V5 input validation, live-DB collision guard (refuse data/bot_state.db), wire feed→harness→write_report, out-of-window loud failure [Wave 4]
 
 ### Phase 7: Strategy Optimization
 
@@ -248,7 +260,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 0/4 | Not started | - |
+| 6. Backtester | 0/6 | Not started | - |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
