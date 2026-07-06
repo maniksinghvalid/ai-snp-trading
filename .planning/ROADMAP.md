@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Premarket Scanner** - Daily watchlist generation via S&P 500 constituent fetch and D1/D2/D3 filters (completed 2026-06-23)
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
-- [ ] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging
+- [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
 - [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
@@ -169,14 +169,16 @@ Plans:
   5. The service starts under supervisor, restarts automatically on crash, and structured rotating log files are written by structlog in JSON-compatible format
   6. A static, offline, no-JS HTML dashboard (DASH-01) is generated alongside the daily summary — R-multiple histogram, open-positions table, and last-20 closed trades — and renders correctly from a file:// open with no server
 
-**Plans**: TBD
+**Plans**: 6/6 plans executed (docs recovered 2026-07-06 after ec826eb stripped them from develop)
 
 Plans:
 
-- [ ] 05-01: TradingBot orchestrator — APScheduler AsyncIOScheduler, cron jobs (premarket scan, intraday re-scans ~30 min, market-open subscribe, force-close, EOD report), component wiring
-- [ ] 05-02: OpenD connectivity watchdog — `get_global_state()` poll loop, order-pause on failure, reconnect with backoff
-- [ ] 05-03: TelegramAlerter — fire-and-forget async push, entry/exit/summary alerts, failure isolation from trade loop
-- [ ] 05-04: Daily P&L report + static HTML dashboard (DASH-01, R-multiple histogram); supervisor process config; structured rotating log integration; full daily lifecycle integration test
+- [x] 05-00: Wave-0 foundation — MoomooGateway.get_global_state(), PositionManager alert callbacks, config/test-stub scaffolding ✅ 2026-06-24
+- [x] 05-01: TradingBot orchestrator — APScheduler AsyncIOScheduler, 5 cron/interval jobs (premarket scan, intraday re-scans ~30 min, market-open subscribe, force-close, EOD report), kill-switch + readiness-gate wiring ✅ 2026-06-24
+- [x] 05-02: OpenD connectivity watchdog (SVC-02) — `get_global_state()` poll loop, order-pause on failure, reconnect with backoff + Telegram alert ✅ 2026-06-24
+- [x] 05-03: TelegramAlerter — stdlib urllib fire-and-forget push, entry/exit/summary alerts (ALERT-01..04), failure isolation from trade loop ✅ 2026-06-24
+- [x] 05-04: Daily P&L report + static inline-SVG HTML dashboard (DASH-01); launchd/shell supervisor config; structured rotating log integration ✅ 2026-06-24
+- [x] 05-05: ALERT-02 gap closure — thread real exit reason (pending_exit_reason) from FSM trigger to TelegramAlerter, fire alert on partial scale-outs, add trail_stop label; same-day UAT gap-closure plan ✅ 2026-06-24
 
 ### Phase 6: Backtester
 
@@ -245,7 +247,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 2. Premarket Scanner | 4/4 | Complete   | 2026-06-23 |
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
-| 5. Service Orchestration and Reliability | 0/4 | Not started | - |
+| 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
 | 6. Backtester | 0/4 | Not started | - |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
