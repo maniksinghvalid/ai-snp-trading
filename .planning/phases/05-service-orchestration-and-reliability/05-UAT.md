@@ -33,6 +33,7 @@ result: issue
 live_delivery: "CONFIRMED — 7/7 messages (entry + 5 exit reasons + daily summary) delivered via the real urllib transport to Telegram channel S&P-AutoUpdates (chat_id -1003955814504). Token @snpautobot valid; transport + builders + delivery all working end-to-end. NOTE: the originally-configured chat_id -5293756055 was a deleted group (403 'group chat was deleted'); user created a new channel. trail_stop rendered raw in-channel, confirming the missing-label limb of the issue below."
 reported: "Live exit-alert wiring does not satisfy ALERT-02. PositionManager.apply_exit_fill (manager.py:525-529) invokes on_exit_alert with a HARDCODED reason 'exit_fill' for every exit, and only when remaining_quantity==0. Consequences: (a) exit alerts never distinguish the 5 spec reasons (partial/breakeven/trail-stop/stop-out/force-close) — all show 'Exit Fill'; (b) partial scale-outs fire NO alert (gated on full close); (c) the reason the manager actually emits for trailing exits is 'trail_stop', which is absent from _EXIT_REASON_LABELS (has 'trail'/'trail_up'). format_exit_alert + the no-op path (ALERT-04) and entry alert (ALERT-01) and daily summary builder (ALERT-03) are all correct in isolation; the gap is the manager→alerter integration. Live delivery itself not exercised — .env Telegram secrets are blank."
 severity: major
+resolved: "Same-day gap closure via 05-05-PLAN.md (commit ac23caf/0acf87a, docs 45a836c) — pending_exit_reason threads the true reason, partial scale-outs fire their own alert, 'trail_stop' label added. Re-verified 2026-07-06 against current bot/position/manager.py and bot/service/alerter.py."
 
 ### 4. OpenD disconnect watchdog (SVC-02)
 expected: While the bot is running, kill OpenD. Within ~one poll cycle (~60s) the bot detects the loss — logs it and (if Telegram configured) fires a disconnect alert — and PAUSES new entries while bar-close exit checks keep running. Restart OpenD: the watchdog reconnects with backoff, re-runs startup_reconcile + re-subscribes, fires a reconnect alert, and only then re-enables entries.
@@ -64,7 +65,7 @@ skipped: 0
 ## Gaps
 
 - truth: "On each exit, a Telegram alert fires covering all five exit reasons — partial, breakeven, trail-stop, stop-out, force-close (ALERT-02)"
-  status: failed
+  status: resolved
   reason: "User reported: live exit-alert wiring uses a hardcoded 'exit_fill' reason and only fires on full close — exit alerts never distinguish the 5 reasons, partial exits fire no alert, and the manager's actual 'trail_stop' reason is missing from _EXIT_REASON_LABELS."
   severity: major
   test: 3
@@ -76,3 +77,4 @@ skipped: 0
     - "Pass the real exit reason (stop_out/trail_stop/breakeven/force_close) to on_exit_alert instead of constant 'exit_fill'"
     - "Fire an exit alert on partial scale-outs (not only on full close)"
     - "Add 'trail_stop' to _EXIT_REASON_LABELS (and reconcile reason vocabulary between manager and alerter)"
+  resolved_by: "05-05-PLAN.md / 05-05-SUMMARY.md, same day (2026-06-24, commit ac23caf/0acf87a, docs 45a836c) — pending_exit_reason threads the true exit cause from FSM trigger to TelegramAlerter, partial scale-outs fire their own alert, and 'trail_stop' was added to _EXIT_REASON_LABELS. Re-verified 2026-07-06 by reading current bot/position/manager.py (lines ~581,726,808,906,929) and bot/service/alerter.py:34 — all three missing items confirmed present in code."
