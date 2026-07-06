@@ -57,7 +57,7 @@
     "exit_escalation_cadence_seconds": 10,
     "force_close_escalation_step_usd": 0.20,
     "force_close_escalation_cadence_seconds": 15,
-    "use_broker_stop_orders": true
+    "use_broker_stop_orders": false
   },
 
   "service": {
