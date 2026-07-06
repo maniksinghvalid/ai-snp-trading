@@ -469,10 +469,10 @@ the backtester implementer should know so as not to "restore" an already-abandon
 | A2 | Applying the same "fill at next bar's open" rule to EXITS (not just entries) is the correct backtest convention, even though BT-02's success criterion only explicitly names entries | Pitfall 1 | If the planner/operator wants exit fills to remain at the FSM-triggering bar's close (a common, simpler backtest convention), the exit-fill-timing decision should be confirmed explicitly rather than defaulting to symmetric N+1 timing — this changes computed R-multiples and drawdown non-trivially. |
 | A3 | Premarket-high computed from 5m bars with `prepost=True` (not the RVOL-TOD fetcher's `prepost=False` 5m calls) is close enough to the live broker's `pre_high_price` field for backtest purposes | Pitfall 5 | If yfinance's premarket 5m bar coverage is materially different from the broker's premarket tape (thinner/less liquid symbols may have gaps), backtest signal counts could diverge from what the live bot would have produced on the same day — should be flagged in the report output, not silently assumed equivalent. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Should the backtest date range be operator-specified per run, or should the CLI default
-   to "maximum available" (today minus ~58 trading days)?**
+1. **RESOLVED — error loudly (implemented in 06-06 Task 2: out-of-window `--start` raises `BacktestWindowError`, printed as `[ERROR]` with non-zero exit; 06-02 feed raises the same error at load time).** Should the backtest date range be operator-specified per run, or should the CLI default
+   to "maximum available" (today minus ~58 trading days)?
    - What we know: yfinance 5m data caps the realistic default window; daily-bar D1/D2/D3
      filters could theoretically go back further (yfinance daily bars support `period="1y"` or
      `"max"`) but are gated by 5m-bar availability for the entry-signal side.
@@ -482,8 +482,8 @@ the backtester implementer should know so as not to "restore" an already-abandon
      (computed from `datetime.now() - 58 trading days`) — silent clipping risks the operator
      believing they backtested a longer period than they actually did.
 
-2. **Exit-model comparison for EXIT-MODEL (Phase 7, gated on this backtester per `07-06-PLAN.md`)
-   — does Phase 6 need to support swapping `exit.model` variants, or is that Phase 7's job?**
+2. **RESOLVED — Phase 6 scopes to the current `partial_be_trail` FSM only; `fixed_2r`/`full_to_1p5r_trail` variants remain Phase 7's job (07-06). The scope boundary is documented explicitly in the 06-05 and 06-06 plan objectives.** Exit-model comparison for EXIT-MODEL (Phase 7, gated on this backtester per `07-06-PLAN.md`)
+   — does Phase 6 need to support swapping `exit.model` variants, or is that Phase 7's job?
    - What we know: `rules.json`'s `exit.model` schema already enumerates
      `partial_be_trail`/`fixed_2r`/`full_to_1p5r_trail`, but the loader fail-closes on
      anything except `partial_be_trail` until "Phase 6 backtester evidence exists."
