@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 07 context gathered
-last_updated: "2026-07-03T22:21:46.762Z"
+last_updated: "2026-07-06T19:39:11.430Z"
 last_activity: 2026-07-03 -- Phase 07 execution started
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 12
-  percent: 38
+  completed_plans: 17
+  percent: 33
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 ## Current Position
 
-Phase: 07 (strategy-optimization) — EXECUTING
+Phase: 07.1
 Plan: 1 of 6
-Status: Executing Phase 07
+Status: Ready to execute
 Last activity: 2026-07-03 -- Phase 07 execution started
 
 Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
@@ -65,6 +65,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 ### Roadmap Evolution
 
 - Phase 06.2 inserted after Phase 6 (2026-07-02): Code review remediation — fix 16 confirmed findings from 2026-07-02 review (3 tiers: blockers, correctness, hygiene) (URGENT)
+- Phase 07.1 inserted after Phase 07 (2026-07-06): Close gap: RISK-TICK-STOP — wire gateway into PositionManager (found by /gsd-audit-milestone v1.0: bot/main.py never passes gateway= to PositionManager, so arm_stop_protection() no-ops in production) (URGENT)
 
 ### Decisions
 
