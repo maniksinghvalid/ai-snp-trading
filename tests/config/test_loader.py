@@ -344,10 +344,16 @@ class TestPhase7ConfigKeys:
         )
 
     def test_load_real_rules_json_has_use_broker_stop_orders(self):
-        """load_strategy_config on the real rules.json must yield cfg.use_broker_stop_orders is True."""
+        """load_strategy_config on the real rules.json must yield cfg.use_broker_stop_orders is False.
+
+        UAT (07-UAT.md Test 1, 2026-07-06) empirically confirmed SIMULATE rejects
+        Stop-Market orders outright ("Paper trading does not support Stop order"),
+        so rules.json was corrected to route stop invalidation through the
+        quote-tick fallback (_on_quote) instead of the broker stop path.
+        """
         cfg = load_strategy_config("rules.json")
-        assert cfg.use_broker_stop_orders is True, (
-            f"Expected use_broker_stop_orders=True; got {cfg.use_broker_stop_orders}"
+        assert cfg.use_broker_stop_orders is False, (
+            f"Expected use_broker_stop_orders=False; got {cfg.use_broker_stop_orders}"
         )
 
     def test_load_real_rules_json_has_rvol_tod_lookback_days(self):
