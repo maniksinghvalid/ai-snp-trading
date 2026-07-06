@@ -260,11 +260,12 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 0 plans
+**Plans:** 1 plan (1 wave)
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.1 to break down)
+- [ ] 07.1-01-PLAN.md — RED regression test driving bot/main.py's real construction path (asserts position_manager._gateway wired + arm_stop_protection dispatches to gateway.subscribe_quote) + one-line gateway=gateway fix; full suite green [Wave 1]
 
 ### Phase 06.2: Code review remediation (INSERTED)
 
