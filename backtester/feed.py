@@ -29,6 +29,7 @@ broker gateway layer; this module is a pure data source, no broker/execution pat
 Exports: SimulatedBarFeed, BacktestWindowError.
 """
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -57,6 +58,10 @@ _WINDOW_CALENDAR_DAYS = round(INTRADAY_5M_WINDOW_TRADING_DAYS * 7 / 5)
 
 CACHE_DIR = "backtester/cache"
 
+# T-06-03: cache filenames interpolate the (prefix-stripped) symbol -- restrict it to
+# ticker-shaped characters so no path separator/traversal segment can reach os.path.join.
+_SYMBOL_RE = re.compile(r"[A-Z0-9.\-]+")
+
 # Market constant -- regular-session open (ET). NOT read from rules.json (mirrors
 # resolve_today_price's own documented rationale: a fixed market fact, not a strategy
 # parameter that could ever vary by config).
@@ -81,6 +86,11 @@ class SimulatedBarFeed:
         cache_dir: directory for the CSV read-through cache (created if absent).
         """
         self.codes = list(codes)
+        for code in self.codes:
+            if not _SYMBOL_RE.fullmatch(self._yf_symbol(code)):
+                raise ValueError(
+                    f"invalid symbol {code!r}: cache filenames accept only [A-Z0-9.-] (T-06-03)"
+                )
         self.start = start
         self.end = end
         self.cache_dir = cache_dir

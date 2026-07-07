@@ -137,6 +137,25 @@ def test_premarket_highs_excludes_bars_at_or_after_0930(tmp_path):
     )
 
 
+def test_traversal_symbol_rejected_before_any_cache_or_network_access(tmp_path):
+    """T-06-03: a symbol with path separators must raise ValueError, never build a cache path."""
+    with patch("yfinance.download") as mock_dl:
+        with pytest.raises(ValueError):
+            SimulatedBarFeed(["US.../../evil"], start="2026-06-01", end="2026-06-01",
+                             cache_dir=str(tmp_path))
+        mock_dl.assert_not_called()
+    assert list(tmp_path.iterdir()) == [], "no cache file may be created for a rejected symbol"
+
+
+def test_dashed_and_dotted_real_tickers_still_accepted(tmp_path):
+    """T-06-03 guard must not reject legitimate symbol shapes (BRK-B, BF.B)."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame()
+        feed = SimulatedBarFeed(["US.BRK-B"], start="2026-06-01",
+                                end="2026-06-01", cache_dir=str(tmp_path))
+    assert feed.codes == ["US.BRK-B"]
+
+
 def _make_premarket_5m_frame():
     """Title-Case 5m frame with premarket (< 09:30 ET) and one regular-session bar."""
     import pandas as pd
