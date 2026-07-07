@@ -5,17 +5,17 @@ status: verified
 threats_open: 0
 asvs_level: 1
 created: 2026-07-06
+updated: 2026-07-07
 ---
 
 # Phase 06 — Backtester — Security
 
 > Per-phase security contract: threat register, accepted risks, and audit trail.
 
-Register authored across six executed plans (06-01..06-06), each with its own
-`<threat_model>` block. Three gap-closure plans (06-07/08/09) exist but are **not yet
-executed** (no SUMMARY.md) — their threat entries are listed separately at the bottom and
-are NOT verified against the codebase in this audit (nothing to verify; the code doesn't
-exist yet).
+Register authored across twelve executed plans (06-01..06-12), each with its own
+`<threat_model>` block. The original six-plan register was verified 2026-07-06; the six
+gap-closure plans (06-07..06-12) were executed 2026-07-07 and their 26 plan-time threat
+entries verified against source the same day (see Gap-Closure Register below).
 
 ---
 
@@ -184,44 +184,63 @@ see remediation note at the top of this section). T-06-03 is **CLOSED**.
 | AR-06-05 | T-06-SC (06-04) | Stdlib `csv`/`json` only; zero new package installs in plan 06-04 | gsd-security-auditor (phase-time disposition, plan 06-04) | 2026-07-06 |
 | AR-06-06 | T-06-SC (06-05) | Zero new package installs in plan 06-05 | gsd-security-auditor (phase-time disposition, plan 06-05) | 2026-07-06 |
 | AR-06-07 | T-06-SC (06-06) | Zero new package installs in plan 06-06 (`pandas-market-calendars` already pinned Phase 2, commit `45d41e6`) | gsd-security-auditor (phase-time disposition, plan 06-06) | 2026-07-06 |
+| AR-06-08 | T-06-07-SC / T-06-08-SC / T-06-09-SC / T-06-10-SC / T-06-11-SC / T-06-12-SC | Zero new package installs across all six gap-closure plans; diffs verified to touch only `backtester/`, `tests/backtester/`, and additive `bot/state/store.py` method (stdlib `uuid4` only) | gsd-security-auditor (gap-closure audit) | 2026-07-07 |
+| AR-06-09 | T-06-08-03 | Backtest execution path deliberately imports nothing from the moomoo gateway layer (`execution.py:24-29`); broker/order path isolation is structural, no runtime guard needed | gsd-security-auditor (gap-closure audit) | 2026-07-07 |
 
 *Accepted risks do not resurface in future audit runs.*
 
 ---
 
-## Pending Execution — Gap-Closure Plans 06-07 / 06-08 / 06-09
+## Gap-Closure Register — Plans 06-07..06-12 (verified 2026-07-07)
 
-Plans 06-07, 06-08, 06-09 exist (`06-07-PLAN.md`, `06-08-PLAN.md`, `06-09-PLAN.md`) but have
-**no corresponding SUMMARY.md** — they have not been executed. Their `<threat_model>` blocks are
-PLAN-TIME dispositions for code not yet written. **Not verified in this audit** (there is nothing
-in `backtester/*.py` yet to check them against); listed here so a re-run of `/gsd-secure-phase 06`
-after `/gsd-execute-phase 06 --gaps-only` picks them up.
+All six gap-closure plans executed 2026-07-07 (SUMMARY.md present for each). Their 26 plan-time
+threat entries were verified against source by gsd-security-auditor the same day — mitigations
+checked in code (file:line), not SUMMARY prose. Auditor independently re-ran the suite:
+`pytest tests/backtester/` → 43 passed; `pytest tests/` → 632 passed, 1 skipped.
 
-| Threat ID | Category | Component | Disposition | Mitigation Plan (unexecuted) |
-|-----------|----------|-----------|-------------|-------------------------------|
-| T-06-07-01 | Tampering | yfinance 5m frames (NaN/wrong-day/missing rows) | mitigate | `get_ticker_frame` + `_enforce_coverage` raising `BacktestWindowError` naming zero-bar trading days |
-| T-06-07-02 | Denial of Service | out-of-window date range | mitigate | `_enforce_window` cutoff corrected to 60 calendar days; coverage guard names missing days (closes CR-02/CR-03) |
-| T-06-07-03 | Information disclosure | look-ahead leakage into point-in-time values | mitigate | `next_bar` same-session constraint; premarket-only `premarket_highs`/`synthetic_today_price` (closes CR-04/CR-07) |
-| T-06-07-SC | Tampering | package installs | accept | No new packages (`pandas`/`pandas_market_calendars`/`yfinance` already deps) |
-| T-06-08-01 | Tampering | `manage_exit` fabricating a full fill on no-next-bar | mitigate | WR-01 fix: return 0, append no fill, position stays open for EOD force-close |
-| T-06-08-02 | Repudiation | trade log missing/incorrect exit records | mitigate | Force-close fill records a real priced exit into `exit_fills` |
-| T-06-08-03 | Elevation of privilege | broker/order path leaking into backtest | accept | `execution.py` still imports nothing from the moomoo gateway layer |
-| T-06-08-SC | Tampering | package installs | accept | No new packages |
-| T-06-09-01 | Tampering | cross-day premarket-high clobber | mitigate | Per-day highs (`_premarket_highs_by_day`) applied at top of `replay_day` (closes CR-01) |
-| T-06-09-02 | Elevation of privilege | unfiltered `--symbols` trading despite daily filter | mitigate | Entry branch gated on capped/ranked persisted watchlist (closes CR-06) |
-| T-06-09-03 | Repudiation | positions open at range end silently dropped from report | mitigate | EOD/end-of-run `force_close_all` (closes CR-05) |
-| T-06-09-04 | Tampering | replay-clock rebind leaking to other code | mitigate | Both `now_et` patches saved/restored in `run()`'s `finally` |
-| T-06-09-SC | Tampering | package installs | accept | No new packages |
+| Threat ID | Category | Component | Disposition | Status | Evidence |
+|-----------|----------|-----------|-------------|--------|----------|
+| T-06-07-01 | Tampering | yfinance 5m frames (NaN/wrong-day/missing rows) | mitigate | **closed** | `feed.py:220` dropna in `_materialize_bars`; `feed.py:180-202` `_enforce_coverage` raises `BacktestWindowError` naming zero-bar days, called from `__init__:109` |
+| T-06-07-02 | Denial of Service | out-of-window date range | mitigate | **closed** | `feed.py:62` `INTRADAY_5M_WINDOW_CALENDAR_DAYS=60`; `feed.py:169` `_enforce_window` cutoff; `feed.py:148` `_download_batch period="60d"` matches guard |
+| T-06-07-03 | Information disclosure | look-ahead leakage into point-in-time values | mitigate | **closed** | `feed.py:333-346` `next_bar` returns None on cross-day candidate; `feed.py:251-316` `_load_premarket` premarket-only; `feed.py:366-407` `synthetic_today_price`/`premarket_highs` read only `_premarket_bars_by_code` |
+| T-06-07-SC | Tampering | package installs | accept | **closed** (logged below) | 06-07 diff touches only feed.py + test; no dependency file changed |
+| T-06-08-01 | Tampering | `manage_exit` fabricating a full fill on no-next-bar | mitigate | **closed** | `execution.py:126-127` `if next_bar is None: return 0`, no fill appended; no `exit_price=None` construction anywhere |
+| T-06-08-02 | Repudiation | trade log missing/incorrect exit records | mitigate | **closed** | `execution.py:109-122` force-close branch appends real `last["close"]`-priced fill, full qty |
+| T-06-08-03 | Elevation of privilege | broker/order path leaking into backtest | accept | **closed** (logged below) | `execution.py:24-29` imports only typing/uuid/pandas/FillEvent — no gateway/moomoo import |
+| T-06-08-SC | Tampering | package installs | accept | **closed** (logged below) | only execution.py + test changed, no new packages |
+| T-06-09-01 | Tampering | cross-day premarket-high clobber | mitigate | **closed** | `harness.py:202` `setup_day` stores only; `harness.py:219` `replay_day` applies `_premarket_highs_by_day.get(day,{})` as first statement |
+| T-06-09-02 | Elevation of privilege | unfiltered `--symbols` trading despite daily filter | mitigate | **closed** | `harness.py:63` `_WATCHLIST_CAP` imported; `:190,194` capped+recorded; `:319-322` entry gated on watchlist; `:313` `position_manager.on_bar` unconditional (management precedes gate) |
+| T-06-09-03 | Repudiation | positions open at range end silently dropped from report | mitigate | **closed** | `harness.py:229-242` `replay_day` pins clock to force-close time, toggles `_force_close`, awaits `force_close_all`, then `_capture_closed_trades()` |
+| T-06-09-04 | Tampering | replay-clock rebind leaking to other code | mitigate | **closed** | `harness.py:253-262` `run()` saves/restores both `signal_engine.now_et` and `position_manager.now_et` in try/finally |
+| T-06-09-SC | Tampering | package installs | accept | **closed** (logged below) | only harness.py + test changed, no new packages |
+| T-06-10-01 | Denial of Service | `_materialize_bars` int(NaN) crash | mitigate | **closed** | `feed.py:220` dropna before `int(row["volume"])` at line 236 |
+| T-06-10-02 | Tampering | NaN silently poisoning `premarket_highs()` max() → Gate 1 always False | mitigate | **closed** | `feed.py:301` identical dropna in `_load_premarket` before per-row loop populating `_premarket_bars_by_code` |
+| T-06-10-03 | Tampering | stale CSV cache preserving NaN rows | mitigate | **closed** | both dropna calls sit after `sort_index()`/before loop — same code path serves network + CSV-cache-hit |
+| T-06-10-SC | Tampering | package installs | accept | **closed** (logged below) | only feed.py + test changed, no new packages, no `bot/` source edited |
+| T-06-11-01 | Tampering | SQL injection via `record_trade` values (code, exit_reason) | mitigate | **closed** | `store.py:391-408` single parameterized `INSERT INTO trades`, all values via `?` placeholders, none string-formatted |
+| T-06-11-02 | Elevation of privilege / data integrity | scratch write touching the live DB | mitigate | **closed** | `record_trade` is additive method on harness's own scratch StateStore (`harness.py:88`); run.py live-DB collision guard untouched (not in diff) |
+| T-06-11-03 | Repudiation | Gate 7 silently inert → backtest overstates entries | mitigate | **closed** | `harness.py:418-421` `_capture_closed_trades` calls `store.record_trade` for every newly-CLOSED position; `test_harness.py:641` `test_gate7_circuit_breaker_trips_from_backtest_recorded_trades` exercises the trip (negative-control: revert-and-rerun proved failure without fix) |
+| T-06-11-04 | Information disclosure (misleading report) | wrong-sign exit slippage | mitigate | **closed** | `execution.py:116,132` both exit legs use `- self._slippage`; entry (line 76) stays `+`; `test_execution.py:184` `test_exit_slippage_is_adverse` pins all 3 signs |
+| T-06-11-05 | Tampering | concurrent trades write racing other store writers | mitigate | **closed** | `store.py:391-409` `record_trade` wrapped in `with self._lock:`, commit inside block |
+| T-06-11-SC | Tampering | package installs | accept | **closed** (logged below) | `store.py:31` adds only stdlib `uuid4`, no third-party package |
+| T-06-12-01 | Denial of Service (suite reliability) | hardcoded fixture dates aging out of 60-day window | mitigate | **closed** | `tests/backtester/fixtures.py` `recent_session_days` present; `grep "2026-0" tests/backtester/*.py` → only 4 comment lines, no code literals |
+| T-06-12-02 | Tampering | careless retrofit weakening a regression assertion | mitigate | **closed** | suite green post-retrofit: 43/43 backtester, 632 passed/1 skipped repo-wide; SUMMARY documents a caught-and-fixed anchor bug during the retrofit's own verification (not shipped broken) |
+| T-06-12-SC | Tampering | package installs | accept | **closed** (logged below) | only `tests/backtester/*.py` changed; `pandas_market_calendars` already a dep |
 
 ---
 
 ## Unregistered Flags
 
-None. All six executed plans' SUMMARY.md files report `## Threat Flags: None` — each stated
+None. All six original plans' SUMMARY.md files report `## Threat Flags: None` — each stated
 that its only new surface was exactly the surface its own `<threat_model>` already registered.
 Independently reviewed: no new network endpoint, auth path, schema change, or unregistered
 attack surface was found beyond what the register above covers (the T-06-03 finding is a
 verification failure of an *already-registered* threat, not new surface).
+
+**Gap-closure audit note (2026-07-07):** SUMMARY.md for plans 06-09/06-10/06-11/06-12 omit the
+`## Threat Flags` section entirely (only 06-07/06-08 include it, both "None"). Not a vulnerability —
+the auditor independently reviewed each plan's diff for new surface and found none unmapped — but
+recorded as a process gap: future plan SUMMARYs should always include the section.
 
 ---
 
@@ -231,6 +250,7 @@ verification failure of an *already-registered* threat, not new surface).
 |------------|---------------|--------|------|--------|
 | 2026-07-06 | 23 (16 mitigate + 7 accept) | 22 | 1 | gsd-security-auditor |
 | 2026-07-06 (remediation) | 23 (16 mitigate + 7 accept) | 23 | 0 | orchestrator (operator-approved "Fix now"; T-06-03 guard + 2 regression tests, suite 619 passed/1 skipped) |
+| 2026-07-07 (gap-closure 06-07..06-12) | 26 (19 mitigate + 7 accept) | 26 | 0 | gsd-security-auditor (file:line evidence per threat; suite re-run 632 passed/1 skipped) |
 
 ---
 
@@ -241,7 +261,7 @@ verification failure of an *already-registered* threat, not new surface).
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-07-06 — all 23 executed-plan threats closed (T-06-03 remediated
-same-day with operator approval). Gap-closure plans 06-07/08/09 remain unexecuted; re-run
-`/gsd-secure-phase 06` after `/gsd-execute-phase 06 --gaps-only` to verify their 13
-plan-time threat entries (see Pending Execution section).
+**Approval:** verified 2026-07-06 — all 23 original executed-plan threats closed (T-06-03
+remediated same-day with operator approval). Re-verified 2026-07-07 after gap-closure execution:
+all 26 gap-plan threat entries (06-07..06-12) closed with file:line evidence (see Gap-Closure
+Register). Phase 06 register total: 49 threats, 0 open. No pending threats remain.
