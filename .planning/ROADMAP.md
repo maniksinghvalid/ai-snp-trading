@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
-- [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (completed 2026-07-07)
+- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (6/6 plans executed 2026-07-07; verification gaps_found — multi-day replay defects, gap closure pending)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
