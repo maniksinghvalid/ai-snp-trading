@@ -53,7 +53,7 @@ from bot.position.manager import PositionManager
 from bot.position.state import PositionPhase, PositionState
 from bot.risk.risk_engine import RiskEngine
 from bot.safety.et_helpers import ET
-from bot.scanner.scanner import _compute_tod_baselines, _evaluate_symbol
+from bot.scanner.scanner import _WATCHLIST_CAP, _compute_tod_baselines, _evaluate_symbol
 from bot.signal.events import BarEvent
 from bot.signal.signal_engine import SignalEngine
 from bot.strategy.trend_join_long import TrendJoinLong
@@ -104,6 +104,18 @@ class BacktestHarness:
             bar_buffer=self._bar_buffer,
             gateway=None,
         )
+
+        # Per-day premarket-high freeze (CR-01): setup_day STORES each day's highs here
+        # (never applies them); replay_day applies ONLY the day being replayed as the
+        # first statement, so a later day's setup_day can never clobber an earlier,
+        # not-yet-replayed day's highs via the shared signal_engine._premarket_highs dict
+        # (run.py calls setup_day for every day BEFORE run() replays any of them).
+        self._premarket_highs_by_day: Dict = {}
+
+        # Per-day capped/ranked watchlist codes (CR-06): setup_day slices candidates to
+        # _WATCHLIST_CAP (mirrors run_daily_scan's own top-N cap); _process_bar gates the
+        # ENTRY branch on membership -- position management always runs regardless.
+        self._watchlist_by_day: Dict[str, set] = {}
 
         # Per-day setup order, populated by setup_day(); replayed in this order by run().
         self._days: List = []
@@ -164,13 +176,23 @@ class BacktestHarness:
 
         if candidates:
             # persist_watchlist requires a "rank" key per candidate (gap-ranked,
-            # mirrors scanner.py's top-20 gap-ranked cap -- SCAN-08).
+            # capped at _WATCHLIST_CAP BEFORE ranking -- mirrors run_daily_scan's own
+            # sort -> cap -> rank sequence, SCAN-08/CR-06). Only capped codes may enter;
+            # an uncapped --symbols code that failed the daily filter never trades.
             ranked = sorted(candidates, key=lambda c: c["gap_pct"], reverse=True)
-            for i, c in enumerate(ranked):
+            capped = ranked[:_WATCHLIST_CAP]
+            for i, c in enumerate(capped):
                 c["rank"] = i + 1
-            self._store.persist_watchlist(day, ranked, "backtest")
+            self._store.persist_watchlist(day, capped, "backtest")
+            self._watchlist_by_day[str(day)] = {c["code"] for c in capped}
+        else:
+            self._watchlist_by_day[str(day)] = set()
 
-        self.signal_engine.set_premarket_highs(self._feed.premarket_highs(day))
+        # CR-01: STORE the day's premarket highs -- do NOT apply them here. Applying
+        # immediately clobbers signal_engine's single shared dict for every other day
+        # already setup (run.py's driver calls setup_day for ALL days before run()
+        # replays any of them); replay_day applies the correct day's highs instead.
+        self._premarket_highs_by_day[day] = self._feed.premarket_highs(day)
 
         self._days.append(day)
 
@@ -180,6 +202,10 @@ class BacktestHarness:
 
     async def replay_day(self, day) -> None:
         """Replay every bar of `day` chronologically through the reused pipeline."""
+        # CR-01: apply THIS day's own frozen premarket highs before any bar of this
+        # day is processed -- Gate 1 must never see a later/earlier day's highs.
+        self.signal_engine.set_premarket_highs(self._premarket_highs_by_day.get(day, {}))
+
         for bar_data in self._feed.replay(day):
             await self._process_bar(bar_data)
 
@@ -245,8 +271,18 @@ class BacktestHarness:
         buf = self._bar_buffer.setdefault(bar.code, deque(maxlen=_BAR_BUFFER_MAX))
         buf.append(bar_data)
 
-        # Position management always runs first (mirrors _process_bar D-06).
+        # Position management always runs first (mirrors _process_bar D-06), and for
+        # EVERY bar regardless of watchlist membership -- only entries are gated below.
         await self.position_manager.on_bar(bar)
+
+        # CR-06: only a code in THIS DAY's capped/ranked watchlist may enter -- an
+        # unfiltered --symbols code that failed the daily filter never reaches the
+        # signal->risk->execution entry chain (mirrors live's watchlist-scoped
+        # subscriptions, SIG-01; management above is never gated).
+        day_key = bar.time_key[:10]
+        if bar.code not in self._watchlist_by_day.get(day_key, set()):
+            self._capture_closed_trades()
+            return
 
         signal = await self.signal_engine.on_bar(bar)
         if signal is not None:

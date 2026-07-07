@@ -75,15 +75,22 @@ _TODAY_BARS = [
 
 
 def _make_daily_frame():
-    """Tz-naive daily frame with < 14 prior rows -- _evaluate_symbol gracefully returns
-    None (symbol_skipped_insufficient_history), matching real yfinance daily-bar tz-naive
-    convention (tests/scanner/test_scanner.py). Not needed for the signal path (Gate 2 uses
-    the TOD baseline primarily), only exercised by the setup_day point-in-time-reuse test.
+    """Tz-naive 200-business-day daily frame ending the day before _DAY (matches real
+    yfinance daily-bar tz-naive convention, tests/scanner/test_scanner.py) with closes
+    rising linearly from 70.0 to 90.0 so the REAL _evaluate_symbol (never mocked here --
+    CR-06 requires "US.TEST" to actually land in the capped watchlist for the full-replay
+    test) produces a passing candidate: 200 prior rows satisfy both the RVOL lookback
+    (14) and the hardcoded SMA200 window (mean ~80.0, below the most recent close of
+    90.0 -- D2 prior_close > sma200); the most recent close/high (90.0/90.5) sit below
+    the injected TodayPrice's synthetic close (97.5, from _make_premarket_frame's last
+    bar) so D1 (today close > prior-day high) and D3 (>= 3% gap) both pass too.
     """
-    dates = pd.bdate_range(end=pd.Timestamp("2026-05-29"), periods=5)
+    periods = 200
+    dates = pd.bdate_range(end=pd.Timestamp("2026-05-29"), periods=periods)
+    closes = [70.0 + i * (90.0 - 70.0) / (periods - 1) for i in range(periods)]
     return pd.DataFrame(
-        {"Open": [100.0] * 5, "High": [101.0] * 5, "Low": [99.0] * 5,
-         "Close": [100.0] * 5, "Volume": [500_000] * 5},
+        {"Open": closes, "High": [c + 0.5 for c in closes], "Low": [c - 0.5 for c in closes],
+         "Close": closes, "Volume": [500_000] * periods},
         index=dates,
     )
 
@@ -180,7 +187,10 @@ def test_harness_wires_simulated_gateway_into_signal_and_risk_engines(monkeypatc
 
 def test_setup_day_reuses_scanner_point_in_time_functions(monkeypatch, tmp_path):
     """BT-01/BT-02: setup_day must reuse _evaluate_symbol/_compute_tod_baselines (never
-    reimplement SMA/RVOL math) and freeze premarket highs for the session date."""
+    reimplement SMA/RVOL math), STORE (never apply) the day's premarket highs (CR-01 --
+    applying immediately would clobber every other day's highs since run.py's driver
+    calls setup_day for ALL days before any of them is replayed), and cap+rank the
+    watchlist (CR-06)."""
     harness = _build_real_harness(monkeypatch, tmp_path)
 
     calls = {}
@@ -211,7 +221,14 @@ def test_setup_day_reuses_scanner_point_in_time_functions(monkeypatch, tmp_path)
     assert calls["evaluate_symbol_scan_date"] == _DAY
     assert calls["evaluate_symbol_symbol"] == "TEST"
     assert calls["tod_lookback_days"] == harness._cfg.rvol_tod_lookback_days
-    assert len(premarket_calls) == 1
+
+    # CR-01: setup_day stores the day's highs but does NOT call set_premarket_highs --
+    # only replay_day (right before that day's own bars) applies them.
+    assert _DAY in harness._premarket_highs_by_day
+    assert premarket_calls == []
+
+    # CR-06: the single candidate lands in the capped/ranked watchlist for the day.
+    assert harness._watchlist_by_day[_DAY] == {"US.TEST"}
 
     # persist_watchlist / upsert_tod_baselines wrote rows keyed by the SAME session date.
     watchlist_row = harness._store.conn.execute(
@@ -223,6 +240,11 @@ def test_setup_day_reuses_scanner_point_in_time_functions(monkeypatch, tmp_path)
         "SELECT scan_date, code, time_bucket, cum_vol_mean FROM tod_baselines WHERE code='US.TEST'"
     ).fetchone()
     assert tuple(tod_row) == (_DAY, "US.TEST", "10:20", 4_000.0)
+
+    # replay_day (never setup_day) is what actually applies the frozen highs (CR-01).
+    asyncio.run(harness.replay_day(_DAY))
+    assert len(premarket_calls) == 1
+    assert premarket_calls[0] == harness._premarket_highs_by_day[_DAY]
 
 
 def test_replay_clock_drives_entry_window_gate(monkeypatch, tmp_path):
