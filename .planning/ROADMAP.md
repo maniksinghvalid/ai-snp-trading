@@ -193,7 +193,7 @@ Plans:
   4. Historical 5m data is sourced from yfinance (or a flat CSV/Parquet export) rather than Moomoo (BT-04), avoiding broker historical-quota limits; the loader handles yfinance's 5m date-range window (≈60 days) and the strategy's ticker-format normalization
 
 **Resolved (was research flag):** historical data comes from yfinance/flat-file (BT-04), not Moomoo, removing the broker historical-quota concern. Remaining light research at Phase 6 planning: yfinance 5m history window/limits and whether a Parquet cache is needed for repeated multi-symbol backtests.
-**Plans**: 9 plans (4 build waves + 3 gap-closure waves)
+**Plans**: 12 plans (4 build waves + 3 gap-closure waves + 2 post-review gap-closure waves)
 
 Plans:
 **Wave 1**
@@ -219,6 +219,12 @@ Plans:
 - [x] 06-07-PLAN.md — feed.py yfinance window + point-in-time (BT-02/BT-04): real 60-calendar-day 5m fetch matching the guard (CR-03), per-trading-day coverage check → BacktestWindowError naming uncovered days (CR-03), same-session next_bar (CR-04), one-time prepost=True premarket load → point-in-time premarket_highs (CR-02) + premarket-only synthetic_today_price (CR-07) [Gap Wave 1]
 - [x] 06-08-PLAN.md — execution.py exit-fill semantics (BT-01/BT-03): no-next-bar exit returns 0 with no phantom fill (WR-01), force-close mode fills at last observed bar close + returns full qty so force_close_all reaches CLOSED (CR-05 mechanic) [Gap Wave 2, blocked on 06-07]
 - [x] 06-09-PLAN.md — harness.py multi-day correctness (BT-01/BT-02/BT-03): per-day premarket-high freeze applied in replay_day (CR-01), _WATCHLIST_CAP + entry gate on persisted watchlist (CR-06), EOD/end-of-run force_close_all with manager now_et rebind (CR-05), + 2+-trading-day regression test proving CR-01/CR-04/CR-05/CR-06 closed [Gap Wave 3, blocked on 06-07/06-08]
+
+**Post-Review Gap Closure** *(2026-07-07 — re-verification gaps_found 1/4, 2 new BLOCKERs from code review 06d8b5b; do NOT replan 06-01..06-09)*
+
+- [ ] 06-10-PLAN.md — feed.py NaN-row hygiene (BT-04/BT-02): dropna(open/high/low/close/volume) in _materialize_bars and _load_premarket (both network + CSV-cache paths) so a realistic multi-ticker yf.download union-index NaN-padded frame neither crashes int(NaN) nor poisons premarket_highs; + union-index regression test [Post-Review Gap Wave 1]
+- [ ] 06-11-PLAN.md — Gate-7 trades persistence + exit-slippage sign (BT-01/BT-03): new parameterized StateStore.record_trade; _capture_closed_trades writes each closed trade to the scratch trades table so the reused SignalEngine Gate-7 -2R circuit breaker reads real realized P&L and can block entries; adverse exit slippage (SELL exits subtract); truthful harness docstring; + Gate-7-trip and slippage-sign regression tests [Post-Review Gap Wave 1]
+- [ ] 06-12-PLAN.md — test-suite time-bomb hygiene (non-blocking, test-only): recent_session_days() helper + retrofit hardcoded 2026-06-01/02 fixture dates across the backtester suite so the rolling 60-day window guard never turns the suite red on a future calendar date [Post-Review Gap Wave 2, blocked on 06-10/06-11]
 
 ### Phase 7: Strategy Optimization
 
