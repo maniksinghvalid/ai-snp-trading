@@ -91,3 +91,28 @@ def test_consume_intent_returns_none_when_signal_is_on_the_last_bar():
     fill = asyncio.run(execution.consume_intent(intent))
 
     assert fill is None, "a signal on the last bar has no next-bar open -- must abandon (D-05), not fill"
+
+
+def test_manage_exit_fills_at_next_bar_open_and_returns_int_qty():
+    bars = make_ahead_only_5m_dataset()
+    bar_n = bars[3]         # "current" bar the harness has told execution about via on_bar
+    bar_n_plus_1 = bars[4]  # open=103.50 -- the correct symmetric-N+1 exit fill price
+
+    execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
+    execution.on_bar(bar_n)  # harness wiring: record the latest bar seen for this code
+
+    filled_qty = asyncio.run(
+        execution.manage_exit(
+            code=bar_n["code"], qty=5, side="SELL",
+            escalation_step=0.01, escalation_cadence=1.0, ttl=5.0,
+        )
+    )
+
+    assert isinstance(filled_qty, int)
+    assert filled_qty == 5
+    assert len(execution.exit_fills) == 1
+    exit_row = execution.exit_fills[0]
+    assert exit_row["code"] == bar_n["code"]
+    assert exit_row["exit_price"] == bar_n_plus_1["open"]
+    assert exit_row["qty"] == 5
+    assert exit_row in execution.fills
