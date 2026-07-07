@@ -11,6 +11,18 @@ window over time, and replays bars as BarEvent-shaped dicts in chronological ord
 session-running hod/lod/cum_volume computed point-in-time (mirrors BarAggregator's
 per-session accumulation).
 
+Also exposes the point-in-time setup-data accessors the harness (06-05) needs once per
+historical session date: daily_bars() for _evaluate_symbol, synthetic_today_price() (a
+TodayPrice mirroring resolve_today_price's RTH branch, not a live yfinance call),
+intraday_5m_for_tod() for _compute_tod_baselines, and premarket_highs().
+
+PREMARKET-HIGH APPROXIMATION: premarket_highs() fetches a SEPARATE prepost=True 5m frame
+(the RVOL-TOD path via download_intraday_5m/intraday_5m_for_tod stays prepost=False, per
+its own docstring rationale). This is a same-methodology/different-source APPROXIMATION of
+the live broker's `pre_high_price` snapshot field — yfinance's own premarket 5m coverage may
+differ from what the broker's tape included — not a bit-for-bit reproduction. See
+06-RESEARCH Pitfall 5 / Assumption A3.
+
 Imports ONLY bot.scanner.fetcher / bot.scanner.universe + pandas (T-06-04) — never the
 broker gateway layer; this module is a pure data source, no broker/execution path.
 
@@ -23,7 +35,13 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from bot.safety.et_helpers import ET
-from bot.scanner.fetcher import download_intraday_5m, get_ticker_frame
+from bot.scanner.fetcher import (
+    _download_batch,
+    download_daily_bars,
+    download_intraday_5m,
+    get_ticker_frame,
+    TodayPrice,
+)
 from bot.scanner.universe import yfinance_to_moomoo
 
 # ============================================================
@@ -38,6 +56,11 @@ INTRADAY_5M_WINDOW_TRADING_DAYS = 58
 _WINDOW_CALENDAR_DAYS = round(INTRADAY_5M_WINDOW_TRADING_DAYS * 7 / 5)
 
 CACHE_DIR = "backtester/cache"
+
+# Market constant -- regular-session open (ET). NOT read from rules.json (mirrors
+# resolve_today_price's own documented rationale: a fixed market fact, not a strategy
+# parameter that could ever vary by config).
+_RTH_OPEN = datetime.strptime("09:30", "%H:%M").time()
 
 
 class BacktestWindowError(Exception):
@@ -182,3 +205,81 @@ class SimulatedBarFeed:
             if b["time_key"] > after:
                 return b
         return None
+
+    # --------------------------------------------------------
+    # Point-in-time setup-data accessors (06-05 harness, per historical session date)
+    # --------------------------------------------------------
+
+    def daily_bars(self, codes: Optional[List[str]] = None):
+        """download_daily_bars result (raw, group_by="ticker") — feeds _evaluate_symbol directly."""
+        codes = codes or self.codes
+        yf_symbols = [self._yf_symbol(c) for c in codes]
+        data, _failed = download_daily_bars(yf_symbols)
+        return data
+
+    def intraday_5m_for_tod(self, codes: Optional[List[str]] = None):
+        """download_intraday_5m result (raw, prepost=False) — feeds _compute_tod_baselines directly."""
+        codes = codes or self.codes
+        yf_symbols = [self._yf_symbol(c) for c in codes]
+        data, _failed = download_intraday_5m(yf_symbols)
+        return data
+
+    def synthetic_today_price(self, code: str, day) -> Optional[TodayPrice]:
+        """TodayPrice built from `day`'s first regular-session 5m bar (already loaded).
+
+        Mirrors resolve_today_price's RTH branch: today_open = first RTH bar's open,
+        today_price = latest RTH bar's close, today_high = max RTH high -- NOT a live
+        yfinance call (self._bars_by_code already holds prepost=False, >=09:30 bars).
+        """
+        day_bars = sorted(
+            (b for b in self._bars_by_code.get(code, []) if b["time_key"].startswith(str(day))),
+            key=lambda b: b["time_key"],
+        )
+        if not day_bars:
+            return None
+        return TodayPrice(
+            today_open=day_bars[0]["open"],
+            today_price=day_bars[-1]["close"],
+            today_high=max(b["high"] for b in day_bars),
+        )
+
+    def premarket_highs(self, day) -> Dict[str, float]:
+        """{moomoo_code: max(high)} of `day`'s 5m bars with ET time < 09:30 (premarket).
+
+        SEPARATE prepost=True 5m fetch (the RVOL-TOD path via download_intraday_5m /
+        intraday_5m_for_tod stays prepost=False) -- 06-RESEARCH Pitfall 5 option (a). See
+        module docstring: same-methodology/different-source APPROXIMATION of the live
+        broker's pre_high_price field, not a bit-for-bit reproduction.
+        """
+        yf_symbols = [self._yf_symbol(c) for c in self.codes]
+        # Reuses the shared _download_batch kernel (retry/degradation/Pitfall #1-#2
+        # already solved there) instead of re-implementing a second yf.download call
+        # site -- no public fetcher wrapper exists for 5m+prepost=True.
+        data, _failed = _download_batch(
+            yf_symbols,
+            threads=5,
+            degradation_threshold=1.0,  # best-effort approximation; never abort the backtest
+            download_kwargs={"period": "5d", "interval": "5m", "prepost": True},
+            abort_event="backtest_premarket_scan_aborted_data_degradation",
+            partial_event="backtest_premarket_partial_data",
+            degradation_message="Premarket-high 5m data degradation",
+        )
+        highs: Dict[str, float] = {}
+        day_str = str(day)
+        for code in self.codes:
+            sym = self._yf_symbol(code)
+            frame = get_ticker_frame(data, sym)
+            if frame is None or frame.empty:
+                continue
+            pm_high = None
+            for ts, row in frame.iterrows():
+                ts_et = ts.tz_convert(ET) if ts.tzinfo is not None else ts.tz_localize("UTC").tz_convert(ET)
+                if ts_et.date().isoformat() != day_str:
+                    continue
+                if ts_et.time() >= _RTH_OPEN:
+                    continue
+                h = float(row["high"])
+                pm_high = h if pm_high is None else max(pm_high, h)
+            if pm_high is not None:
+                highs[yfinance_to_moomoo(sym)] = pm_high
+        return highs

@@ -106,6 +106,53 @@ def test_moomoo_code_normalization_via_yfinance_to_moomoo(tmp_path):
     assert all(b["code"] == "US.BRK-B" for b in bars)
 
 
+def test_synthetic_today_price_uses_first_rth_bar(tmp_path):
+    """synthetic_today_price mirrors resolve_today_price's RTH branch from loaded 5m bars."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame()
+        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+                                 cache_dir=str(tmp_path))
+        list(feed.replay("2026-06-01"))
+        today_price = feed.synthetic_today_price("US.TEST", "2026-06-01")
+
+    assert today_price is not None
+    assert today_price.today_open == 100.00, "today_open must equal the first RTH bar's open"
+    assert today_price.today_price == 107.50, "today_price must equal the latest RTH bar's close"
+    assert today_price.today_high == 108.00, "today_high must equal the max RTH high"
+
+
+def test_premarket_highs_excludes_bars_at_or_after_0930(tmp_path):
+    """premarket_highs() counts only ET bars before 09:30 -- a 09:35 bar's high must not count."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame()
+        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+                                 cache_dir=str(tmp_path))
+        list(feed.replay("2026-06-01"))
+
+        mock_dl.return_value = _make_premarket_5m_frame()
+        highs = feed.premarket_highs("2026-06-01")
+
+    assert highs == {"US.TEST": 102.0}, (
+        "the 09:35 bar's high=250.0 must be excluded -- only pre-09:30 bars count"
+    )
+
+
+def _make_premarket_5m_frame():
+    """Title-Case 5m frame with premarket (< 09:30 ET) and one regular-session bar."""
+    import pandas as pd
+
+    index = pd.to_datetime([
+        "2026-06-01 09:00:00", "2026-06-01 09:15:00", "2026-06-01 09:35:00",
+    ]).tz_localize("America/New_York")
+    return pd.DataFrame({
+        "Open": [100.0, 100.5, 200.0],
+        "High": [101.0, 102.0, 250.0],
+        "Low": [99.5, 100.0, 199.0],
+        "Close": [100.5, 101.5, 220.0],
+        "Volume": [500, 600, 900],
+    }, index=index)
+
+
 def _make_multi_bar_frame():
     """Title-Case OHLCV frame mimicking a raw yf.download() 5m result for one symbol."""
     import pandas as pd
