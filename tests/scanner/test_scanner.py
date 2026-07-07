@@ -1311,6 +1311,45 @@ class TestEvaluateSymbolTodayPrice:
             "Must NOT log the old symbol_skipped_no_today_bar event (it is gone)"
         )
 
+    def test_evaluate_symbol_skips_on_stale_prior_row(self):
+        """Finding 2.6 regression: a prior_row dated > 5 days before scan_date
+        (e.g. week-old yfinance data) must skip the symbol rather than compute
+        gap_pct off a stale prior_close. A fresh prior row (<=5 days) still
+        evaluates normally.
+        """
+        from bot.scanner.scanner import _evaluate_symbol
+        from bot.scanner.fetcher import TodayPrice
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+        today_price = TodayPrice(today_open=104.0, today_price=106.0, today_high=107.0)
+
+        # Stale: shift the entire frame back 10 calendar days so the most-recent
+        # prior row is > 5 days before scan_date.
+        stale_frame = self._make_daily_prior_only(
+            n_days=220, prior_close=100.0, prior_high=105.0, scan_date=scan_date,
+        )
+        stale_frame.index = stale_frame.index - pd.Timedelta(days=10)
+
+        import bot.scanner.scanner as scanner_mod
+        with patch("bot.scanner.scanner.get_ticker_frame", return_value=stale_frame), \
+             patch.object(scanner_mod, "_logger", MagicMock()) as mock_logger:
+            result = _evaluate_symbol("AAPL", {}, cfg, scan_date, today_price)
+
+        assert result is None, "Stale prior_row (>5 days before scan_date) must skip the symbol"
+        warning_events = [call.args[0] for call in mock_logger.warning.call_args_list]
+        assert "scanner_skipped_stale_prior_row" in warning_events, (
+            f"Must log scanner_skipped_stale_prior_row; got: {warning_events}"
+        )
+
+        # Fresh: unmodified frame (last row 1 business day before scan_date) evaluates normally.
+        fresh_frame = self._make_daily_prior_only(
+            n_days=220, prior_close=100.0, prior_high=105.0, scan_date=scan_date,
+        )
+        with patch("bot.scanner.scanner.get_ticker_frame", return_value=fresh_frame):
+            result_fresh = _evaluate_symbol("AAPL", {}, cfg, scan_date, today_price)
+        assert result_fresh is not None, "A fresh prior row (<=5 days) must evaluate normally"
+
     def test_evaluate_symbol_no_look_ahead_preserved(self):
         """SMA200 and rvol_baseline use only rows with date < scan_date.
 

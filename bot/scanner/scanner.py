@@ -209,6 +209,22 @@ def _evaluate_symbol(
     # so its last row is the immediately-prior trading day.
     prior_row = prior_frame.iloc[-1]
 
+    # Finding 2.6: restore the staleness guard removed alongside the CR-02
+    # today-row fix. If the most-recent prior session is more than 5 days
+    # before scan_date (e.g. week-old yfinance data), skip the symbol rather
+    # than computing gap_pct off a stale prior_close (inflated/false gap).
+    prior_date = prior_row.name.date() if hasattr(prior_row.name, "date") else prior_row.name
+    # scan_ts (already normalised via pd.Timestamp above) handles both a date
+    # object and a "YYYY-MM-DD" string caller (backtester harness passes str).
+    if (scan_ts.date() - prior_date).days > 5:
+        _logger.warning(
+            "scanner_skipped_stale_prior_row",
+            symbol=symbol,
+            prior_date=str(prior_date),
+            scan_date=str(scan_date),
+        )
+        return None
+
     prior_close_val = float(prior_row["close"])
     prior_high_val = float(prior_row["high"])
 
