@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import pandas as pd
+import pandas_market_calendars as mcal
 
 from bot.safety.et_helpers import ET
 from bot.scanner.fetcher import (
@@ -49,14 +50,16 @@ from bot.scanner.universe import yfinance_to_moomoo
 # Module constants
 # ============================================================
 
-# yfinance's intraday 5m window is a ROLLING window measured from "now" (06-RESEARCH
-# Pitfall 2), not an arbitrary historical range -- ~58 trading days is the practically
-# available window. Converted to an approximate calendar-day cutoff (5 trading days per
-# 7 calendar days) since a live fetch has no "trading day" concept until it succeeds.
-INTRADAY_5M_WINDOW_TRADING_DAYS = 58
-_WINDOW_CALENDAR_DAYS = round(INTRADAY_5M_WINDOW_TRADING_DAYS * 7 / 5)
+# yfinance's ACTUAL intraday 5m window is a ROLLING ~60-CALENDAR-day window measured
+# from "now" (06-RESEARCH Pitfall 2, CR-03) -- the previous 58-trading-day / 7:5
+# calendar-conversion pair was the mismatch: it claimed a wider window than the fetch
+# below (period="60d") ever actually requested, so a replay could be told "in window"
+# and still receive zero bars for its tail days. One constant, one true number.
+INTRADAY_5M_WINDOW_CALENDAR_DAYS = 60
 
 CACHE_DIR = "backtester/cache"
+
+_NYSE = mcal.get_calendar("NYSE")
 
 # T-06-03: cache filenames interpolate the (prefix-stripped) symbol -- restrict it to
 # ticker-shaped characters so no path separator/traversal segment can reach os.path.join.
@@ -97,6 +100,7 @@ class SimulatedBarFeed:
         os.makedirs(cache_dir, exist_ok=True)
         self._bars_by_code: Dict[str, list] = {}
         self._load_5m()
+        self._enforce_coverage()
 
     # --------------------------------------------------------
     # Ticker normalisation / cache paths
@@ -128,7 +132,18 @@ class SimulatedBarFeed:
                 misses.append(sym)
 
         if misses:
-            data, _failed = download_intraday_5m(misses)
+            # Direct _download_batch call (not download_intraday_5m, which hardcodes
+            # period="30d" -- ~21 trading days, the CR-03 root cause) so the replay
+            # bars actually cover the advertised INTRADAY_5M_WINDOW_CALENDAR_DAYS window.
+            data, _failed = _download_batch(
+                misses,
+                threads=5,
+                degradation_threshold=0.10,
+                download_kwargs={"period": "60d", "interval": "5m", "prepost": False},
+                abort_event="backtest_5m_scan_aborted_data_degradation",
+                partial_event="backtest_5m_partial_data",
+                degradation_message="Backtest 5m data degradation",
+            )
             for sym in misses:
                 frame = get_ticker_frame(data, sym)
                 if frame is None or frame.empty:
@@ -145,15 +160,39 @@ class SimulatedBarFeed:
 
     def _enforce_window(self) -> None:
         """Raise BacktestWindowError if self.start precedes the available window (no cache hit)."""
-        cutoff = datetime.now() - timedelta(days=_WINDOW_CALENDAR_DAYS)
+        cutoff = datetime.now() - timedelta(days=INTRADAY_5M_WINDOW_CALENDAR_DAYS)
         start_dt = datetime.strptime(self.start, "%Y-%m-%d")
         if start_dt < cutoff:
             raise BacktestWindowError(
                 f"Requested start={self.start} precedes the available yfinance 5m window "
-                f"(~{INTRADAY_5M_WINDOW_TRADING_DAYS} trading days back to "
+                f"(~{INTRADAY_5M_WINDOW_CALENDAR_DAYS} calendar days back to "
                 f"~{cutoff.date().isoformat()}) and no CSV cache file under {self.cache_dir!r} "
                 "covers this range. Build a cache by running backtests/scans over time, or "
                 "supply a flat-file export -- this never silently clips to an empty result."
+            )
+
+    def _enforce_coverage(self) -> None:
+        """Raise BacktestWindowError naming any NYSE trading day in [start, end] with ZERO
+        replay bars across every requested code (CR-03).
+
+        Converts a silent zero-bar replay day (the loop would simply produce no signals,
+        no fills, no error -- indistinguishable from a legitimately quiet day) into a loud,
+        named failure. Runs after _load_5m() so it sees whatever bars actually loaded,
+        whether from the CSV cache or a fresh network fetch.
+        """
+        trading_days = [
+            d.strftime("%Y-%m-%d")
+            for d in _NYSE.valid_days(start_date=self.start, end_date=self.end)
+        ]
+        covered = {
+            b["time_key"][:10] for bars in self._bars_by_code.values() for b in bars
+        }
+        missing = [d for d in trading_days if d not in covered]
+        if missing:
+            raise BacktestWindowError(
+                f"No replay bars loaded for NYSE trading day(s) {', '.join(missing)} in "
+                f"[{self.start}, {self.end}] across any requested code -- refusing to "
+                "silently replay an empty day."
             )
 
     def _materialize_bars(self, sym: str, frame: pd.DataFrame) -> list:
@@ -210,10 +249,18 @@ class SimulatedBarFeed:
             yield b
 
     def next_bar(self, code: str, after: str) -> Optional[dict]:
-        """Return the strictly-next bar for code with time_key > after, else None."""
+        """Return the strictly-next SAME-SESSION bar for code with time_key > after, else None.
+
+        Bars are already chronological (_materialize_bars sorts by index), so the first
+        bar with time_key > after is the candidate next bar. Never crosses a session
+        boundary (CR-04): if that candidate falls on a later calendar day than `after`,
+        there is no same-session next bar -- a signal or stop on day D's last bar must not
+        fill on day D+1's open.
+        """
+        after_date = after[:10]
         for b in self._bars_by_code.get(code, []):
             if b["time_key"] > after:
-                return b
+                return b if b["time_key"][:10] == after_date else None
         return None
 
     # --------------------------------------------------------

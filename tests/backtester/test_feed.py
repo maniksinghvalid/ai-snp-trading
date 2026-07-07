@@ -147,6 +147,81 @@ def test_traversal_symbol_rejected_before_any_cache_or_network_access(tmp_path):
     assert list(tmp_path.iterdir()) == [], "no cache file may be created for a rejected symbol"
 
 
+def test_window_guard_and_fetch_agree_at_60_calendar_days(tmp_path):
+    """CR-03: --start 55 calendar days back (no cache) loads bars; 90 days back raises."""
+    near_start = (datetime.now() - timedelta(days=55)).strftime("%Y-%m-%d")
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame_for(near_start)
+        feed = SimulatedBarFeed(["US.TEST"], start=near_start, end=near_start,
+                                 cache_dir=str(tmp_path))
+    assert feed._bars_by_code.get("US.TEST"), "55-day-back start must load replay bars"
+
+    far_start = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    with patch("yfinance.download", side_effect=_empty_yf_download):
+        with pytest.raises(BacktestWindowError):
+            SimulatedBarFeed(["US.TEST"], start=far_start, end=far_start,
+                              cache_dir=str(tmp_path))
+
+
+def test_coverage_guard_names_the_uncovered_trading_day(tmp_path):
+    """CR-03: a two-trading-day range with bars for only day 1 raises BacktestWindowError
+    naming day 2."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame()  # bars only on 2026-06-01
+        with pytest.raises(BacktestWindowError) as exc_info:
+            SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-02",
+                             cache_dir=str(tmp_path))
+    assert "2026-06-02" in str(exc_info.value)
+
+
+def test_next_bar_never_crosses_a_session_boundary(tmp_path):
+    """CR-04: next_bar must not return the following day's open as the "next" bar."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_two_day_frame()
+        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-02",
+                                 cache_dir=str(tmp_path))
+
+    assert feed.next_bar("US.TEST", after="2026-06-01 15:55:00") is None, (
+        "day D's last bar must not fill on day D+1's open"
+    )
+    nxt = feed.next_bar("US.TEST", after="2026-06-01 10:05:00")
+    assert nxt is not None
+    assert nxt["time_key"] == "2026-06-01 10:10:00"
+
+
+def _make_multi_bar_frame_for(day: str):
+    """Same shape as _make_multi_bar_frame() but dated `day` (YYYY-MM-DD)."""
+    import pandas as pd
+
+    index = pd.to_datetime([
+        f"{day} 09:30:00", f"{day} 09:35:00", f"{day} 09:40:00",
+    ]).tz_localize("America/New_York")
+    return pd.DataFrame({
+        "Open": [100.00, 100.20, 100.60],
+        "High": [100.50, 100.80, 101.00],
+        "Low": [99.50, 100.00, 100.30],
+        "Close": [100.20, 100.60, 100.90],
+        "Volume": [10_000, 9_000, 8_000],
+    }, index=index)
+
+
+def _make_two_day_frame():
+    """Title-Case 5m frame spanning two NYSE trading days (2026-06-01, 2026-06-02)."""
+    import pandas as pd
+
+    index = pd.to_datetime([
+        "2026-06-01 10:05:00", "2026-06-01 10:10:00", "2026-06-01 15:55:00",
+        "2026-06-02 09:30:00", "2026-06-02 09:35:00",
+    ]).tz_localize("America/New_York")
+    return pd.DataFrame({
+        "Open": [100.00, 100.20, 100.60, 101.00, 101.20],
+        "High": [100.50, 100.80, 101.00, 101.50, 101.80],
+        "Low": [99.50, 100.00, 100.30, 100.80, 101.00],
+        "Close": [100.20, 100.60, 100.90, 101.20, 101.60],
+        "Volume": [10_000, 9_000, 8_000, 7_000, 6_000],
+    }, index=index)
+
+
 def test_dashed_and_dotted_real_tickers_still_accepted(tmp_path):
     """T-06-03 guard must not reject legitimate symbol shapes (BRK-B, BF.B)."""
     with patch("yfinance.download") as mock_dl:
