@@ -42,10 +42,17 @@ class SimulatedExecution:
         # call on_bar() for every closed bar (mirrors the bar_buffer wiring discipline,
         # 06-RESEARCH Pitfall 6) so manage_exit knows the "after" anchor for its next_bar lookup.
         self._last_bar_time_key: Dict[str, str] = {}
+        # Full latest bar per code (not just its time_key) -- gives force-close mode a real
+        # price anchor (CR-05). Populated alongside _last_bar_time_key in on_bar.
+        self._last_bar: Dict[str, dict] = {}
+        # Harness (Plan 09) mode flag: True while force_close_all is closing out remaining
+        # positions at end-of-day/end-of-replay. Toggled around that call only.
+        self._force_close = False
 
     def on_bar(self, bar: dict) -> None:
         """Record the latest bar seen for bar["code"] -- the anchor for manage_exit's N+1 lookup."""
         self._last_bar_time_key[bar["code"]] = bar["time_key"]
+        self._last_bar[bar["code"]] = bar
 
     async def consume_intent(self, intent) -> Optional[FillEvent]:
         """Fill an entry at the next bar's open + slippage; None if no next bar (D-05 abandon).
@@ -85,13 +92,41 @@ class SimulatedExecution:
         _trigger_stop_out/_place_exit_order call sites are unchanged. No TTL/escalation loop
         here (no wall-clock in a backtest) -- the args are accepted for signature parity and
         otherwise ignored.
+
+        Force-close mode (self._force_close=True, set by the harness's force_close_all wiring,
+        CR-05): fills at the last observed bar close instead of consulting feed.next_bar (there
+        is no N+1 bar at the final observed bar of a replay) and always returns the FULL qty so
+        force_close_all reaches CLOSED.
+
+        Normal mode with no next bar (WR-01): returns 0 and records NO fill -- mirrors the live
+        "manage_exit returning 0 is valid, no fill occurred" contract, so the position stays open
+        for a later force-close rather than fabricating a phantom exit_price=None full fill.
         """
+        if self._force_close:
+            last = self._last_bar.get(code)
+            if last is None:
+                return 0  # defensive: should not happen after a replay has seen this code
+            exit_fill = {
+                "code": code,
+                "exit_price": last["close"] + self._slippage,
+                "qty": qty,
+                "time_key": last["time_key"],
+            }
+            self.exit_fills.append(exit_fill)
+            self.fills.append(exit_fill)
+            return int(qty)
+
         after = self._last_bar_time_key.get(code, "")
         next_bar = self._feed.next_bar(code, after=after)
-        exit_price = next_bar["open"] + self._slippage if next_bar is not None else None
-        time_key = next_bar["time_key"] if next_bar is not None else None
+        if next_bar is None:
+            return 0  # no fill available -- stay open (WR-01), no fabricated fill recorded
 
-        exit_fill = {"code": code, "exit_price": exit_price, "qty": qty, "time_key": time_key}
+        exit_fill = {
+            "code": code,
+            "exit_price": next_bar["open"] + self._slippage,
+            "qty": qty,
+            "time_key": next_bar["time_key"],
+        }
         self.exit_fills.append(exit_fill)
         self.fills.append(exit_fill)
         return int(qty)
