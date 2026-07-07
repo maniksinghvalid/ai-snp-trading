@@ -38,3 +38,7 @@ env/
 *.egg-info/
 dist/
 build/
+
+# Backtester scratch (CSV cache + per-run scratch StateStore DBs)
+backtester/cache/
+backtester/runs/
