@@ -1323,6 +1323,96 @@ class TestOrphanOwnershipGuard:
             f"Bot-owned long with pending_intent must be adopted; got {result['adopted']}"
         )
 
+    def test_adopt_orphan_rejects_duplicate_code(self):
+        """Finding 2.5 regression: reconcile_once must NEVER insert a second open
+        position row for a code that already has one in the DB.
+
+        Simulates the gap where manager._positions has lost track of a code
+        in-memory (e.g. after a restart before reconstruct_from_store runs) but
+        store.get_open_positions() still reports an open row for it. Without the
+        SELECT-before-INSERT guard, insert_orphan_position's INSERT OR IGNORE
+        (keyed on position_id, a fresh UUID each time) never collides on code —
+        producing a second, double-managed row for the same symbol.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.NVDA", "qty": 50, "average_cost": 800.0,
+        }])
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=798.0)
+        gw._compute_orphan_stop = MagicMock(return_value=790.0)
+        gw.subscribe = AsyncMock()
+
+        # In-memory has lost track of US.NVDA (restart gap) — NOT in _positions.
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_manager.adopt_orphan = MagicMock()
+
+        mock_store = MagicMock()
+        # DB already has an open row for US.NVDA (phase != CLOSED).
+        mock_store.get_open_positions.return_value = [
+            {"position_id": "POS-EXISTING", "code": "US.NVDA", "phase": "ACTIVE"},
+        ]
+        mock_store.has_pending_intent.return_value = False
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+        result = asyncio.run(_run())
+
+        # Duplicate guard must reject: an open row for this code already exists.
+        mock_store.insert_orphan_position.assert_not_called()
+        mock_manager.adopt_orphan.assert_not_called()
+        assert result["adopted"] == [], (
+            f"A code with an existing open DB row must never be re-adopted; "
+            f"got {result['adopted']}"
+        )
+
+        # No-code duplicate: an unrelated open DB row for a different code must
+        # NOT block adoption of a genuinely new orphan.
+        broker_df2 = pd.DataFrame([{
+            "code": "US.TSLA", "qty": 25, "average_cost": 250.0,
+        }])
+        gw2 = _make_gateway_with_mocks()
+        gw2.get_positions = AsyncMock(return_value=(0, broker_df2))
+        gw2._derive_lod_for_orphan = AsyncMock(return_value=248.0)
+        gw2._compute_orphan_stop = MagicMock(return_value=245.0)
+        gw2.subscribe = AsyncMock()
+
+        mock_manager2 = MagicMock()
+        mock_manager2._positions = {}
+        mock_manager2._exiting = set()
+        mock_manager2.adopt_orphan = MagicMock()
+
+        mock_store2 = MagicMock()
+        mock_store2.get_open_positions.return_value = [
+            {"position_id": "POS-OTHER", "code": "US.NVDA", "phase": "ACTIVE"},
+        ]
+        # Bot-owned via crash-recovery pending_intent (SAFE-OG-01) — unrelated to
+        # the duplicate-code guard under test here.
+        mock_store2.has_pending_intent.return_value = True
+        mock_store2.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_alerter2 = MagicMock()
+        mock_alerter2.send = AsyncMock()
+
+        async def _run2():
+            return await gw2.reconcile_once(
+                store=mock_store2, manager=mock_manager2, alerter=mock_alerter2
+            )
+        result2 = asyncio.run(_run2())
+
+        mock_store2.insert_orphan_position.assert_called_once()
+        assert "US.TSLA" in result2["adopted"], (
+            f"A genuinely new orphan code must still be adopted; got {result2['adopted']}"
+        )
+
     # ----------------------------------------------------------------
     # startup_reconcile tests
     # ----------------------------------------------------------------

@@ -1191,6 +1191,17 @@ class MoomooGateway:
                 )
                 continue
 
+            # Finding 2.5: application-layer SELECT-before-INSERT guard. The DB
+            # INSERT OR IGNORE below is keyed on position_id (a fresh UUID every
+            # call), so it never collides on `code` — without this check, a code
+            # whose open DB row already exists (e.g. manager._positions lost
+            # track of it after a restart) would get a second, double-managed
+            # row. open_pos_codes was already computed above for the ownership
+            # guard; reuse it here rather than a second query.
+            if code in open_pos_codes:
+                _logger.warning("orphan_adoption_skipped_duplicate_code", code=code)
+                continue
+
             _logger.warning("reconcile_orphan_adopting", code=code, broker_qty=bp["qty"])
             lod = await self._derive_lod_for_orphan(code)
             stop = self._compute_orphan_stop(lod)
