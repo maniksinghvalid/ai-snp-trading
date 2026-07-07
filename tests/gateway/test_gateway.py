@@ -1016,6 +1016,71 @@ class TestGetMarketSnapshot:
 
 
 # ============================================================
+# MoomooGateway.get_bid_price() / get_ask_price() — Finding 2.4
+# A snapshot failure (or a zero price after the last_price fallback) must
+# raise GatewayError, never silently return 0.0 (which would let the engine
+# compute a negative/zero exit limit and silently abort a stop-out).
+# ============================================================
+
+class TestGetBidAskPriceRaisesOnFailure:
+    def test_get_bid_price_raises_on_snapshot_failure(self):
+        """ret != RET_OK (or empty data) must raise GatewayError, not return 0.0."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_market_snapshot.return_value = (1, None)
+
+        async def _run():
+            return await gw.get_bid_price("US.AAPL")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(_run())
+
+    def test_get_bid_price_raises_on_zero_price(self):
+        """A zero bid_price with no usable last_price fallback must raise, not return 0.0."""
+        gw = _make_gateway_with_mocks()
+        df = pd.DataFrame([{"code": "US.AAPL", "bid_price": 0.0, "last_price": 0.0}])
+        gw._quote_ctx.get_market_snapshot.return_value = (0, df)
+
+        async def _run():
+            return await gw.get_bid_price("US.AAPL")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(_run())
+
+    def test_get_bid_price_returns_valid_price(self):
+        """A healthy snapshot still returns the bid_price float (no behavior change)."""
+        gw = _make_gateway_with_mocks()
+        df = pd.DataFrame([{"code": "US.AAPL", "bid_price": 150.25, "last_price": 150.30}])
+        gw._quote_ctx.get_market_snapshot.return_value = (0, df)
+
+        async def _run():
+            return await gw.get_bid_price("US.AAPL")
+
+        assert asyncio.run(_run()) == 150.25
+
+    def test_get_ask_price_raises_on_snapshot_failure(self):
+        """ret != RET_OK (or empty data) must raise GatewayError, not return 0.0."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_market_snapshot.return_value = (1, None)
+
+        async def _run():
+            return await gw.get_ask_price("US.AAPL")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(_run())
+
+    def test_get_ask_price_returns_valid_price(self):
+        """A healthy snapshot still returns the ask_price float (no behavior change)."""
+        gw = _make_gateway_with_mocks()
+        df = pd.DataFrame([{"code": "US.AAPL", "ask_price": 150.75, "last_price": 150.70}])
+        gw._quote_ctx.get_market_snapshot.return_value = (0, df)
+
+        async def _run():
+            return await gw.get_ask_price("US.AAPL")
+
+        assert asyncio.run(_run()) == 150.75
+
+
+# ============================================================
 # MoomooGateway.get_global_state() — health check (SVC-02)
 # Added in Phase 5 Plan 00, Task 3
 # ============================================================

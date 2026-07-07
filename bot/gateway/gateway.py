@@ -970,15 +970,23 @@ class MoomooGateway:
         Deferred SDK import via the existing get_market_snapshot path.
 
         Returns:
-            float — ask price in USD (>= 0). 0.0 if snapshot unavailable.
+            float — ask price in USD (> 0).
+
+        Raises:
+            GatewayError: snapshot failed (ret != RET_OK / empty data), or the
+                parsed price is 0.0 even after the last_price fallback (halted/
+                illiquid). Finding 2.4: never return 0.0 — a silent 0.0 would let
+                the engine compute a negative/zero limit price for a live order.
         """
         ret, data = await self.get_market_snapshot([code])
         if ret != RET_OK or data is None or len(data) == 0:
-            return 0.0
+            raise GatewayError(f"get_ask_price snapshot failed for {code}: ret={ret}")
         row = data.iloc[0] if hasattr(data, "iloc") else data[0]
         ask = float(row.get("ask_price") or 0)
         if ask == 0.0:
             ask = float(row.get("last_price") or 0)
+        if ask == 0.0:
+            raise GatewayError(f"get_ask_price got zero price for {code} (halted/illiquid)")
         return ask
 
     async def get_bid_price(self, code: str) -> float:
@@ -991,15 +999,23 @@ class MoomooGateway:
         Deferred SDK import via the existing get_market_snapshot path.
 
         Returns:
-            float — bid price in USD (>= 0). 0.0 if snapshot unavailable.
+            float — bid price in USD (> 0).
+
+        Raises:
+            GatewayError: snapshot failed (ret != RET_OK / empty data), or the
+                parsed price is 0.0 even after the last_price fallback (halted/
+                illiquid). Finding 2.4: never return 0.0 — a silent 0.0 would let
+                the engine compute a negative/zero limit price for a live order.
         """
         ret, data = await self.get_market_snapshot([code])
         if ret != RET_OK or data is None or len(data) == 0:
-            return 0.0
+            raise GatewayError(f"get_bid_price snapshot failed for {code}: ret={ret}")
         row = data.iloc[0] if hasattr(data, "iloc") else data[0]
         bid = float(row.get("bid_price") or 0)
         if bid == 0.0:
             bid = float(row.get("last_price") or 0)
+        if bid == 0.0:
+            raise GatewayError(f"get_bid_price got zero price for {code} (halted/illiquid)")
         return bid
 
     # --------------------------------------------------------

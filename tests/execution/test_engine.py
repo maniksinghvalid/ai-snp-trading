@@ -791,6 +791,79 @@ def test_paper_fill_exit_partial_then_full():
 
 
 # ============================================================
+# Finding 2.4 — bid price fallback on repeated GatewayError mid-loop
+# ============================================================
+
+def test_manage_exit_bid_price_falls_back_after_gateway_error():
+    """manage_exit must never abort/price-at-zero when a mid-loop bid re-price
+    exhausts its retries (GatewayError raised twice in a row) — it must fall
+    back to the last known good bid_price and continue to a full fill.
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError as GwError
+
+    cfg = _MockCfg(exit_escalation_cadence_seconds=0.01)
+    placed_orders = []
+
+    async def mock_place(code, qty, price, side):
+        oid = f"EXIT-FALLBACK-{len(placed_orders) + 1}"
+        placed_orders.append(oid)
+        return oid
+
+    async def mock_order_status(order_id=""):
+        if len(placed_orders) >= 1 and order_id == placed_orders[0]:
+            return [{
+                "order_id": placed_orders[0], "code": "US.NVDA",
+                "order_status": "FILLED_PART", "qty": 200,
+                "dealt_qty": 100, "dealt_avg_price": 149.85, "trd_side": "SELL",
+            }]
+        if len(placed_orders) >= 2 and order_id == placed_orders[1]:
+            return [{
+                "order_id": placed_orders[1], "code": "US.NVDA",
+                "order_status": "FILLED_ALL", "qty": 100,
+                "dealt_qty": 100, "dealt_avg_price": 149.80, "trd_side": "SELL",
+            }]
+        return []
+
+    gw = MagicMock()
+    # First call (initial pricing) succeeds; the mid-loop re-price (after the
+    # partial fill) fails twice (exhausting _PRICE_FETCH_RETRIES) — manage_exit
+    # must fall back to the last known bid_price (149.90) instead of raising.
+    gw.get_bid_price = AsyncMock(
+        side_effect=[149.90, GwError("snapshot failed"), GwError("snapshot failed")]
+    )
+    gw.place_order = mock_place
+    gw.cancel_order = AsyncMock()
+    gw.get_order_status = mock_order_status
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    try:
+        from moomoo import TrdSide
+        sell_side = TrdSide.SELL
+    except ImportError:
+        sell_side = "SELL"
+
+    with patch("bot.execution.engine.asyncio.sleep", new=AsyncMock()):
+        total_filled = _run(engine.manage_exit(
+            code="US.NVDA",
+            qty=200,
+            side=sell_side,
+            escalation_step=0.10,
+            escalation_cadence=0.01,
+            ttl=0.05,
+        ))
+
+    assert total_filled == 200, (
+        f"Expected full fill (100+100) after fallback, got {total_filled}"
+    )
+    assert len(placed_orders) == 2, (
+        f"Expected 2 place_order calls (partial then remainder), got {len(placed_orders)}"
+    )
+
+
+# ============================================================
 # Rate-limit resilience — RATE-01 manage_exit defense-in-depth
 # ============================================================
 

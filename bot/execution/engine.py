@@ -34,11 +34,17 @@ import asyncio
 from typing import Optional
 
 from bot.execution.events import FillEvent
+from bot.gateway.gateway import GatewayError
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 
 _logger = get_logger(__name__)
+
+# Finding 2.4: bounded retry for a transient bid/ask snapshot failure before
+# falling back to the last known good price (never a $0/negative exit limit).
+_PRICE_FETCH_RETRIES = 2
+_PRICE_FETCH_RETRY_DELAY_S = 1.0
 
 
 # ============================================================
@@ -96,6 +102,43 @@ class ExecutionEngine:
         self._gw = gateway
         self._store = store
         self._cfg = cfg
+
+    async def _get_price_with_fallback(
+        self, code: str, side: str, fallback: Optional[float] = None,
+    ) -> float:
+        """Fetch bid/ask price with a bounded retry (Finding 2.4).
+
+        gateway.get_bid_price/get_ask_price now raise GatewayError instead of
+        returning 0.0 on a snapshot failure. Retries up to _PRICE_FETCH_RETRIES
+        times with a short delay; if still failing and `fallback` (the last
+        known good price for this exit loop) is available, uses it rather than
+        ever computing a limit price from 0.0. Re-raises GatewayError only when
+        both the retries and the fallback are exhausted (never silently prices
+        an order at $0 — an explicit raise is the caller's signal to abandon).
+
+        Args:
+            code:     Moomoo-format stock code.
+            side:     "bid" or "ask".
+            fallback: Last known good price, or None if none is available yet.
+        """
+        getter = self._gw.get_bid_price if side == "bid" else self._gw.get_ask_price
+        last_exc: Optional[GatewayError] = None
+        for attempt in range(_PRICE_FETCH_RETRIES):
+            try:
+                return await getter(code)
+            except GatewayError as exc:
+                last_exc = exc
+                _logger.warning(
+                    "price_fetch_retry", code=code, side=side, attempt=attempt, error=str(exc),
+                )
+                if attempt < _PRICE_FETCH_RETRIES - 1:
+                    await asyncio.sleep(_PRICE_FETCH_RETRY_DELAY_S)
+        if fallback is not None:
+            _logger.warning(
+                "price_fetch_fallback_last_known", code=code, side=side, fallback=fallback,
+            )
+            return fallback
+        raise last_exc
 
     # --------------------------------------------------------
     # Public API
@@ -225,7 +268,17 @@ class ExecutionEngine:
             FillEvent(is_entry=True) on fill, or None on abandon.
         """
         # D-04: price at/through current ask + buffer
-        ask_price = await self._gw.get_ask_price(intent.code)
+        try:
+            ask_price = await self._get_price_with_fallback(intent.code, "ask")
+        except GatewayError:
+            # Finding 2.4: no order has been placed yet — abandon this intent
+            # rather than propagate an unhandled exception into the bar-processing
+            # loop (D-05 abandon semantics, same as an exhausted-retries abandon).
+            self._resolve_intent_expired(intent.intent_id)
+            _logger.warning(
+                "entry_price_fetch_failed_abandoning", code=intent.code, intent_id=intent.intent_id,
+            )
+            return None
         limit_price = round(ask_price + self._cfg.entry_limit_buffer_usd, 4)
 
         trd_side_buy = _get_trd_side_buy()
@@ -313,8 +366,12 @@ class ExecutionEngine:
             _logger.info("entry_ttl_expired", order_id=order_id, attempt=attempt)
 
             if attempt < self._cfg.entry_max_retries:
-                # Re-price at fresh ask + buffer and re-place (EXEC-03)
-                ask_price = await self._gw.get_ask_price(intent.code)
+                # Re-price at fresh ask + buffer and re-place (EXEC-03). Finding
+                # 2.4: fall back to the last known ask_price on a transient
+                # snapshot failure rather than ever pricing off 0.0.
+                ask_price = await self._get_price_with_fallback(
+                    intent.code, "ask", fallback=ask_price,
+                )
                 limit_price = round(ask_price + self._cfg.entry_limit_buffer_usd, 4)
                 order_id = await self._gw.place_order(
                     intent.code, intent.quantity, limit_price, trd_side_buy
@@ -393,8 +450,12 @@ class ExecutionEngine:
         """
         total_filled = 0
         remaining = qty
-        # Price through bid with buffer (D-07)
-        bid_price = await self._gw.get_bid_price(code)
+        # Price through bid with buffer (D-07). Finding 2.4: bounded retry inside
+        # _get_price_with_fallback; no fallback price exists yet for this very
+        # first fetch, so a total snapshot outage still raises here (the caller,
+        # _place_exit_order, catches it and returns 0 — the pre-existing "no
+        # fill" contract — rather than ever pricing this order off 0.0/negative).
+        bid_price = await self._get_price_with_fallback(code, "bid")
         limit_price = round(bid_price - self._cfg.exit_limit_buffer_usd, 4)
         escalation_rounds = 0
 
@@ -489,8 +550,10 @@ class ExecutionEngine:
                              filled=post_cancel_filled, remaining=remaining)
                 if remaining <= 0:
                     break
-                # Price next round at current bid - buffer - escalation
-                bid_price = await self._gw.get_bid_price(code)
+                # Price next round at current bid - buffer - escalation. Finding
+                # 2.4: fall back to the last known bid_price on a transient
+                # snapshot failure — the stop-out loop must never abort here.
+                bid_price = await self._get_price_with_fallback(code, "bid", fallback=bid_price)
                 limit_price = round(
                     bid_price - self._cfg.exit_limit_buffer_usd
                     - escalation_rounds * escalation_step,
@@ -503,7 +566,8 @@ class ExecutionEngine:
                 except Exception:
                     pass
                 escalation_rounds += 1
-                bid_price = await self._gw.get_bid_price(code)
+                # Finding 2.4: fall back to the last known bid_price on failure.
+                bid_price = await self._get_price_with_fallback(code, "bid", fallback=bid_price)
                 limit_price = round(
                     bid_price - self._cfg.exit_limit_buffer_usd
                     - escalation_rounds * escalation_step,
