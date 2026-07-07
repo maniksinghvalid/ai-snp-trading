@@ -721,26 +721,47 @@ class PositionManager:
             phase=pos.phase.value,
         )
 
-        # Fire optional exit alert callback when position is fully closed
-        # (ALERT-04: isolation — callback failure must never propagate).
-        if pos.remaining_quantity == 0 and self._on_exit_alert is not None:
+        if pos.remaining_quantity == 0:
+            # Compute R-multiple: (exit_price - entry) / (entry - initial_stop)
+            entry = pos.entry_price or 0.0
+            stop = pos.initial_stop or 0.0
+            exit_price = fill.avg_fill_price or entry
+            risk = entry - stop
+            r_multiple = (exit_price - entry) / risk if risk != 0 else 0.0
+
+            # Finding 2.3: write the completed trade row now that the position is
+            # fully closed (trades.exit_price/closed_at are NOT NULL — a partial
+            # exit must never attempt this insert). This is what get_closed_trades /
+            # get_daily_trade_stats read for the EOD report and daily summary.
             try:
-                # Compute R-multiple: (exit_price - entry) / (entry - initial_stop)
-                entry = pos.entry_price or 0.0
-                stop = pos.initial_stop or 0.0
-                exit_price = fill.avg_fill_price or entry
-                risk = entry - stop
-                r_multiple = (exit_price - entry) / risk if risk != 0 else 0.0
-                # Use the real exit reason recorded at the FSM trigger point (ALERT-02).
-                # Falls back to "exit_fill" only as a defensive sentinel for in-flight
-                # exits that arrive after a restart (no reason was recorded).
-                self._on_exit_alert(
-                    pos.code,
-                    pos.pending_exit_reason or "exit_fill",
-                    round(r_multiple, 2),
+                self._store.record_trade(
+                    position_id=pos.position_id,
+                    code=pos.code,
+                    entry_price=pos.entry_price,
+                    exit_price=fill.avg_fill_price,
+                    quantity=pos.full_quantity,
+                    exit_reason=pos.pending_exit_reason or "exit_fill",
+                    r_multiple=round(r_multiple, 2),
+                    closed_at=fill.fill_time,
                 )
             except Exception:
-                _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
+                _logger.warning("record_trade_error", code=pos.code, exc_info=True)
+
+            # Fire optional exit alert callback when position is fully closed
+            # (ALERT-04: isolation — callback failure must never propagate).
+            if self._on_exit_alert is not None:
+                try:
+                    # Use the real exit reason recorded at the FSM trigger point
+                    # (ALERT-02). Falls back to "exit_fill" only as a defensive
+                    # sentinel for in-flight exits that arrive after a restart
+                    # (no reason was recorded).
+                    self._on_exit_alert(
+                        pos.code,
+                        pos.pending_exit_reason or "exit_fill",
+                        round(r_multiple, 2),
+                    )
+                except Exception:
+                    _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
 
     # ============================================================
     # Internal — FSM transition handlers (called by on_bar)

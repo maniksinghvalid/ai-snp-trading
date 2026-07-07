@@ -371,6 +371,76 @@ class TestExitFill:
         assert pos.remaining_quantity == 0
         assert pos.phase == PositionPhase.CLOSED
 
+    def test_exit_fill_writes_trade_row_to_store(self, manager, open_store):
+        """Finding 2.3 regression: a full exit fill (remaining_quantity==0) must
+        write exactly one row to the trades table (entry_price/exit_price match),
+        so get_closed_trades/get_daily_trade_stats reflect real trades. A PARTIAL
+        exit (remaining_quantity>0) must write NO trades row.
+        """
+        # Partial exit: 100 of 300 — no trade row expected
+        pos_partial = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=300,
+            exit_order_id="ORDER-EXIT-PARTIAL",
+            position_id="POS-PARTIAL",
+        )
+        manager._positions["US.AAPL"] = pos_partial
+        open_store.upsert_position(pos_partial)
+
+        partial_fill = _make_fill(
+            order_id="ORDER-EXIT-PARTIAL",
+            intent_id="",
+            code="US.AAPL",
+            filled_qty=100,
+            avg_fill_price=101.0,
+            is_entry=False,
+        )
+        manager.on_fill(partial_fill)
+
+        assert pos_partial.remaining_quantity == 200
+        assert open_store.get_closed_trades("2026-06-24") == [], (
+            "A partial exit must not write a trades row (schema requires a full close)"
+        )
+
+        # Full exit: exactly remaining_quantity — must write one trade row
+        pos_full = _make_pos(
+            code="US.TSLA",
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            remaining_quantity=100,
+            full_quantity=100,
+            exit_order_id="ORDER-EXIT-FULL",
+            position_id="POS-FULL",
+        )
+        manager._positions["US.TSLA"] = pos_full
+        open_store.upsert_position(pos_full)
+
+        full_fill = _make_fill(
+            order_id="ORDER-EXIT-FULL",
+            intent_id="",
+            code="US.TSLA",
+            filled_qty=100,
+            avg_fill_price=103.0,
+            is_entry=False,
+            fill_time=datetime(2026, 6, 24, 15, 0, 0, tzinfo=timezone.utc),
+        )
+        manager.on_fill(full_fill)
+
+        assert pos_full.remaining_quantity == 0
+        assert pos_full.phase == PositionPhase.CLOSED
+
+        rows = open_store.get_closed_trades("2026-06-24")
+        assert len(rows) == 1, f"Expected exactly one closed trade row, got {rows!r}"
+        row = rows[0]
+        assert row["position_id"] == "POS-FULL"
+        assert row["code"] == "US.TSLA"
+        assert row["entry_price"] == 100.0
+        assert row["exit_price"] == 103.0
+        assert row["quantity"] == 100
+
     def test_exit_fill_matched_by_order_id_only(self, manager, open_store):
         """Two positions with same-qty but different exit_order_ids — only matched position updated.
 
