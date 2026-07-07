@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
-- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (9/9 plans executed 2026-07-07; gap-closure 06-07..06-09 closed all 7 original multi-day BLOCKERs, but re-verification gaps_found — 2 NEW BLOCKERs: NaN union-index bars crash multi-ticker replay; Gate 7 -2R circuit breaker can never trip during replay)
+- [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (9/9 plans executed 2026-07-07; gap-closure 06-07..06-09 closed all 7 original multi-day BLOCKERs, but re-verification gaps_found — 2 NEW BLOCKERs: NaN union-index bars crash multi-ticker replay; Gate 7 -2R circuit breaker can never trip during replay) (completed 2026-07-07)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
@@ -224,7 +224,7 @@ Plans:
 
 - [x] 06-10-PLAN.md — feed.py NaN-row hygiene (BT-04/BT-02): dropna(open/high/low/close/volume) in _materialize_bars and _load_premarket (both network + CSV-cache paths) so a realistic multi-ticker yf.download union-index NaN-padded frame neither crashes int(NaN) nor poisons premarket_highs; + union-index regression test [Post-Review Gap Wave 1]
 - [x] 06-11-PLAN.md — Gate-7 trades persistence + exit-slippage sign (BT-01/BT-03): new parameterized StateStore.record_trade; _capture_closed_trades writes each closed trade to the scratch trades table so the reused SignalEngine Gate-7 -2R circuit breaker reads real realized P&L and can block entries; adverse exit slippage (SELL exits subtract); truthful harness docstring; + Gate-7-trip and slippage-sign regression tests [Post-Review Gap Wave 1]
-- [ ] 06-12-PLAN.md — test-suite time-bomb hygiene (non-blocking, test-only): recent_session_days() helper + retrofit hardcoded 2026-06-01/02 fixture dates across the backtester suite so the rolling 60-day window guard never turns the suite red on a future calendar date [Post-Review Gap Wave 2, blocked on 06-10/06-11]
+- [x] 06-12-PLAN.md — test-suite time-bomb hygiene (non-blocking, test-only): recent_session_days() helper + retrofit hardcoded 2026-06-01/02 fixture dates across the backtester suite so the rolling 60-day window guard never turns the suite red on a future calendar date [Post-Review Gap Wave 2, blocked on 06-10/06-11]
 
 ### Phase 7: Strategy Optimization
 
@@ -272,7 +272,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 11/12 | In Progress|  |
+| 6. Backtester | 12/12 | Complete   | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -286,7 +286,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 11/12 plans executed
+**Plans:** 12/12 plans complete
 
 Plans:
 **Wave 1**
