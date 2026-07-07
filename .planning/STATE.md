@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-07-07T02:21:21.008Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-07-07T02:28:31.419Z"
 last_activity: 2026-07-07 -- Phase 06 execution started
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 37
-  completed_plans: 31
+  completed_plans: 32
   percent: 67
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 06 (backtester) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-07-07 -- Phase 06 execution started
 
@@ -63,6 +63,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 06-backtester PP01 | 12 minutes | 2 tasks tasks | 7 files files |
 | Phase 06 P02 | 25 | 2 tasks | 2 files |
 | Phase 06 P03 | 20 | 2 tasks | 2 files |
+| Phase 06 P04 | 10 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 06-02: daily_bars()/intraday_5m_for_tod() return the RAW yf.download dict (not routed through get_ticker_frame) since _evaluate_symbol/_compute_tod_baselines expect the raw per-ticker frame themselves
 - [Phase ?]: 06-03: manage_exit's live signature carries no bar/time_key, so SimulatedExecution exposes on_bar(bar) recording the latest bar per code as the anchor for its own next_bar lookup (mirrors bar_buffer wiring, 06-RESEARCH Pitfall 6)
 - [Phase ?]: 06-03: FillEvent.fill_time and exit_fills/fills rows store bar time_key strings (matches feed.py/fixtures.py convention), not datetime objects, despite the live dataclass's type annotation
+- [Phase ?]: 06-04: win_rate/gross_profit/gross_loss use derived realized_pnl > 0 (agrees with r_multiple sign on the fixture; documented choice per plan behavior spec)
+- [Phase ?]: 06-04: profit_factor==float('inf') round-trips through json.dump/json.load as the Infinity literal, no string sentinel needed
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -157,6 +160,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T02:21:21.004Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-07-07T02:28:31.415Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None

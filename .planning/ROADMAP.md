@@ -204,7 +204,7 @@ Plans:
 
 - [x] 06-02-PLAN.md — SimulatedBarFeed (BT-04): yfinance+CSV read-through cache, get_ticker_frame casing, yfinance_to_moomoo normalization, chronological replay with point-in-time hod/lod/cum_volume, next_bar(N+1), out-of-window BacktestWindowError; + point-in-time setup accessors (daily bars, synthetic TodayPrice, 5m-for-TOD, prepost=True premarket highs) [Wave 2]
 - [x] 06-03-PLAN.md — SimulatedExecution (BT-02): N+1-open entry/exit fills + slippage (never intent.entry_price), fill capture for the trade log, D-05 abandon on no-next-bar; + SimulatedGateway stub (get_positions/get_equity only) [Wave 2]
-- [ ] 06-04-PLAN.md — Performance report (BT-03): compute_metrics (win rate, avg R, profit factor, max drawdown; realized_pnl DERIVED — trades table never written by bot/), write_report per-trade CSV + summary.json [Wave 2]
+- [x] 06-04-PLAN.md — Performance report (BT-03): compute_metrics (win rate, avg R, profit factor, max drawdown; realized_pnl DERIVED — trades table never written by bot/), write_report per-trade CSV + summary.json [Wave 2]
 
 **Wave 3** *(blocked on 06-02/03/04)*
 
@@ -260,7 +260,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 3/6 | In Progress|  |
+| 6. Backtester | 4/6 | In Progress|  |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 3/6 plans executed
+**Plans:** 4/6 plans executed
 
 Plans:
 **Wave 1**
