@@ -279,6 +279,7 @@ def _compute_candidates(
     cfg: StrategyConfig,
     scan_date: date,
     now_et_value=None,
+    daily_bars_cache: dict = None,
 ) -> List[dict]:
     """Fetch universe, download bars + 1m intraday, and evaluate each symbol.
 
@@ -289,6 +290,9 @@ def _compute_candidates(
       1. Fetch S&P 500 universe (fetch_sp500_symbols).
       2. Download daily bars (download_daily_bars) — slow inputs: prior close,
          prior high, SMA200, RVOL baseline (date < scan_date, no look-ahead).
+         Finding 3.2: if daily_bars_cache is provided and already has an entry
+         for scan_date, reuse it instead of re-downloading the ~500-symbol
+         universe (rescans within the same trading day share one download).
       3. Download 1m intraday batch ONCE (download_intraday_1m) — today's live
          open/price/high sourced from the 1m feed (not the daily bar).
          Whole-universe 1m failure raises ScanDegradationError (T-02-18).
@@ -296,11 +300,16 @@ def _compute_candidates(
          then pass into _evaluate_symbol. No intraday price → fail-closed skip.
       5. Return passing candidates (unsorted, unranked).
 
-    cfg:           StrategyConfig — all thresholds config-driven (D-12).
-    scan_date:     Date to evaluate (no-look-ahead cutoff for RVOL/SMA).
-    now_et_value:  The current ET datetime (injected for testability/purity;
-                   defaults to now_et() at call time if None). Threaded to
-                   resolve_today_price for premarket vs RTH phase detection.
+    cfg:              StrategyConfig — all thresholds config-driven (D-12).
+    scan_date:        Date to evaluate (no-look-ahead cutoff for RVOL/SMA).
+    now_et_value:     The current ET datetime (injected for testability/purity;
+                      defaults to now_et() at call time if None). Threaded to
+                      resolve_today_price for premarket vs RTH phase detection.
+    daily_bars_cache: Optional caller-owned dict keyed on scan_date, holding
+                      (data, failed) tuples from a prior download_daily_bars call
+                      this trading day (Finding 3.2). None (default) always
+                      downloads fresh — run_daily_scan's premarket call never
+                      needs day-caching since it runs once per trading day.
 
     Returns a list of candidate dicts (unsorted, unranked) for all symbols
     that pass D1/D2/D3. Each dict contains: code, gap_pct, prior_day_high,
@@ -321,7 +330,16 @@ def _compute_candidates(
     # scan_partial_data event — it already logs it when `failed` is non-empty. Do
     # NOT re-log it here, which previously produced two identical warnings per
     # degraded scan (audit noise / double-counting risk downstream).
-    data, _daily_failed = download_daily_bars(yf_symbols)
+    #
+    # Finding 3.2: reuse a same-trading-day cached download when the caller
+    # provides one (T-06.2-13: keyed strictly on scan_date — a different day
+    # never reuses another day's bars).
+    if daily_bars_cache is not None and scan_date in daily_bars_cache:
+        data, _daily_failed = daily_bars_cache[scan_date]
+    else:
+        data, _daily_failed = download_daily_bars(yf_symbols)
+        if daily_bars_cache is not None:
+            daily_bars_cache[scan_date] = (data, _daily_failed)
 
     # Download 1m intraday batch ONCE per scan (02-05, T-02-18 / SCAN-06).
     # The result is shared across all per-symbol resolve calls (not per-symbol download).
@@ -628,6 +646,7 @@ def run_intraday_rescan(
     active_codes: Set[str],
     scan_date: date = None,
     scan_pass: str = "intraday",
+    daily_bars_cache: dict = None,
 ) -> List[str]:
     """Re-scan the universe intraday, protecting active live-feed candidates (SCAN-07).
 
@@ -638,12 +657,16 @@ def run_intraday_rescan(
       - Calls _persist_watchlist for idempotent upsert — never DELETEs rows (D-05).
       - Subscribes ONLY codes not already in active_codes (avoids re-subscription).
 
-    store:        Open StateStore (migrations applied).
-    gateway:      MoomooGateway instance; None is accepted (skips subscribe).
-    cfg:          StrategyConfig — all thresholds config-driven.
-    active_codes: Set of moomoo codes with active 5m feed (protected from eviction).
-    scan_date:    Optional date override (defaults to now_et().date()).
-    scan_pass:    Label for this re-scan pass (e.g. "intraday_1", "intraday_2").
+    store:            Open StateStore (migrations applied).
+    gateway:          MoomooGateway instance; None is accepted (skips subscribe).
+    cfg:              StrategyConfig — all thresholds config-driven.
+    active_codes:     Set of moomoo codes with active 5m feed (protected from eviction).
+    scan_date:        Optional date override (defaults to now_et().date()).
+    scan_pass:        Label for this re-scan pass (e.g. "intraday_1", "intraday_2").
+    daily_bars_cache: Optional caller-owned dict keyed on scan_date (Finding 3.2).
+                      When provided, a same-day rescan reuses the daily download
+                      from an earlier rescan/premarket scan instead of re-downloading
+                      the ~500-symbol universe every ~30 min.
 
     Returns list of Moomoo-format codes in the protected top-20.
 
@@ -662,7 +685,9 @@ def run_intraday_rescan(
     # Step 3: compute candidates (shared path with run_daily_scan — no filter duplication)
     # Thread the resolved ET clock so resolve_today_price gets a consistent clock
     # for all per-symbol evaluations in this rescan pass.
-    passing = _compute_candidates(cfg, scan_date, now_et_value=current_et)
+    passing = _compute_candidates(
+        cfg, scan_date, now_et_value=current_et, daily_bars_cache=daily_bars_cache
+    )
 
     # Step 3b: drop externally held codes before the cap (SAFE-OG-01 / 260702-ick).
     # Fail-open: if the broker query fails, the full candidate list is preserved.

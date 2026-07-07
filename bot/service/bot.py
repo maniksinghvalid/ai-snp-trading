@@ -123,6 +123,10 @@ class TradingBot:
         self._bar_agg = None
         self._reconcile_task = None
         self._watchdog_task = None
+        # Finding 3.2: caller-owned, trading-day-keyed daily-bar cache so the
+        # intraday rescan job reuses the day's daily download instead of
+        # re-fetching the full ~500-symbol universe every ~30 min.
+        self._daily_bar_cache: dict = {}
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -794,6 +798,7 @@ class TradingBot:
                     active_codes=active_codes,
                     scan_date=today,
                     scan_pass="intraday",
+                    daily_bars_cache=self._daily_bar_cache,
                 ) or []
 
             await loop.run_in_executor(None, _intraday_rescan_worker)

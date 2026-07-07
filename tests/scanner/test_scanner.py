@@ -1114,6 +1114,81 @@ class TestIntradayRescan:
             "active_code_evicted must name the evicted code US.DROP"
         )
 
+    def test_rescan_reuses_daily_download_cache(self, tmp_state_db):
+        """Finding 3.2 regression: run_intraday_rescan must reuse a caller-owned,
+        trading-day-keyed daily-bar cache instead of re-downloading the full
+        ~500-symbol universe on every 30-min rescan.
+
+        Two same-day rescans sharing one cache dict must call download_daily_bars
+        exactly ONCE (the second call reuses cache[scan_date]). A rescan for a
+        DIFFERENT scan_date must trigger a fresh download (no cross-day reuse —
+        T-06.2-13).
+        """
+        from bot.scanner.scanner import run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        other_scan_date = date(2026, 6, 24)
+        cfg = _make_cfg(d3_min_gap_pct=0.5)
+        frame = _make_daily_frame(scan_date=scan_date)
+        frame_other = _make_daily_frame(scan_date=other_scan_date)
+
+        mock_download = MagicMock(return_value=({}, set()))
+
+        store = StateStore()
+        store.open()
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
+             patch("bot.scanner.scanner.download_daily_bars", mock_download), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            shared_cache: dict = {}
+
+            # First rescan for scan_date — must download.
+            run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes=set(), scan_date=scan_date, scan_pass="intraday_1",
+                daily_bars_cache=shared_cache,
+            )
+            assert mock_download.call_count == 1, (
+                "first rescan for a scan_date must download the daily universe"
+            )
+
+            # Second rescan, SAME scan_date, SAME cache — must reuse (no re-download).
+            run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes=set(), scan_date=scan_date, scan_pass="intraday_2",
+                daily_bars_cache=shared_cache,
+            )
+            assert mock_download.call_count == 1, (
+                "second same-day rescan must reuse the cached daily download, "
+                f"got {mock_download.call_count} download_daily_bars calls"
+            )
+
+        # A DIFFERENT scan_date must trigger a fresh download (no cross-day reuse).
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL", "MSFT"]), \
+             patch("bot.scanner.scanner.download_daily_bars", mock_download), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame_other), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True):
+
+            run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes=set(), scan_date=other_scan_date, scan_pass="intraday_3",
+                daily_bars_cache=shared_cache,
+            )
+            assert mock_download.call_count == 2, (
+                "a different scan_date must re-download (no cross-day cache reuse), "
+                f"got {mock_download.call_count} download_daily_bars calls"
+            )
+
+        store.close()
+
 
 # ============================================================
 # WR-04: scan_partial_data must be logged exactly once (by the fetcher)
