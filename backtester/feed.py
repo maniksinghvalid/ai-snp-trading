@@ -209,6 +209,15 @@ class SimulatedBarFeed:
         """
         moomoo_code = yfinance_to_moomoo(sym)
         frame = frame.sort_index()
+        # A realistic multi-ticker yf.download(group_by="ticker") frame is built on the
+        # UNION of every requested symbol's timestamps -- a symbol lacking a bar at a peer's
+        # timestamp (halts, illiquid names, staggered premarket coverage) gets an all-NaN
+        # padding row rather than being omitted. Drop those before the per-row int()/float()
+        # loop below so a NaN never reaches `int(row["volume"])` (T-06-10-01). Sits after
+        # sort_index() and before the loop so it applies identically to the CSV-cache-hit
+        # path (T-06-10-03), since a cache file written by an earlier unguarded fetch
+        # preserves NaN rows verbatim.
+        frame = frame.dropna(subset=["open", "high", "low", "close", "volume"])
         bars = []
         running_hod = float("-inf")
         running_lod = float("inf")
@@ -285,7 +294,12 @@ class SimulatedBarFeed:
                 continue
             moomoo_code = yfinance_to_moomoo(sym)
             bars = []
-            for ts, row in frame.sort_index().iterrows():
+            # Same union-index NaN-padding guard as _materialize_bars (T-06-10-02): a
+            # dropped-NaN row here can never become a NaN high stored in
+            # self._premarket_bars_by_code, so premarket_highs()'s max(...) can never
+            # silently poison Gate 1's close > premarket_high check with a NaN comparison.
+            pre = frame.sort_index().dropna(subset=["open", "high", "low", "close", "volume"])
+            for ts, row in pre.iterrows():
                 ts_et = (
                     ts.tz_convert(ET) if ts.tzinfo is not None
                     else ts.tz_localize("UTC").tz_convert(ET)
