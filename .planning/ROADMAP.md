@@ -298,7 +298,7 @@ Plans:
 **Goal:** Close all 16 confirmed findings from the 2026-07-02 multi-agent code review (develop vs main) so the bot is safe for an unattended live paper run (Tier 1 blockers), behaviorally correct (Tier 2), and maintainable (Tier 3). Spec: `.planning/phases/06.2-code-review-remediation/06.2-SPEC.md`
 **Requirements**: Regression-test-first (TDD) per finding; full suite green per tier; live premarket UAT gates Tier 1 sign-off
 **Depends on:** Phase 06.1 (wire core trade loop) — NOT Phase 6 (backtester, unbuilt)
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 Plans:
 **Wave 1**
 
@@ -310,4 +310,4 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06.2-03-PLAN.md — Tier 3 hygiene (findings 3.1–3.2): shared reconcile core (after 1.2), trading-day-keyed daily-bar cache [Wave 3]
+- [x] 06.2-03-PLAN.md — Tier 3 hygiene (findings 3.1–3.2): shared reconcile core (after 1.2), trading-day-keyed daily-bar cache [Wave 3]

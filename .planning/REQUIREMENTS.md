@@ -58,7 +58,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 - [x] **STATE-01**: Durable SQLite state with atomic writes for positions, stops, scans, and trades *(01-02: StateStore + migration 0001 + atomic_write_json crash-injection proven)*
 - [x] **SAFE-01**: Hard paper-trading guard at startup — an explicit `PAPER_TRADING=true` config flag is required AND the selected account's environment is asserted to be SIMULATE (via broker account-type check); any mismatch or REAL account hard-exits before any order path is reachable *(01-01: triple fail-closed guard implemented)*
-- [ ] **SAFE-02**: Startup reconciliation against broker truth completes before any signal processing
+- [x] **SAFE-02**: Startup reconciliation against broker truth completes before any signal processing
 - [x] **SAFE-03**: A broker-reconciliation loop (every 60–90s) diffs in-memory state vs broker truth; broker wins
 - [x] **SAFE-04**: Kill switch (file-touch or SIGINT) triggers graceful shutdown with a state flush *(01-04: KillSwitch implemented — sentinel file + SIGINT + idempotent trigger + state-flush callback)*
 - [x] **SAFE-05**: Append-only trade/order audit log (JSONL), extending the existing `~/.futu_trade_audit.jsonl` pattern *(01-01: append_audit() implemented)*
