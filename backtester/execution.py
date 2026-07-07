@@ -30,7 +30,9 @@ from bot.execution.events import FillEvent
 
 
 class SimulatedExecution:
-    """Fills OrderIntents/exits at the next bar's open + slippage (BT-02 N+1-open rule)."""
+    """Fills OrderIntents/exits at the next bar's open, adjusted for slippage (BT-02
+    N+1-open rule). Entries (BUY) slip UP (+); exits (SELL, long-only) slip DOWN (-) --
+    adverse in both cases (T-06-11)."""
 
     def __init__(self, feed, slippage_usd: float = 0.0):
         """feed: object exposing next_bar(code, after) -> bar dict or None (e.g. SimulatedBarFeed)."""
@@ -70,6 +72,7 @@ class SimulatedExecution:
             intent_id=intent.intent_id,
             code=intent.code,
             filled_qty=intent.quantity,
+            # Long-only entry is a BUY -- adverse slippage is UPWARD (stays +).
             avg_fill_price=next_bar["open"] + self._slippage,
             is_entry=True,
             fill_time=next_bar["time_key"],
@@ -86,7 +89,8 @@ class SimulatedExecution:
         escalation_cadence: float,
         ttl: float,
     ) -> int:
-        """Fill an exit at the next bar's open + slippage (symmetric N+1, Assumption A2).
+        """Fill an exit at the next bar's open, minus slippage (symmetric N+1, Assumption
+        A2) -- a long-only SELL exit slips DOWN (adverse), never up (T-06-11).
 
         Matches ExecutionEngine.manage_exit's signature exactly so PositionManager's
         _trigger_stop_out/_place_exit_order call sites are unchanged. No TTL/escalation loop
@@ -108,7 +112,8 @@ class SimulatedExecution:
                 return 0  # defensive: should not happen after a replay has seen this code
             exit_fill = {
                 "code": code,
-                "exit_price": last["close"] + self._slippage,
+                # Long-only exit is a SELL -- adverse slippage is DOWNWARD.
+                "exit_price": last["close"] - self._slippage,
                 "qty": qty,
                 "time_key": last["time_key"],
             }
@@ -123,7 +128,8 @@ class SimulatedExecution:
 
         exit_fill = {
             "code": code,
-            "exit_price": next_bar["open"] + self._slippage,
+            # Long-only exit is a SELL -- adverse slippage is DOWNWARD.
+            "exit_price": next_bar["open"] - self._slippage,
             "qty": qty,
             "time_key": next_bar["time_key"],
         }

@@ -181,6 +181,46 @@ def test_manage_exit_returns_zero_and_records_no_fill_when_no_next_bar():
     assert execution.fills == []
 
 
+def test_exit_slippage_is_adverse():
+    """T-06-11: exit slippage must be SUBTRACTED (adverse for a long-only SELL exit) --
+    entry stays additive (a BUY slips upward). Pre-fix, all three legs (entry, normal
+    exit, force-close exit) used '+', silently inflating every exit price and
+    overstating performance whenever slippage_usd > 0 (BT-03 report integrity)."""
+    bars = make_ahead_only_5m_dataset()
+    bar_n = bars[3]         # "current" bar the harness has told execution about via on_bar
+    bar_n_plus_1 = bars[4]  # open used for both the entry fill and the normal-mode exit
+
+    execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.10)
+
+    # Entry: a BUY slips UP.
+    intent = _make_intent(bar_n)
+    entry_fill = asyncio.run(execution.consume_intent(intent))
+    assert entry_fill.avg_fill_price == bar_n_plus_1["open"] + 0.10
+
+    # Normal-mode exit: a long-only SELL slips DOWN.
+    execution.on_bar(bar_n)
+    filled_qty = asyncio.run(
+        execution.manage_exit(
+            code=bar_n["code"], qty=5, side="SELL",
+            escalation_step=0.01, escalation_cadence=1.0, ttl=5.0,
+        )
+    )
+    assert filled_qty == 5
+    assert execution.exit_fills[-1]["exit_price"] == bar_n_plus_1["open"] - 0.10
+
+    # Force-close exit: also a SELL, also slips DOWN (uses the last observed bar's close).
+    execution.on_bar(bar_n)
+    execution._force_close = True
+    filled_qty = asyncio.run(
+        execution.manage_exit(
+            code=bar_n["code"], qty=7, side="SELL",
+            escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
+        )
+    )
+    assert filled_qty == 7
+    assert execution.exit_fills[-1]["exit_price"] == bar_n["close"] - 0.10
+
+
 def test_simulated_gateway_get_positions_excludes_awaiting_fill_and_closed():
     fake_manager = SimpleNamespace(
         _positions={

@@ -42,8 +42,10 @@ Asserts:
   - bar_buffer is populated during the replay (Pitfall 6 wiring)
 """
 import asyncio
+from datetime import datetime, timedelta
 
 import pandas as pd
+import pandas_market_calendars as mcal
 import pytest
 
 mod = pytest.importorskip("backtester.harness")
@@ -513,3 +515,166 @@ def test_multiday_replay_proves_cr01_cr04_cr05_cr06(monkeypatch, tmp_path):
     ), "every position must reach CLOSED by end of run(), across the full multi-day replay."
     assert testa_trades[0]["exit_reason"] == "force_close"
     assert testa_trades[0]["exit_price"] == 103.20  # last observed TESTA bar's close
+
+
+# ============================================================
+# Gate-7 circuit-breaker regression (Task 3, Plan 06-11 gap-closure): a
+# backtest-recorded trade must trip SignalEngine's -2R daily circuit breaker
+# and block a LATER, otherwise gate-passing, same-day entry.
+# ============================================================
+#
+# rules.json: max_risk_per_trade_pct=1.0, sizing_equity_usd=100000,
+# daily_circuit_breaker_r=2.0 -> 1R = $1000, trip threshold = -$2000.
+#
+# Anchored to a RUNTIME-DERIVED recent NYSE trading day (never a hardcoded 2026-...
+# literal) so this fixture never joins the 06-12 fixture time-bomb (feed.py's window
+# guard requires start >= now - ~60 calendar days) -- same anchoring approach as
+# Plan 06-10 Task 2.
+_CB_DAY = mcal.get_calendar("NYSE").valid_days(
+    start_date=(datetime.now() - timedelta(days=15)).date(),
+    end_date=(datetime.now() - timedelta(days=2)).date(),
+)[-1].strftime("%Y-%m-%d")
+
+# US.LOSER: same signal/fill shape as _TODAY_BARS (breakout at 10:20, N+1-open fill
+# at 10:25's open=103.00), but crashes MUCH harder on 10:30 (close=60.00, deep below
+# the 1%-below-LOD initial stop ~98.505) so the STOP_OUT exit -- filled at 10:35's
+# N+1 open (61.00) -- realizes roughly (61.00-103.00)*95 ~= -$3990, comfortably past
+# the -$2000 (-2R) circuit-breaker threshold.
+_CB_LOSER_BARS = [
+    (f"{_CB_DAY} 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
+    (f"{_CB_DAY} 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
+    (f"{_CB_DAY} 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
+    (f"{_CB_DAY} 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
+    (f"{_CB_DAY} 10:25:00", 103.00, 103.50, 101.00, 101.50, 5_000),
+    (f"{_CB_DAY} 10:30:00", 101.50, 101.50, 60.00, 60.00, 5_000),
+    (f"{_CB_DAY} 10:35:00", 61.00, 65.00, 55.00, 60.00, 5_000),
+]
+
+# US.WINNER: a clean, gate-passing breakout on its OWN first bar of the day (10:35 --
+# strictly after LOSER's 10:30 stop-out is recorded into the trades table at the end
+# of that bar's processing), closing at its own high with a volume spike -- would
+# enter absent the breaker (I1/I2/I3 all satisfied the same way the single-symbol
+# fixture above proves it: close at own high for I2, volume spike vs the 14
+# quiet-prior-day baseline for I3, close comfortably above its own premarket high for
+# I1). Bar order between LOSER's and WINNER's own 10:35 bars is irrelevant here --
+# the breaker already tripped at the END of LOSER's 10:30 bar, strictly before any
+# 10:35-timestamped bar of either symbol is processed.
+_CB_WINNER_BARS = [
+    (f"{_CB_DAY} 10:35:00", 118.00, 120.00, 117.50, 120.00, 50_000),
+]
+
+
+def _make_cb_5m_frame(today_bars):
+    """Local variant of the shared _make_5m_frame helper, anchored to the runtime-derived
+    _CB_DAY instead of that helper's hardcoded "2026-06-01" -- the prior-14-business-day
+    baseline window must stay STRICTLY prior to _CB_DAY regardless of which real calendar
+    day _CB_DAY resolves to at test-run time."""
+    rows = []
+    index = []
+    for time_key, o, h, l, c, v in today_bars:
+        index.append(pd.Timestamp(time_key))
+        rows.append((o, h, l, c, v))
+
+    prior_dates = pd.bdate_range(end=pd.Timestamp(_CB_DAY) - pd.Timedelta(days=1), periods=14)
+    for d in prior_dates:
+        for bucket in _SIGNAL_BUCKETS:
+            index.append(pd.Timestamp(f"{d.date()} {bucket}:00"))
+            rows.append((100.0, 100.2, 99.8, 100.0, 1_000))
+
+    df = pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"], index=pd.DatetimeIndex(index))
+    df = df.sort_index()
+    df.index = df.index.tz_localize("America/New_York")
+    return df
+
+
+def _make_cb_premarket_frame(high):
+    """Local variant of _make_premarket_frame_for, anchored to _CB_DAY (that helper
+    hardcodes "2026-06-01"/"2026-06-02")."""
+    index = pd.to_datetime([f"{_CB_DAY} 09:00:00"]).tz_localize("America/New_York")
+    return pd.DataFrame(
+        {"Open": [high - 1.0], "High": [high], "Low": [high - 2.0],
+         "Close": [high - 0.5], "Volume": [2_000]},
+        index=index,
+    )
+
+
+def _mock_yf_download_gate7(*_args, **kwargs):
+    """Two-symbol single-day yfinance stub (mirrors _mock_yf_download_multiday's
+    {symbol: frame} dict shape -- required for a multi-ticker request). The daily
+    (interval="1d") frame's actual dates are irrelevant here: _evaluate_symbol is
+    patched with the always-candidate fake below, so nothing reads _make_daily_frame's
+    content -- only its non-emptiness matters (same reasoning as the existing
+    multiday test)."""
+    tickers = kwargs.get("tickers") or []
+    if isinstance(tickers, str):
+        tickers = [tickers]
+    interval = kwargs.get("interval")
+    prepost = kwargs.get("prepost", False)
+
+    if interval == "1d":
+        return {t: _make_daily_frame() for t in tickers}
+    if interval == "5m" and prepost:
+        result = {}
+        if "LOSER" in tickers:
+            result["LOSER"] = _make_cb_premarket_frame(98.0)
+        if "WINNER" in tickers:
+            result["WINNER"] = _make_cb_premarket_frame(108.0)
+        return result
+    if interval == "5m":
+        result = {}
+        if "LOSER" in tickers:
+            result["LOSER"] = _make_cb_5m_frame(_CB_LOSER_BARS)
+        if "WINNER" in tickers:
+            result["WINNER"] = _make_cb_5m_frame(_CB_WINNER_BARS)
+        return result
+    return {}
+
+
+def test_gate7_circuit_breaker_trips_from_backtest_recorded_trades(monkeypatch, tmp_path):
+    """BLOCKER Gap 2 (BT-01 exact-same-FSM parity): the -2R daily circuit breaker must
+    trip from the backtest's OWN recorded trades (Task 2's harness._store.record_trade
+    call), blocking a later, otherwise gate-passing entry the same day -- exactly as a
+    live losing day would. Reverting Task 2's record_trade call makes this test fail:
+    get_daily_trade_stats would always return realized_pnl=0.0 and the breaker could
+    never trip, so WINNER would (wrongly) enter."""
+    from bot.config.loader import load_strategy_config
+    from bot.state.store import StateStore
+
+    monkeypatch.setattr("yfinance.download", _mock_yf_download_gate7)
+    monkeypatch.setattr("backtester.harness._evaluate_symbol", _fake_evaluate_symbol_always_candidate)
+
+    cfg = load_strategy_config("rules.json")
+    store = StateStore(db_path=str(tmp_path / "backtest_scratch.db")).open()
+    symbols = ["US.LOSER", "US.WINNER"]
+    feed = SimulatedBarFeed(symbols, start=_CB_DAY, end=_CB_DAY, cache_dir=str(tmp_path / "cache"))
+    harness = BacktestHarness(cfg=cfg, feed=feed, store=store)
+
+    harness.setup_day(_CB_DAY, symbols)
+    asyncio.run(harness.run())
+
+    # (1) Only LOSER ever registered a PositionState -- WINNER's later, gate-passing
+    # breakout was blocked by the tripped breaker (exactly one entry, not two).
+    codes_with_positions = {p.code for p in harness.position_manager._positions.values()}
+    assert codes_with_positions == {"US.LOSER"}, (
+        "WINNER's later breakout must be blocked by Gate 7 once LOSER's recorded "
+        "loss trips the -2R breaker -- only LOSER should ever register a position."
+    )
+
+    # (2) The breaker actually persisted a trip for this session's ET date.
+    assert store.get_circuit_breaker_date() == _CB_DAY, (
+        "store.get_circuit_breaker_date() must equal the session ET date once the "
+        "breaker trips."
+    )
+
+    # (3) The trades table (not just the in-memory trade_log) holds LOSER's loss --
+    # this is what Gate 7 actually reads. Proves the WRITE, not merely the append.
+    stats = store.get_daily_trade_stats(_CB_DAY)
+    assert stats["realized_pnl"] <= -2000, (
+        f"store.get_daily_trade_stats must reflect LOSER's recorded loss "
+        f"(<=-2000, got {stats['realized_pnl']})."
+    )
+
+    # Log and DB agree: the harness's own trade_log also captured LOSER's trade.
+    loser_trades = [t for t in harness.trade_log if t["code"] == "US.LOSER"]
+    assert len(loser_trades) == 1
+    assert loser_trades[0]["exit_reason"] == "stop_out"

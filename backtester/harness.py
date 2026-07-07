@@ -28,9 +28,11 @@ replay_day(day)/run() port bot.service.bot.TradingBot._process_bar bar-for-bar
     session-date baseline keys evaluate against the REPLAYED bar's ET time,
     never the wall clock (T-06-11) -- a runtime module-attribute rebind, not
     a bot/ source edit.
-  - closed positions are captured into self.trade_log (entry/exit price,
-    quantity, exit reason, r_multiple) since nothing in bot/ ever writes the
-    `trades` DB table for a backtest run.
+  - closed positions are captured into self.trade_log AND persisted into the
+    scratch StateStore's `trades` table via store.record_trade (T-06-11) --
+    since nothing in bot/ itself ever writes that table for a backtest run,
+    the harness is the sole writer, and it is what lets Gate 7 see real
+    realized P&L.
 
 Scope: replays the CURRENT partial_be_trail exit-model FSM only (06-RESEARCH
 Open-Q2) -- fixed_2r/full_to_1p5r_trail remain Phase 7's job (07-06).
@@ -38,8 +40,11 @@ Open-Q2) -- fixed_2r/full_to_1p5r_trail remain Phase 7's job (07-06).
 Drops the D-08 circuit-breaker side-effect gate (_entries_enabled /
 _handle_circuit_breaker_side_effects) -- there is no kill-switch concept in
 an offline replay; entries are always enabled here (documented choice, see
-SUMMARY). SignalEngine's own Gate 7 circuit-breaker check still runs and can
-still block entries -- only the TradingBot-specific abandon+alert side
+SUMMARY). SignalEngine's own Gate 7 circuit-breaker check runs against the
+backtest's OWN recorded closed trades -- _capture_closed_trades persists every
+newly-CLOSED position via store.record_trade (T-06-11), so a replay day whose
+realized P&L crosses -daily_circuit_breaker_r x 1R blocks further entries
+exactly as the live FSM would; only the TradingBot-specific abandon+alert side
 effect is out of scope.
 
 Exports: BacktestHarness
@@ -361,11 +366,14 @@ class BacktestHarness:
         self._capture_closed_trades()
 
     # ============================================================
-    # Trade-log capture (no `trades` DB table is ever written for a backtest)
+    # Trade-log capture (also persists into the scratch trades DB table, T-06-11)
     # ============================================================
 
     def _capture_closed_trades(self) -> None:
-        """Append a trade-log row for any position newly reaching CLOSED.
+        """Append a trade-log row for any position newly reaching CLOSED, and persist
+        the SAME row into the scratch StateStore's trades table via store.record_trade
+        (T-06-11) so SignalEngine's Gate 7 (get_daily_trade_stats) sees real realized
+        P&L instead of always reading 0.0.
 
         exit_price is the qty-weighted average of the exit fills SimulatedExecution
         recorded for that code since the last capture (partial + final stop/force
@@ -404,6 +412,19 @@ class BacktestHarness:
                 "r_multiple": r_multiple,
                 "closed_at": pos.updated_at,
             })
+            # T-06-11: persist the SAME row into the scratch trades table so Gate 7's
+            # get_daily_trade_stats sees this trade before the next bar's read (this
+            # runs at the END of _process_bar; Gate 7 runs on the FOLLOWING bar).
+            self._store.record_trade(
+                position_id=pos.position_id,
+                code=code,
+                entry_price=pos.entry_price,
+                exit_price=exit_price,
+                quantity=pos.full_quantity,
+                exit_reason=pos.pending_exit_reason,
+                r_multiple=r_multiple,
+                closed_at=pos.updated_at,
+            )
             self._captured_position_ids.add(pos.position_id)
 
     # ============================================================
