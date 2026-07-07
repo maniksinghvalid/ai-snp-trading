@@ -83,7 +83,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### Backtesting
 
-- [ ] **BT-01**: Backtester replays historical 5m data through the exact same StrategyCore + PositionState FSM as the live bot
+- [x] **BT-01**: Backtester replays historical 5m data through the exact same StrategyCore + PositionState FSM as the live bot
 - [x] **BT-02**: Backtester enters at bar N+1 open (no look-ahead); gap/SMA200/premarket-high/RVOL computed point-in-time
 - [x] **BT-03**: Backtester produces a performance report (win rate, avg R, max drawdown, profit factor, per-trade CSV)
 - [x] **BT-04**: Backtest historical data is sourced from yfinance (or flat CSV/Parquet export), not Moomoo, avoiding broker historical-quota limits at 500-symbol scale
@@ -173,7 +173,7 @@ Which phases cover which requirements.
 | ALERT-03 | Phase 5 | Pending |
 | ALERT-04 | Phase 5 | Pending |
 | DASH-01 | Phase 5 | Pending |
-| BT-01 | Phase 6 | Pending |
+| BT-01 | Phase 6 | Complete |
 | BT-02 | Phase 6 | Complete |
 | BT-03 | Phase 6 | Complete |
 | BT-04 | Phase 6 | Complete |

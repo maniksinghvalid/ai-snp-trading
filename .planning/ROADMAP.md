@@ -208,7 +208,7 @@ Plans:
 
 **Wave 3** *(blocked on 06-02/03/04)*
 
-- [ ] 06-05-PLAN.md — BacktestHarness (BT-01): ports TradingBot._process_bar; reused SignalEngine/RiskEngine/PositionManager/TrendJoinLong (gateway=None); per-day point-in-time baselines via _evaluate_symbol/_compute_tod_baselines; per-bar CLOCK CONTROL (patch signal_engine.now_et to bar time — entry-window + baseline keys point-in-time); harness-owned bar_buffer (swing-low trail); closed-position trade-log capture [Wave 3]
+- [x] 06-05-PLAN.md — BacktestHarness (BT-01): ports TradingBot._process_bar; reused SignalEngine/RiskEngine/PositionManager/TrendJoinLong (gateway=None); per-day point-in-time baselines via _evaluate_symbol/_compute_tod_baselines; per-bar CLOCK CONTROL (patch signal_engine.now_et to bar time — entry-window + baseline keys point-in-time); harness-owned bar_buffer (swing-low trail); closed-position trade-log capture [Wave 3]
 
 **Wave 4** *(blocked on 06-05)*
 
@@ -260,7 +260,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 4/6 | In Progress|  |
+| 6. Backtester | 5/6 | In Progress|  |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 
 Plans:
 **Wave 1**

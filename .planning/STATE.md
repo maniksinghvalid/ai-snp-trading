@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-04-PLAN.md
-last_updated: "2026-07-07T02:28:31.419Z"
+stopped_at: Completed 06-05-PLAN.md
+last_updated: "2026-07-07T02:51:51.345Z"
 last_activity: 2026-07-07 -- Phase 06 execution started
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 37
-  completed_plans: 32
+  completed_plans: 33
   percent: 67
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 06 (backtester) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-07-07 -- Phase 06 execution started
 
@@ -64,6 +64,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 06 P02 | 25 | 2 tasks | 2 files |
 | Phase 06 P03 | 20 | 2 tasks | 2 files |
 | Phase 06 P04 | 10 | 2 tasks | 1 files |
+| Phase 06-backtester P05 | 45 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -128,6 +129,10 @@ Recent decisions affecting current work:
 - [Phase ?]: 06-03: FillEvent.fill_time and exit_fills/fills rows store bar time_key strings (matches feed.py/fixtures.py convention), not datetime objects, despite the live dataclass's type annotation
 - [Phase ?]: 06-04: win_rate/gross_profit/gross_loss use derived realized_pnl > 0 (agrees with r_multiple sign on the fixture; documented choice per plan behavior spec)
 - [Phase ?]: 06-04: profit_factor==float('inf') round-trips through json.dump/json.load as the Infinity literal, no string sentinel needed
+- [Phase ?]: 06-05: harness.setup_day restricts _compute_tod_baselines input to sessions strictly prior to `day` -- computing it from the same day being replayed is self-referential (rvol ratio always 1.0) and violates BT-02 no-look-ahead
+- [Phase ?]: 06-05: harness.setup_day calls _compute_tod_baselines with cfg.rvol_tod_lookback_days (not rvol_lookback_days), matching scanner.py's run_daily_scan call site
+- [Phase ?]: 06-05: harness drops the D-08 circuit-breaker side-effect gate (_entries_enabled) -- no kill-switch concept in an offline replay; SignalEngine's own Gate 7 circuit-breaker check still runs
+- [Phase ?]: 06-05: harness sets PositionState.opened_at/updated_at from the fill's bar time at construction (not left None until on_fill) -- StateStore's positions table has both columns NOT NULL; harness also normalizes FillEvent.fill_time from SimulatedExecution's raw time_key string to a real ET datetime before on_fill() (both harness-side adapters, bot/ and backtester/execution.py unmodified)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -160,6 +165,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T02:28:31.415Z
-Stopped at: Completed 06-04-PLAN.md
+Last session: 2026-07-07T02:51:51.340Z
+Stopped at: Completed 06-05-PLAN.md
 Resume file: None
