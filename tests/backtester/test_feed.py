@@ -80,19 +80,22 @@ def test_out_of_window_start_raises_backtest_window_error_not_silent_empty(tmp_p
 
 
 def test_second_load_reads_csv_cache_zero_network_calls(tmp_path):
-    """A second SimulatedBarFeed over the same (symbol, range) hits the CSV cache -- 0 calls."""
-    with patch("yfinance.download") as mock_dl:
-        mock_dl.return_value = _make_multi_bar_frame()
+    """A second SimulatedBarFeed over the same (symbol, range) hits the CSV cache -- 0 calls.
 
+    First construction makes 2 network calls (the RTH _load_5m miss + the premarket
+    _load_premarket miss, each cached under a distinct interval tag); the second
+    construction over the identical range must hit both CSV caches and add zero calls.
+    """
+    with patch("yfinance.download", side_effect=_dispatch_by_prepost) as mock_dl:
         feed1 = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
                                   cache_dir=str(tmp_path))
         list(feed1.replay("2026-06-01"))
-        assert mock_dl.call_count == 1
+        assert mock_dl.call_count == 2
 
         feed2 = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
                                   cache_dir=str(tmp_path))
         list(feed2.replay("2026-06-01"))
-        assert mock_dl.call_count == 1, "second load must hit the CSV cache, not the network"
+        assert mock_dl.call_count == 2, "second load must hit the CSV cache, not the network"
 
 
 def test_moomoo_code_normalization_via_yfinance_to_moomoo(tmp_path):
@@ -106,35 +109,88 @@ def test_moomoo_code_normalization_via_yfinance_to_moomoo(tmp_path):
     assert all(b["code"] == "US.BRK-B" for b in bars)
 
 
-def test_synthetic_today_price_uses_first_rth_bar(tmp_path):
-    """synthetic_today_price mirrors resolve_today_price's RTH branch from loaded 5m bars."""
-    with patch("yfinance.download") as mock_dl:
-        mock_dl.return_value = _make_multi_bar_frame()
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
-                                 cache_dir=str(tmp_path))
-        list(feed.replay("2026-06-01"))
-        today_price = feed.synthetic_today_price("US.TEST", "2026-06-01")
-
-    assert today_price is not None
-    assert today_price.today_open == 100.00, "today_open must equal the first RTH bar's open"
-    assert today_price.today_price == 107.50, "today_price must equal the latest RTH bar's close"
-    assert today_price.today_high == 108.00, "today_high must equal the max RTH high"
+def _dispatch_by_prepost(*args, **kwargs):
+    """yfinance.download side_effect: routes to the premarket fixture when the feed's
+    internal _load_premarket() call passes prepost=True, else the RTH fixture -- mirrors
+    the feed's two distinct kwargs shapes (_load_5m: prepost=False, _load_premarket:
+    prepost=True) so a single mock exercises both loads with day-appropriate data."""
+    if kwargs.get("prepost"):
+        return _make_premarket_5m_frame()
+    return _make_multi_bar_frame()
 
 
 def test_premarket_highs_excludes_bars_at_or_after_0930(tmp_path):
     """premarket_highs() counts only ET bars before 09:30 -- a 09:35 bar's high must not count."""
-    with patch("yfinance.download") as mock_dl:
-        mock_dl.return_value = _make_multi_bar_frame()
+    with patch("yfinance.download", side_effect=_dispatch_by_prepost):
         feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
                                  cache_dir=str(tmp_path))
-        list(feed.replay("2026-06-01"))
-
-        mock_dl.return_value = _make_premarket_5m_frame()
         highs = feed.premarket_highs("2026-06-01")
 
     assert highs == {"US.TEST": 102.0}, (
         "the 09:35 bar's high=250.0 must be excluded -- only pre-09:30 bars count"
     )
+
+
+def test_premarket_highs_keyed_correctly_per_distinct_day(tmp_path):
+    """premarket_highs(day) for two loaded days each returns THAT day's own pre-09:30 max
+    -- not the other day's, and not stale/empty (CR-02, point-in-time for any replay day)."""
+    def _two_day_dispatch(*args, **kwargs):
+        if kwargs.get("prepost"):
+            return _make_two_day_premarket_frame()
+        return _make_two_day_frame()  # RTH bars on BOTH days -- satisfies the coverage guard
+
+    with patch("yfinance.download", side_effect=_two_day_dispatch):
+        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-02",
+                                 cache_dir=str(tmp_path))
+
+    highs_day1 = feed.premarket_highs("2026-06-01")
+    highs_day2 = feed.premarket_highs("2026-06-02")
+    assert highs_day1 == {"US.TEST": 102.0}
+    assert highs_day2 == {"US.TEST": 111.0}
+    assert highs_day1 != highs_day2
+
+
+def test_synthetic_today_price_is_premarket_only_not_rth(tmp_path):
+    """synthetic_today_price mirrors resolve_today_price's PREMARKET branch (CR-07):
+    today_price = latest premarket close, today_high = max premarket high -- both must
+    differ from the day's RTH close (107.50) / RTH max high (108.00) fixture values."""
+    with patch("yfinance.download", side_effect=_dispatch_by_prepost):
+        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+                                 cache_dir=str(tmp_path))
+        today_price = feed.synthetic_today_price("US.TEST", "2026-06-01")
+
+    assert today_price is not None
+    assert today_price.today_price == 101.5, "today_price must equal the latest premarket bar's close"
+    assert today_price.today_high == 102.0, "today_high must equal the max premarket high"
+    assert today_price.today_open == today_price.today_price
+    assert today_price.today_price != 107.50, "must never equal the day's RTH close"
+    assert today_price.today_high != 108.00, "must never equal the day's RTH max high"
+
+
+def test_synthetic_today_price_none_without_premarket_bars(tmp_path):
+    """synthetic_today_price returns None for a day/code with zero premarket bars."""
+    with patch("yfinance.download", side_effect=_dispatch_by_prepost):
+        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+                                 cache_dir=str(tmp_path))
+        assert feed.synthetic_today_price("US.TEST", "2099-01-01") is None
+
+
+def _make_two_day_premarket_frame():
+    """prepost=True 5m frame with distinct pre-09:30 highs on two different days: day1 max
+    high 102.0 (same as _make_premarket_5m_frame), day2 max high 111.0."""
+    import pandas as pd
+
+    index = pd.to_datetime([
+        "2026-06-01 09:00:00", "2026-06-01 09:15:00", "2026-06-01 09:35:00",
+        "2026-06-02 09:00:00", "2026-06-02 09:15:00",
+    ]).tz_localize("America/New_York")
+    return pd.DataFrame({
+        "Open": [100.0, 100.5, 200.0, 109.0, 110.0],
+        "High": [101.0, 102.0, 250.0, 110.0, 111.0],
+        "Low": [99.5, 100.0, 199.0, 108.5, 109.5],
+        "Close": [100.5, 101.5, 220.0, 109.5, 110.5],
+        "Volume": [500, 600, 900, 400, 400],
+    }, index=index)
 
 
 def test_traversal_symbol_rejected_before_any_cache_or_network_access(tmp_path):

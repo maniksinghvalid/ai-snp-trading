@@ -3,25 +3,29 @@
 backtester.feed — SimulatedBarFeed: yfinance/CSV-cache 5m bar replay for the backtester.
 
 Historical-5m-bar source that replaces the live moomoo SDK push stream (BT-04). Downloads
-5m bars via the reused bot.scanner.fetcher batch kernel (download_intraday_5m /
-_download_batch), routes every frame through get_ticker_frame (Pitfall 3 — raw yf.download
-frames are Title-Case; get_ticker_frame lowercases columns), caches responses to CSV under
-cache_dir so the backtestable history grows past yfinance's rolling ~58-trading-day 5m
-window over time, and replays bars as BarEvent-shaped dicts in chronological order with
-session-running hod/lod/cum_volume computed point-in-time (mirrors BarAggregator's
-per-session accumulation).
+5m bars via the reused bot.scanner.fetcher batch kernel (_download_batch directly, plus
+download_intraday_5m/download_daily_bars for the TOD-baseline/daily-bar accessors), routes
+every frame through get_ticker_frame (Pitfall 3 — raw yf.download frames are Title-Case;
+get_ticker_frame lowercases columns), caches responses to CSV under cache_dir so the
+backtestable history grows past yfinance's rolling ~60-calendar-day 5m window over time,
+and replays bars as BarEvent-shaped dicts in chronological order with session-running
+hod/lod/cum_volume computed point-in-time (mirrors BarAggregator's per-session
+accumulation). A per-trading-day coverage guard (_enforce_coverage) raises loudly by name
+if any requested day has zero replay bars (CR-03), and next_bar() never crosses a session
+boundary (CR-04).
 
 Also exposes the point-in-time setup-data accessors the harness (06-05) needs once per
 historical session date: daily_bars() for _evaluate_symbol, synthetic_today_price() (a
-TodayPrice mirroring resolve_today_price's RTH branch, not a live yfinance call),
-intraday_5m_for_tod() for _compute_tod_baselines, and premarket_highs().
+TodayPrice mirroring resolve_today_price's PREMARKET branch — premarket-only, never the
+RTH close/high, CR-07), intraday_5m_for_tod() for _compute_tod_baselines, and
+premarket_highs() (CR-02).
 
-PREMARKET-HIGH APPROXIMATION: premarket_highs() fetches a SEPARATE prepost=True 5m frame
-(the RVOL-TOD path via download_intraday_5m/intraday_5m_for_tod stays prepost=False, per
-its own docstring rationale). This is a same-methodology/different-source APPROXIMATION of
-the live broker's `pre_high_price` snapshot field — yfinance's own premarket 5m coverage may
-differ from what the broker's tape included — not a bit-for-bit reproduction. See
-06-RESEARCH Pitfall 5 / Assumption A3.
+PREMARKET-HIGH APPROXIMATION: _load_premarket() loads a SEPARATE prepost=True 5m frame ONCE
+per feed construction (the RVOL-TOD path via download_intraday_5m/intraday_5m_for_tod stays
+prepost=False, per its own docstring rationale). This is a same-methodology/different-source
+APPROXIMATION of the live broker's `pre_high_price` snapshot field — yfinance's own
+premarket 5m coverage may differ from what the broker's tape included — not a bit-for-bit
+reproduction. See 06-RESEARCH Pitfall 5 / Assumption A3.
 
 Imports ONLY bot.scanner.fetcher / bot.scanner.universe + pandas (T-06-04) — never the
 broker gateway layer; this module is a pure data source, no broker/execution path.
@@ -99,7 +103,9 @@ class SimulatedBarFeed:
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self._bars_by_code: Dict[str, list] = {}
+        self._premarket_bars_by_code: Dict[str, list] = {}
         self._load_5m()
+        self._load_premarket()
         self._enforce_coverage()
 
     # --------------------------------------------------------
@@ -233,6 +239,68 @@ class SimulatedBarFeed:
             })
         return bars
 
+    def _load_premarket(self) -> None:
+        """One-time prepost=True premarket load: pre-09:30 ET 5m bars per code, keyed into
+        self._premarket_bars_by_code. Replaces the old per-call period="5d"-from-now fetch
+        inside premarket_highs -- that fetch was relative to "now" at CALL time, so a
+        replay day more than ~5 days in the past silently returned an empty premarket
+        frame regardless of how the feed's own [start, end] window was constructed (CR-02).
+
+        Loaded and cached exactly like _load_5m (CSV read-through under a distinct
+        interval tag "5m_pre" so premarket history also grows past the 60-day window over
+        time), but degradation_threshold=1.0: premarket data is best-effort and must never
+        abort the whole backtest (mirrors the prior premarket_highs rationale).
+        """
+        frames: Dict[str, pd.DataFrame] = {}
+        misses = []
+        for code in self.codes:
+            sym = self._yf_symbol(code)
+            path = self._cache_path(sym, "5m_pre")
+            if os.path.exists(path):
+                frames[sym] = pd.read_csv(path, index_col=0, parse_dates=True)
+            else:
+                misses.append(sym)
+
+        if misses:
+            data, _failed = _download_batch(
+                misses,
+                threads=5,
+                degradation_threshold=1.0,  # best-effort: never abort the backtest on premarket degradation
+                download_kwargs={"period": "60d", "interval": "5m", "prepost": True},
+                abort_event="backtest_premarket_scan_aborted_data_degradation",
+                partial_event="backtest_premarket_partial_data",
+                degradation_message="Backtest premarket 5m data degradation",
+            )
+            for sym in misses:
+                frame = get_ticker_frame(data, sym)
+                if frame is None or frame.empty:
+                    continue
+                frame.to_csv(self._cache_path(sym, "5m_pre"))
+                frames[sym] = frame
+
+        for code in self.codes:
+            sym = self._yf_symbol(code)
+            frame = frames.get(sym)
+            if frame is None or frame.empty:
+                continue
+            moomoo_code = yfinance_to_moomoo(sym)
+            bars = []
+            for ts, row in frame.sort_index().iterrows():
+                ts_et = (
+                    ts.tz_convert(ET) if ts.tzinfo is not None
+                    else ts.tz_localize("UTC").tz_convert(ET)
+                )
+                if ts_et.time() >= _RTH_OPEN:
+                    continue
+                bars.append({
+                    "time_key": ts_et.strftime("%Y-%m-%d %H:%M:%S"),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                })
+            self._premarket_bars_by_code[moomoo_code] = bars
+
     # --------------------------------------------------------
     # Replay
     # --------------------------------------------------------
@@ -282,61 +350,43 @@ class SimulatedBarFeed:
         return data
 
     def synthetic_today_price(self, code: str, day) -> Optional[TodayPrice]:
-        """TodayPrice built from `day`'s first regular-session 5m bar (already loaded).
+        """TodayPrice built from `day`'s premarket-only 5m bars (self._premarket_bars_by_code).
 
-        Mirrors resolve_today_price's RTH branch: today_open = first RTH bar's open,
-        today_price = latest RTH bar's close, today_high = max RTH high -- NOT a live
-        yfinance call (self._bars_by_code already holds prepost=False, >=09:30 bars).
+        Mirrors resolve_today_price's PREMARKET branch (CR-07), NOT the RTH branch:
+        today_open == today_price == the LATEST premarket bar's close, today_high == the
+        MAX premarket high. NEVER uses self._bars_by_code (RTH bars) or a full-day max
+        high -- the prior RTH-branch implementation leaked the day's close/max-high (data
+        that would not exist yet at premarket-scan time) into the daily-scan TodayPrice.
+        Returns None when `code` has no premarket bars for `day`.
         """
+        day_str = str(day)
         day_bars = sorted(
-            (b for b in self._bars_by_code.get(code, []) if b["time_key"].startswith(str(day))),
+            (b for b in self._premarket_bars_by_code.get(code, []) if b["time_key"].startswith(day_str)),
             key=lambda b: b["time_key"],
         )
         if not day_bars:
             return None
+        latest_close = day_bars[-1]["close"]
         return TodayPrice(
-            today_open=day_bars[0]["open"],
-            today_price=day_bars[-1]["close"],
+            today_open=latest_close,
+            today_price=latest_close,
             today_high=max(b["high"] for b in day_bars),
         )
 
     def premarket_highs(self, day) -> Dict[str, float]:
-        """{moomoo_code: max(high)} of `day`'s 5m bars with ET time < 09:30 (premarket).
+        """{moomoo_code: max(high)} of `day`'s premarket (pre-09:30 ET) 5m bars, read from
+        the one-time _load_premarket() load -- NO network call per invocation.
 
-        SEPARATE prepost=True 5m fetch (the RVOL-TOD path via download_intraday_5m /
-        intraday_5m_for_tod stays prepost=False) -- 06-RESEARCH Pitfall 5 option (a). See
-        module docstring: same-methodology/different-source APPROXIMATION of the live
+        Point-in-time for the requested replay day regardless of how long ago it was
+        (CR-02): the prior implementation fetched a period="5d"-from-now frame on every
+        call, so a replay day older than ~5 days silently returned an empty dict here.
+        See module docstring: same-methodology/different-source APPROXIMATION of the live
         broker's pre_high_price field, not a bit-for-bit reproduction.
         """
-        yf_symbols = [self._yf_symbol(c) for c in self.codes]
-        # Reuses the shared _download_batch kernel (retry/degradation/Pitfall #1-#2
-        # already solved there) instead of re-implementing a second yf.download call
-        # site -- no public fetcher wrapper exists for 5m+prepost=True.
-        data, _failed = _download_batch(
-            yf_symbols,
-            threads=5,
-            degradation_threshold=1.0,  # best-effort approximation; never abort the backtest
-            download_kwargs={"period": "5d", "interval": "5m", "prepost": True},
-            abort_event="backtest_premarket_scan_aborted_data_degradation",
-            partial_event="backtest_premarket_partial_data",
-            degradation_message="Premarket-high 5m data degradation",
-        )
-        highs: Dict[str, float] = {}
         day_str = str(day)
-        for code in self.codes:
-            sym = self._yf_symbol(code)
-            frame = get_ticker_frame(data, sym)
-            if frame is None or frame.empty:
-                continue
-            pm_high = None
-            for ts, row in frame.iterrows():
-                ts_et = ts.tz_convert(ET) if ts.tzinfo is not None else ts.tz_localize("UTC").tz_convert(ET)
-                if ts_et.date().isoformat() != day_str:
-                    continue
-                if ts_et.time() >= _RTH_OPEN:
-                    continue
-                h = float(row["high"])
-                pm_high = h if pm_high is None else max(pm_high, h)
-            if pm_high is not None:
-                highs[yfinance_to_moomoo(sym)] = pm_high
+        highs: Dict[str, float] = {}
+        for code, bars in self._premarket_bars_by_code.items():
+            day_bars = [b for b in bars if b["time_key"].startswith(day_str)]
+            if day_bars:
+                highs[code] = max(b["high"] for b in day_bars)
         return highs
