@@ -1597,6 +1597,58 @@ async def test_reconcile_once_skips_on_broker_query_failure():
 
 
 # ============================================================
+# Finding 3.1: reconcile_once and startup_reconcile share one _reconcile_core
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_delegates_to_shared_core():
+    """Finding 3.1 regression: reconcile_once AND startup_reconcile must drive the
+    SAME shared close/adopt/protect logic via a single extracted _reconcile_core,
+    instead of two ~200-line near-duplicate bodies (guard-drift risk).
+
+    Spies on gw._reconcile_core and asserts BOTH entry points call it exactly once,
+    each with the broker_map built from get_positions() -- and that startup_reconcile
+    passes alerter=None (no Telegram alerts at cold boot; matches its pre-refactor
+    behavior of skipping alerts entirely).
+    """
+    gw = _make_gateway_with_mocks()
+    broker_df = pd.DataFrame([{"code": "US.AAPL", "qty": 100, "average_cost": 150.0}])
+    gw.get_positions = AsyncMock(return_value=(0, broker_df))
+
+    mock_manager = MagicMock()
+    mock_manager._positions = {}
+    mock_manager._exiting = set()
+
+    mock_store = MagicMock()
+    mock_store.get_pending_intent_codes.return_value = []
+
+    mock_alerter = MagicMock()
+    mock_alerter.send = AsyncMock()
+
+    expected_broker_map = {"US.AAPL": {"qty": 100, "avg_cost": 150.0}}
+    gw._reconcile_core = AsyncMock(
+        return_value={"closed": [], "adopted": [], "reprotected": []}
+    )
+
+    await gw.reconcile_once(store=mock_store, manager=mock_manager, alerter=mock_alerter)
+    await gw.startup_reconcile(store=mock_store, manager=mock_manager)
+
+    assert gw._reconcile_core.call_count == 2, (
+        "both reconcile_once and startup_reconcile must delegate to _reconcile_core"
+    )
+
+    once_call, startup_call = gw._reconcile_core.call_args_list
+
+    assert once_call.kwargs.get("broker_map") == expected_broker_map
+    assert once_call.kwargs.get("alerter") is mock_alerter
+
+    assert startup_call.kwargs.get("broker_map") == expected_broker_map
+    assert startup_call.kwargs.get("alerter") is None, (
+        "startup_reconcile must delegate with alerter=None (no alerts at cold boot)"
+    )
+
+
+# ============================================================
 # TestGetExternalCodes — SAFE-OG-01 (260702-ick Task 1)
 # ============================================================
 

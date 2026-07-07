@@ -1027,69 +1027,20 @@ class MoomooGateway:
     # Reconciliation Skeletons (SAFE-02 / SAFE-03)
     # --------------------------------------------------------
 
-    async def reconcile_once(self, store, manager, alerter) -> dict:
-        """Broker-truth-wins drift reconciliation (SAFE-03 / D-07).
+    def _build_broker_map(self, broker_data) -> dict:
+        """Parse a get_positions() DataFrame into {code: {qty, avg_cost}}.
 
-        Four cases handled:
-          - In-flight (code in manager._exiting): skip to avoid racing manage_exit().
-          - Externally-closed (in memory, flat at broker, NOT in _exiting):
-            mark CLOSED in DB, remove from manager._positions, fire Telegram alert.
-          - CLOSED-but-held / qty-drift (in memory AND in broker_map, but phase==CLOSED
-            or remaining_quantity != broker qty): re-arm the in-memory position (set
-            phase to ACTIVE if CLOSED; sync remaining to broker qty), update DB, audit
-            reconcile_qty_drift, fire DRIFT alert (CR-01 reconcile half).
-          - Orphan (broker has it, not in memory): INSERT OR IGNORE DB row (idempotent),
-            subscribe 5m feed, call manager.adopt_orphan() to register in-memory so
-            on_bar manages it the same cycle (CR-03). Audit drift_orphan_adopted ONLY
-            when the INSERT actually inserted a row (rowcount==1, WR-04). On no-op
-            INSERT, log reconcile_orphan_insert_noop instead.
-
-        All DRIFT alert tasks are retained in self._bg_tasks with an add_done_callback
-        so they are not GC'd before the coroutine completes (WR-03).
-
-        This method does NOT change startup_reconcile — startup_reconcile is the
-        authoritative boot-once path; reconcile_once mirrors its steady-state analog.
+        Finding 3.1: shared broker-row parser used by BOTH reconcile_once and
+        startup_reconcile so the parsing logic cannot drift between the two paths.
 
         Args:
-            store:   StateStore instance (open).
-            manager: PositionManager instance.
-            alerter: TelegramAlerter for drift alerts.
+            broker_data: DataFrame from get_positions() (or None).
 
         Returns:
-            dict with keys 'closed', 'adopted', and 'reprotected' listing affected codes.
+            dict keyed by code. Empty dict if broker_data is None/empty.
         """
-        from bot.safety.audit_log import append_audit
-        from bot.safety.et_helpers import now_et
-        from bot.position.state import PositionPhase
-
-        def _retain_task(coro):
-            """Create and retain an alert task in self._bg_tasks (WR-03)."""
-            t = asyncio.create_task(coro)
-            self._bg_tasks.add(t)
-            t.add_done_callback(self._bg_tasks.discard)
-            return t
-
-        ret_pos, broker_data = await self.get_positions(refresh_cache=True)
-
-        # Fix 1.2: skip the reconcile cycle on a failed broker query.
-        # Never derive "externally closed" from a failed/empty query — a transient
-        # OpenD error must not wipe all managed positions. (T-06.2-01)
-        if ret_pos != RET_OK or broker_data is None:
-            _logger.error(
-                "reconcile_skipped_broker_query_failed",
-                ret=ret_pos,
-            )
-            if alerter is not None:
-                try:
-                    await alerter.send(
-                        "WARN: position_list_query failed — reconcile cycle skipped"
-                    )
-                except Exception:
-                    pass
-            return {}
-
         broker_map = {}
-        if len(broker_data) > 0:
+        if broker_data is not None and len(broker_data) > 0:
             for _, row in broker_data.iterrows():
                 code = str(row.get("code", "") or "")
                 if not code:
@@ -1098,85 +1049,171 @@ class MoomooGateway:
                     "qty": int(float(row.get("qty", 0) or 0)),
                     "avg_cost": float(row.get("average_cost", 0) or 0),
                 }
+        return broker_map
+
+    async def _reconcile_core(self, store, manager, alerter, broker_map: dict) -> dict:
+        """Shared close/adopt/protect reconcile body (Finding 3.1).
+
+        Called by BOTH reconcile_once (steady-state loop) and startup_reconcile
+        (cold-boot, before PositionManager.reconstruct_from_store() has run -- POS-05).
+        `alerter is None` signals the startup path: no Telegram alerts, and the
+        close/qty-drift check is driven from store.get_open_positions() (DB rows)
+        since manager._positions is not populated yet at that call site. When an
+        alerter IS provided (reconcile_once), the check is driven from the live
+        manager._positions objects instead (matches steady-state in-flight/CLOSED-
+        but-held semantics).
+
+        Both call sites share ONE orphan-adoption guard here (SAFE-OG-01 / Finding
+        2.5): ownership (has_pending_intent OR an existing open DB row), long-only,
+        and the duplicate-code SELECT-before-INSERT guard -- so this guard can never
+        drift out of sync between the two entry points.
+
+        Args:
+            store:      StateStore instance (open).
+            manager:    PositionManager instance (or None at some startup call sites).
+            alerter:    TelegramAlerter for drift alerts, or None (startup -- no alerts).
+            broker_map: dict from _build_broker_map(broker_data).
+
+        Returns:
+            dict with keys 'closed', 'adopted', and 'reprotected' listing affected codes.
+        """
+        from bot.safety.audit_log import append_audit
+        from bot.safety.et_helpers import now_et
+        from bot.position.state import PositionPhase
+        import uuid
+
+        is_startup = alerter is None
+
+        def _retain_task(coro):
+            """Create and retain an alert task in self._bg_tasks (WR-03)."""
+            t = asyncio.create_task(coro)
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            return t
 
         now_ts = now_et().isoformat()
         closed_codes = []
         adopted_codes = []
         reprotected_codes = []
 
-        # --- Check in-memory positions vs broker truth ---
-        in_memory_codes = list(manager._positions.keys()) if hasattr(manager, "_positions") else []
-        exiting_codes = getattr(manager, "_exiting", set())
+        # Shared: DB open-position rows back the ownership/duplicate orphan guard
+        # for BOTH call sites (SAFE-OG-01 / Finding 2.5), and are the closed/qty-
+        # drift source of truth at cold boot (manager._positions is empty until
+        # reconstruct_from_store() runs -- POS-05).
+        open_pos_rows = store.get_open_positions()
+        open_pos_codes = {r["code"] for r in open_pos_rows}
 
-        for code in in_memory_codes:
-            if code in exiting_codes:
-                _logger.debug("reconcile_skip_in_flight_exit", code=code)
-                continue
+        if is_startup:
+            # --- Cold boot: known positions come from the DB (D-09) ---
+            state_codes = {r["code"]: r for r in open_pos_rows}
+            known_codes = set(state_codes.keys())
 
-            if code not in broker_map:
-                # Externally closed (manual UI close or unknown fill) — D-07
-                _logger.warning("reconcile_externally_closed", code=code)
-                pos = manager._positions.get(code)
-                if pos is not None:
-                    store.mark_position_closed(pos.position_id, now_ts)
-                    pos.phase = PositionPhase.CLOSED
-                    del manager._positions[code]
-                    append_audit({"event": "drift_closed_by_broker", "code": code})
-                    # Fire Telegram alert (best-effort) — retained in _bg_tasks (WR-03)
-                    _retain_task(
-                        alerter.send(f"<b>DRIFT:</b> {code} closed externally — stopped managing.")
-                    )
-                    closed_codes.append(code)
-            else:
-                # Code is in BOTH memory AND broker — check for CLOSED-but-held or qty drift
-                # (CR-01 reconcile half). Mirror startup_reconcile Step 3 (917-958).
-                pos = manager._positions.get(code)
-                if pos is None:
-                    continue
-                broker_qty = broker_map[code]["qty"]
-                stored_qty = pos.remaining_quantity
-                is_closed_but_held = (pos.phase == PositionPhase.CLOSED and broker_qty > 0)
-                is_qty_drift = (stored_qty != broker_qty)
-
-                if is_closed_but_held or is_qty_drift:
+            for code, pos_row in state_codes.items():
+                if code not in broker_map:
                     _logger.warning(
-                        "reconcile_qty_drift",
+                        "reconcile_position_closed_by_broker",
                         code=code,
-                        stored_qty=stored_qty,
-                        broker_qty=broker_qty,
-                        phase=str(pos.phase),
+                        position_id=pos_row["position_id"],
                     )
-                    # Re-arm: if CLOSED, revert to ACTIVE so on_bar resumes management
-                    if pos.phase == PositionPhase.CLOSED:
-                        pos.phase = PositionPhase.ACTIVE
-                    # Sync remaining_quantity to broker truth
-                    pos.remaining_quantity = broker_qty
-                    # Update DB row (remaining_quantity + phase)
-                    store.update_position_qty_phase(
-                        pos.position_id, broker_qty, pos.phase.value, now_ts
-                    )
+                    store.mark_position_closed(pos_row["position_id"], now_ts)
                     append_audit({
-                        "event": "reconcile_qty_drift",
+                        "event": "reconcile_closed_by_broker",
                         "code": code,
-                        "stored_qty": stored_qty,
-                        "broker_qty": broker_qty,
+                        "position_id": pos_row["position_id"],
                     })
-                    # Fire DRIFT alert — retained in _bg_tasks (WR-03)
-                    _retain_task(
-                        alerter.send(
-                            f"<b>DRIFT:</b> {code} quantity/phase mismatch — "
-                            f"memory qty={stored_qty}, broker qty={broker_qty}. Re-armed."
+                    closed_codes.append(code)
+                else:
+                    broker_qty = broker_map[code]["qty"]
+                    stored_qty = pos_row["remaining_quantity"]
+                    if broker_qty != stored_qty:
+                        _logger.warning(
+                            "reconcile_qty_adopted",
+                            code=code,
+                            stored_qty=stored_qty,
+                            broker_qty=broker_qty,
                         )
-                    )
-                    reprotected_codes.append(code)
+                        store.update_position_qty(pos_row["position_id"], broker_qty, now_ts)
+                        append_audit({
+                            "event": "reconcile_qty_adopted",
+                            "code": code,
+                            "stored_qty": stored_qty,
+                            "broker_qty": broker_qty,
+                        })
+                        reprotected_codes.append(code)
+                    # D-11: stop is NEVER loosened here -- PositionManager.on_bar
+                    # applies max(persisted_stop, new_swing_low) on the next bar.
+        else:
+            # --- Steady-state: known positions come from manager._positions ---
+            in_memory_codes = list(manager._positions.keys()) if hasattr(manager, "_positions") else []
+            exiting_codes = getattr(manager, "_exiting", set())
+            known_codes = set(in_memory_codes)
 
-        # --- Adopt orphan broker positions (CR-03 + WR-04) ---
-        state_codes = set(in_memory_codes)
-        # Pre-compute DB open-position codes for the ownership guard (SAFE-OG-01).
-        # Covers the edge case where a position is in the DB but not yet in memory.
-        open_pos_codes = {r["code"] for r in store.get_open_positions()}
+            for code in in_memory_codes:
+                if code in exiting_codes:
+                    _logger.debug("reconcile_skip_in_flight_exit", code=code)
+                    continue
+
+                if code not in broker_map:
+                    # Externally closed (manual UI close or unknown fill) -- D-07
+                    _logger.warning("reconcile_externally_closed", code=code)
+                    pos = manager._positions.get(code)
+                    if pos is not None:
+                        store.mark_position_closed(pos.position_id, now_ts)
+                        pos.phase = PositionPhase.CLOSED
+                        del manager._positions[code]
+                        append_audit({"event": "drift_closed_by_broker", "code": code})
+                        # Fire Telegram alert (best-effort) -- retained in _bg_tasks (WR-03)
+                        _retain_task(
+                            alerter.send(f"<b>DRIFT:</b> {code} closed externally — stopped managing.")
+                        )
+                        closed_codes.append(code)
+                else:
+                    # Code is in BOTH memory AND broker -- check for CLOSED-but-held or
+                    # qty drift (CR-01 reconcile half).
+                    pos = manager._positions.get(code)
+                    if pos is None:
+                        continue
+                    broker_qty = broker_map[code]["qty"]
+                    stored_qty = pos.remaining_quantity
+                    is_closed_but_held = (pos.phase == PositionPhase.CLOSED and broker_qty > 0)
+                    is_qty_drift = (stored_qty != broker_qty)
+
+                    if is_closed_but_held or is_qty_drift:
+                        _logger.warning(
+                            "reconcile_qty_drift",
+                            code=code,
+                            stored_qty=stored_qty,
+                            broker_qty=broker_qty,
+                            phase=str(pos.phase),
+                        )
+                        # Re-arm: if CLOSED, revert to ACTIVE so on_bar resumes management
+                        if pos.phase == PositionPhase.CLOSED:
+                            pos.phase = PositionPhase.ACTIVE
+                        # Sync remaining_quantity to broker truth
+                        pos.remaining_quantity = broker_qty
+                        # Update DB row (remaining_quantity + phase)
+                        store.update_position_qty_phase(
+                            pos.position_id, broker_qty, pos.phase.value, now_ts
+                        )
+                        append_audit({
+                            "event": "reconcile_qty_drift",
+                            "code": code,
+                            "stored_qty": stored_qty,
+                            "broker_qty": broker_qty,
+                        })
+                        # Fire DRIFT alert -- retained in _bg_tasks (WR-03)
+                        _retain_task(
+                            alerter.send(
+                                f"<b>DRIFT:</b> {code} quantity/phase mismatch — "
+                                f"memory qty={stored_qty}, broker qty={broker_qty}. Re-armed."
+                            )
+                        )
+                        reprotected_codes.append(code)
+
+        # --- Adopt orphan broker positions (shared -- CR-03 + WR-04 + SAFE-OG-01/2.5) ---
+        exiting_codes = getattr(manager, "_exiting", set()) if manager is not None else set()
         for code, bp in broker_map.items():
-            if code in state_codes:
+            if code in known_codes:
                 continue
             if code in exiting_codes:
                 continue
@@ -1198,7 +1235,7 @@ class MoomooGateway:
 
             # Finding 2.5: application-layer SELECT-before-INSERT guard. The DB
             # INSERT OR IGNORE below is keyed on position_id (a fresh UUID every
-            # call), so it never collides on `code` — without this check, a code
+            # call), so it never collides on `code` -- without this check, a code
             # whose open DB row already exists (e.g. manager._positions lost
             # track of it after a restart) would get a second, double-managed
             # row. open_pos_codes was already computed above for the ownership
@@ -1210,12 +1247,11 @@ class MoomooGateway:
             _logger.warning("reconcile_orphan_adopting", code=code, broker_qty=bp["qty"])
             lod = await self._derive_lod_for_orphan(code)
             stop = self._compute_orphan_stop(lod)
-            import uuid
             position_id = str(uuid.uuid4())
 
             # WR-04: check rowcount to suppress false audit on IGNORE collision.
             # If manager.adopt_orphan exists, we prefer to let it own the DB row
-            # (DB-first write via _persist_position) — the gateway INSERT becomes
+            # (DB-first write via _persist_position) -- the gateway INSERT becomes
             # the idempotent guard. When rowcount==0, the position already exists
             # in the DB (prior adoption); log noop and skip.
             rowcount = store.insert_orphan_position(
@@ -1223,7 +1259,7 @@ class MoomooGateway:
             )
 
             if rowcount == 0:
-                # INSERT OR IGNORE no-op — row already exists; do NOT audit or adopt (WR-04)
+                # INSERT OR IGNORE no-op -- row already exists; do NOT audit or adopt (WR-04)
                 _logger.warning(
                     "reconcile_orphan_insert_noop",
                     code=code,
@@ -1231,31 +1267,47 @@ class MoomooGateway:
                 )
                 continue
 
-            # Row actually inserted (rowcount == 1) — register in-memory + audit (CR-03)
-            append_audit({"event": "drift_orphan_adopted", "code": code})
-
-            # CR-03: call manager.adopt_orphan to register in manager._positions
-            # so on_bar manages it the same cycle (adopt-and-protect).
-            if manager is not None and hasattr(manager, "adopt_orphan"):
-                manager.adopt_orphan(
-                    code=code,
-                    qty=bp["qty"],
-                    avg_cost=bp["avg_cost"],
-                    stop=stop,
-                    position_id=position_id,
-                )
+            if is_startup:
+                # Startup path: no manager.adopt_orphan call -- manager._positions
+                # isn't reconstructed yet; reconstruct_from_store() picks up the
+                # DB row this call just inserted (POS-05).
+                append_audit({
+                    "event": "orphan_adopted",
+                    "code": code,
+                    "position_id": position_id,
+                    "broker_qty": bp["qty"],
+                    "broker_avg_cost": bp["avg_cost"],
+                    "derived_stop": stop,
+                    "derived_lod": lod,
+                })
+            else:
+                # Row actually inserted (rowcount == 1) -- register in-memory + audit (CR-03)
+                append_audit({"event": "drift_orphan_adopted", "code": code})
+                # CR-03: call manager.adopt_orphan to register in manager._positions
+                # so on_bar manages it the same cycle (adopt-and-protect).
+                if manager is not None and hasattr(manager, "adopt_orphan"):
+                    manager.adopt_orphan(
+                        code=code,
+                        qty=bp["qty"],
+                        avg_cost=bp["avg_cost"],
+                        stop=stop,
+                        position_id=position_id,
+                    )
 
             # Subscribe 5m feed (gateway owns feed subscription)
             if manager is not None:
                 try:
                     await self.subscribe([code])
                 except Exception:
-                    _logger.warning("drift_orphan_subscribe_failed", code=code, exc_info=True)
+                    _logger.warning(
+                        "orphan_subscribe_failed" if is_startup else "drift_orphan_subscribe_failed",
+                        code=code, exc_info=True,
+                    )
 
             adopted_codes.append(code)
 
         _logger.info(
-            "reconcile_once_done",
+            "startup_reconcile_done" if is_startup else "reconcile_once_done",
             broker_positions=len(broker_map),
             closed=closed_codes,
             adopted=adopted_codes,
@@ -1263,24 +1315,52 @@ class MoomooGateway:
         )
         return {"closed": closed_codes, "adopted": adopted_codes, "reprotected": reprotected_codes}
 
+    async def reconcile_once(self, store, manager, alerter) -> dict:
+        """Broker-truth-wins drift reconciliation (SAFE-03 / D-07).
+
+        Steady-state analog of startup_reconcile -- both delegate to the shared
+        _reconcile_core (Finding 3.1) so the close/adopt/protect guard set cannot
+        drift between the two entry points.
+
+        Args:
+            store:   StateStore instance (open).
+            manager: PositionManager instance.
+            alerter: TelegramAlerter for drift alerts.
+
+        Returns:
+            dict with keys 'closed', 'adopted', and 'reprotected' listing affected codes.
+        """
+        ret_pos, broker_data = await self.get_positions(refresh_cache=True)
+
+        # Fix 1.2: skip the reconcile cycle on a failed broker query.
+        # Never derive "externally closed" from a failed/empty query -- a transient
+        # OpenD error must not wipe all managed positions. (T-06.2-01)
+        if ret_pos != RET_OK or broker_data is None:
+            _logger.error(
+                "reconcile_skipped_broker_query_failed",
+                ret=ret_pos,
+            )
+            if alerter is not None:
+                try:
+                    await alerter.send(
+                        "WARN: position_list_query failed — reconcile cycle skipped"
+                    )
+                except Exception:
+                    pass
+            return {}
+
+        broker_map = self._build_broker_map(broker_data)
+        return await self._reconcile_core(
+            store=store, manager=manager, alerter=alerter, broker_map=broker_map
+        )
+
     async def startup_reconcile(self, store, manager=None) -> None:
         """Reconcile StateStore positions against broker truth before any signal processing.
 
         Implements D-09 (broker truth wins), D-10 (adopt orphans with derived stop),
-        D-11 (known positions resume without loosening the stop).
-
-        Protocol:
-          - Read broker positions via get_positions(refresh_cache=True).
-          - For each StateStore open position:
-              - Not in broker map → CLOSED (D-09: broker says flat).
-              - Quantities differ → adopt broker qty (D-09).
-          - For each broker position not in StateStore:
-              - Orphan → insert ACTIVE PositionState at broker avg cost with
-                compute_initial_stop(lod) derived stop; audit orphan_adopted (D-10).
-          - For known positions (both sides present), PositionManager.on_bar
-            applies max(persisted_stop, new_swing_low) on the next bar (D-11).
-          - Reconcile pending_intents PENDING rows against get_positions() and
-            get_order_status() to detect crash-between-place-and-persist (Pitfall F).
+        D-11 (known positions resume without loosening the stop). Delegates the
+        close/adopt/protect body to the shared _reconcile_core (Finding 3.1) with
+        alerter=None (no Telegram alerts at cold boot).
 
         Args:
             store:   StateStore instance (open).
@@ -1291,131 +1371,21 @@ class MoomooGateway:
             PositionManager.reconstruct_from_store() must be called AFTER this to load
             the reconciled state into the in-memory _positions dict.
         """
-        from bot.safety.audit_log import append_audit
-        from bot.safety.et_helpers import now_et
-
-        # ---- Step 1: Read broker positions (refresh_cache=True mandatory — Pitfall B) ----
+        # ---- Read broker positions (refresh_cache=True mandatory -- Pitfall B) ----
         ret_pos, broker_data = await self.get_positions(refresh_cache=True)
-        broker_map = {}  # code → {qty, avg_cost}
-        if ret_pos == RET_OK and broker_data is not None and len(broker_data) > 0:
-            for _, row in broker_data.iterrows():
-                code = str(row.get("code", "") or "")
-                if not code:
-                    continue
-                broker_map[code] = {
-                    "qty": int(float(row.get("qty", 0) or 0)),
-                    "avg_cost": float(row.get("average_cost", 0) or 0),
-                }
+        broker_map = (
+            self._build_broker_map(broker_data)
+            if ret_pos == RET_OK and broker_data is not None
+            else {}
+        )
 
-        # ---- Step 2: Read StateStore open positions ----
-        # Use store.get_open_positions() — a guarded method that sets row_factory inside
-        # the lock and returns a list of plain dicts (CR-01 / T-06.1-09-01).
-        state_rows = store.get_open_positions()
-        state_codes = {r["code"]: r for r in state_rows}
+        await self._reconcile_core(
+            store=store, manager=manager, alerter=None, broker_map=broker_map
+        )
 
-        now_ts = now_et().isoformat()
-
-        # ---- Step 3: Handle StateStore positions vs broker truth (D-09) ----
-        for code, pos_row in state_codes.items():
-            if code not in broker_map:
-                # D-09: broker says this position is flat — mark CLOSED
-                _logger.warning(
-                    "reconcile_position_closed_by_broker",
-                    code=code,
-                    position_id=pos_row["position_id"],
-                )
-                store.mark_position_closed(pos_row["position_id"], now_ts)
-                append_audit({
-                    "event": "reconcile_closed_by_broker",
-                    "code": code,
-                    "position_id": pos_row["position_id"],
-                })
-            else:
-                # Both sides present — check quantity drift (D-09)
-                broker_qty = broker_map[code]["qty"]
-                stored_qty = pos_row["remaining_quantity"]
-                if broker_qty != stored_qty:
-                    _logger.warning(
-                        "reconcile_qty_adopted",
-                        code=code,
-                        stored_qty=stored_qty,
-                        broker_qty=broker_qty,
-                    )
-                    store.update_position_qty(pos_row["position_id"], broker_qty, now_ts)
-                    append_audit({
-                        "event": "reconcile_qty_adopted",
-                        "code": code,
-                        "stored_qty": stored_qty,
-                        "broker_qty": broker_qty,
-                    })
-                # D-11: stop is NEVER loosened — PositionManager.on_bar applies
-                # max(persisted_stop, new_swing_low) on the next closed bar.
-
-        # ---- Step 4: Adopt orphan broker positions (D-10) ----
-        for code, bp in broker_map.items():
-            if code in state_codes:
-                continue  # known position, handled above
-
-            # SAFE-OG-01: ownership + long-only guard.
-            # state_codes already excludes every position the bot DB knows about
-            # (Step 3). The only remaining bot-ownership signal is a pending_intent
-            # row: the bot wrote it before placing the order, then crashed before
-            # the position row was persisted (crash-recovery path).
-            _is_long = bp["qty"] > 0
-            _bot_owned = store.has_pending_intent(code)
-            if not _is_long or not _bot_owned:
-                _reason = "not_long" if not _is_long else "not_bot_owned"
-                _logger.warning(
-                    "reconcile_external_position_ignored",
-                    code=code,
-                    broker_qty=bp["qty"],
-                    reason=_reason,
-                )
-                continue
-
-            # Orphan: broker has it, StateStore doesn't — adopt and protect (D-10)
-            _logger.warning(
-                "reconcile_orphan_adopting",
-                code=code,
-                broker_qty=bp["qty"],
-                broker_avg_cost=bp["avg_cost"],
-            )
-
-            # Derive initial stop from current LOD snapshot (D-10)
-            lod = await self._derive_lod_for_orphan(code)
-            stop = self._compute_orphan_stop(lod)
-
-            # Insert ACTIVE PositionState at broker avg cost with derived stop
-            import uuid
-            position_id = str(uuid.uuid4())
-            store.insert_orphan_position(
-                position_id, code, bp["avg_cost"], stop, bp["qty"], now_ts
-            )
-            # Return value (rowcount) unused here — startup_reconcile does not gate on it
-            append_audit({
-                "event": "orphan_adopted",
-                "code": code,
-                "position_id": position_id,
-                "broker_qty": bp["qty"],
-                "broker_avg_cost": bp["avg_cost"],
-                "derived_stop": stop,
-                "derived_lod": lod,
-            })
-
-            # Re-subscribe 5m feed for the adopted position (D-10)
-            if manager is not None:
-                try:
-                    await self.subscribe([code])
-                except Exception:
-                    _logger.warning(
-                        "orphan_subscribe_failed", code=code, exc_info=True
-                    )
-
-        # ---- Step 5: Each guarded store method above already committed; no batch commit needed ----
-
-        # ---- Step 6: Reconcile pending_intents to catch crash-between-place-and-persist ----
+        # ---- Reconcile pending_intents to catch crash-between-place-and-persist ----
         # Any PENDING intent whose code already has an open broker position was likely
-        # placed before the crash — do not re-enter; leave the intent as PENDING
+        # placed before the crash -- do not re-enter; leave the intent as PENDING
         # so the duplicate guard in consume_intent will block it on next run (Pitfall F).
         pending_rows = store.get_pending_intent_codes("PENDING")
         for intent_row in pending_rows:
@@ -1426,14 +1396,8 @@ class MoomooGateway:
                     code=code,
                     intent_id=intent_row["intent_id"],
                 )
-                # Leave PENDING — the EXEC-04 duplicate guard in consume_intent
+                # Leave PENDING -- the EXEC-04 duplicate guard in consume_intent
                 # will block replay when consume_intent is next called for this code.
-
-        _logger.info(
-            "startup_reconcile_done",
-            broker_positions=len(broker_map),
-            state_positions=len(state_codes),
-        )
 
     async def _derive_lod_for_orphan(self, code: str) -> float:
         """Fetch the current LOD (low-of-day) for an orphan position from a snapshot.
