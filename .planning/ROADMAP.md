@@ -198,7 +198,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 06-01-PLAN.md — Wave-0 foundation: backtester/ + tests/backtester/ packages, 4 importorskip-guarded failing test stubs, synthetic ahead-only 5m fixture (BT-02 look-ahead proof) + trade-log fixture (BT-03), gitignore cache/runs [Wave 1]
+- [x] 06-01-PLAN.md — Wave-0 foundation: backtester/ + tests/backtester/ packages, 4 importorskip-guarded failing test stubs, synthetic ahead-only 5m fixture (BT-02 look-ahead proof) + trade-log fixture (BT-03), gitignore cache/runs [Wave 1]
 
 **Wave 2** *(blocked on 06-01)*
 
@@ -260,7 +260,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 0/6 | Not started | - |
+| 6. Backtester | 1/6 | In Progress|  |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 1 plan (1 wave)
+**Plans:** 1/6 plans executed
 
 Plans:
 **Wave 1**
