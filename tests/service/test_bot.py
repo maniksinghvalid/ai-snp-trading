@@ -121,6 +121,39 @@ def test_kill_switch_flush_registered():
     ks_mock.register_flush.assert_called_once_with(pm_mock.flush_all)
 
 
+@pytest.mark.asyncio
+async def test_intraday_rescan_passes_open_position_codes():
+    """Finding 2.2 regression: _job_intraday_rescan must pass real active_codes
+    (open positions + in-flight intents), never an empty set, so the scanner
+    never evicts/unsubscribes a symbol with an open position or pending intent.
+    """
+    from datetime import date, time as dtime
+
+    bot, _, _ = _make_bot_with_mocks()
+
+    bot._store.get_open_positions.return_value = [
+        {"code": "US.AAPL", "remaining_quantity": 100, "phase": "ACTIVE"},
+    ]
+    bot._store.get_pending_intent_codes.return_value = [
+        {"intent_id": "intent-1", "code": "US.MSFT"},
+    ]
+    bot._scanner.run_intraday_rescan.return_value = []
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 6, 24)
+        mock_now.return_value.time.return_value = dtime(10, 30)
+        await bot._job_intraday_rescan()
+
+    assert bot._scanner.run_intraday_rescan.call_count == 1
+    _, kwargs = bot._scanner.run_intraday_rescan.call_args
+    active_codes = kwargs.get("active_codes")
+    assert active_codes == {"US.AAPL", "US.MSFT"}, (
+        f"Expected active_codes={{'US.AAPL', 'US.MSFT'}} from open positions + "
+        f"pending intents, got {active_codes!r}"
+    )
+
+
 def test_scheduler_has_required_jobs():
     """TradingBot._register_jobs must add premarket, market_open, rescan, force_close, eod_report jobs."""
     bot, _, _ = _make_bot_with_mocks()

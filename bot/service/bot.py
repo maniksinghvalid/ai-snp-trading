@@ -776,11 +776,22 @@ class TradingBot:
                 # Lock is now inside each StateStore method (CR-01 / T-06.1-09-01).
                 # Serialization is intrinsic — no outer with store.lock() needed.
                 nonlocal rescan_watchlist
+                # Finding 2.2: real active codes (open positions + in-flight intents)
+                # so the scanner never evicts/unsubscribes a symbol that is currently
+                # managed or awaiting a fill.
+                active_codes: set = set()
+                for row in self._store.get_open_positions():
+                    if (row.get("remaining_quantity") or 0) > 0 and row.get("phase") != "CLOSED":
+                        active_codes.add(row.get("code"))
+                for row in self._store.get_pending_intent_codes():
+                    active_codes.add(row.get("code"))
+                active_codes.discard(None)
+
                 rescan_watchlist = self._scanner.run_intraday_rescan(
                     self._store,
                     self._gateway,
                     self._cfg,
-                    active_codes=set(),
+                    active_codes=active_codes,
                     scan_date=today,
                     scan_pass="intraday",
                 ) or []
