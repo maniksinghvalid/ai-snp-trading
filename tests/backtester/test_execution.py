@@ -18,9 +18,11 @@ no asyncio pytest marker — see 06-RESEARCH Validation Architecture).
 """
 import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
+from bot.position.state import PositionPhase
 from bot.risk.events import OrderIntent
 from bot.signal.events import BarEvent, SignalEvent
 from tests.backtester.fixtures import make_ahead_only_5m_dataset
@@ -28,6 +30,7 @@ from tests.backtester.fixtures import make_ahead_only_5m_dataset
 mod = pytest.importorskip("backtester.execution")
 
 SimulatedExecution = mod.SimulatedExecution
+SimulatedGateway = mod.SimulatedGateway
 
 
 class _FakeFeed:
@@ -116,3 +119,26 @@ def test_manage_exit_fills_at_next_bar_open_and_returns_int_qty():
     assert exit_row["exit_price"] == bar_n_plus_1["open"]
     assert exit_row["qty"] == 5
     assert exit_row in execution.fills
+
+
+def test_simulated_gateway_get_positions_excludes_awaiting_fill_and_closed():
+    fake_manager = SimpleNamespace(
+        _positions={
+            "US.ACTIVE1": SimpleNamespace(phase=PositionPhase.ACTIVE),
+            "US.CLOSED1": SimpleNamespace(phase=PositionPhase.CLOSED),
+        }
+    )
+    gateway = SimulatedGateway(position_manager_ref=lambda: fake_manager)
+
+    ret, positions_df = asyncio.run(gateway.get_positions())
+
+    assert ret == 0
+    assert list(positions_df["code"]) == ["US.ACTIVE1"]
+
+
+def test_simulated_gateway_get_equity_returns_fixed_100k():
+    gateway = SimulatedGateway(position_manager_ref=lambda: None)
+
+    equity = asyncio.run(gateway.get_equity())
+
+    assert equity == 100_000.0

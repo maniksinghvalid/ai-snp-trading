@@ -12,11 +12,12 @@ the harness can build the per-trade log without touching a broker or the `trades
 SimulatedGateway answers only the two async methods the reused pipeline calls offline:
 get_positions (SignalEngine Gate 4 concurrent-cap read) and get_equity (only reached when
 cfg.sizing_equity_usd is None; current rules.json sets 100000 so this path is bypassed).
-It exposes NO broader broker surface (no place_order/get_ask_price/subscribe/etc.) -- 06-
-RESEARCH Pattern 3. PositionManager still receives gateway=None (06-05) so
-arm_stop_protection() correctly no-ops.
+It exposes no broader order-placement/quote/subscription broker surface -- 06-RESEARCH
+Pattern 3. PositionManager still receives gateway=None (06-05) so arm_stop_protection()
+correctly no-ops.
 
-Imports NOTHING from bot.gateway/moomoo (T-06-05) -- zero broker/order path in a backtest.
+Imports nothing from the moomoo broker gateway layer (T-06-05) -- zero broker/order path
+in a backtest.
 
 Exports: SimulatedExecution, SimulatedGateway.
 """
