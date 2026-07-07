@@ -48,7 +48,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [ ] **POS-02**: Move the stop to breakeven at 1.0R
 - [ ] **POS-03**: After breakeven, trail the stop on 5m swing lows (2/2 pattern)
 - [ ] **POS-04**: Force-close all open positions at 15:51 ET (calendar-aware for half-days)
-- [ ] **POS-05**: Per-position lifecycle state (the FSM) is persisted and survives restarts
+- [x] **POS-05**: Per-position lifecycle state (the FSM) is persisted and survives restarts
 
 ### Strategy Configuration
 
@@ -59,7 +59,7 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 - [x] **STATE-01**: Durable SQLite state with atomic writes for positions, stops, scans, and trades *(01-02: StateStore + migration 0001 + atomic_write_json crash-injection proven)*
 - [x] **SAFE-01**: Hard paper-trading guard at startup — an explicit `PAPER_TRADING=true` config flag is required AND the selected account's environment is asserted to be SIMULATE (via broker account-type check); any mismatch or REAL account hard-exits before any order path is reachable *(01-01: triple fail-closed guard implemented)*
 - [ ] **SAFE-02**: Startup reconciliation against broker truth completes before any signal processing
-- [ ] **SAFE-03**: A broker-reconciliation loop (every 60–90s) diffs in-memory state vs broker truth; broker wins
+- [x] **SAFE-03**: A broker-reconciliation loop (every 60–90s) diffs in-memory state vs broker truth; broker wins
 - [x] **SAFE-04**: Kill switch (file-touch or SIGINT) triggers graceful shutdown with a state flush *(01-04: KillSwitch implemented — sentinel file + SIGINT + idempotent trigger + state-flush callback)*
 - [x] **SAFE-05**: Append-only trade/order audit log (JSONL), extending the existing `~/.futu_trade_audit.jsonl` pattern *(01-01: append_audit() implemented)*
 
@@ -73,8 +73,8 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 ### Alerts
 
 - [ ] **ALERT-01**: Telegram alert on entry (ticker, size, entry price, initial stop)
-- [ ] **ALERT-02**: Telegram alert on each exit event (partial, breakeven move, trail-stop, stop-out, force-close)
-- [ ] **ALERT-03**: Daily Telegram summary after force-close (trades, win/loss, realized PnL, open risk)
+- [x] **ALERT-02**: Telegram alert on each exit event (partial, breakeven move, trail-stop, stop-out, force-close)
+- [x] **ALERT-03**: Daily Telegram summary after force-close (trades, win/loss, realized PnL, open risk)
 - [ ] **ALERT-04**: Alert delivery failures never block or crash the trade loop
 
 ### Reporting
@@ -165,12 +165,12 @@ Which phases cover which requirements.
 | POS-02 | Phase 4 | Pending |
 | POS-03 | Phase 4 | Pending |
 | POS-04 | Phase 4 | Pending |
-| POS-05 | Phase 4 | Pending |
+| POS-05 | Phase 4 | Complete |
 | SVC-01 | Phase 5 | Pending |
 | SVC-02 | Phase 5 | Pending |
 | ALERT-01 | Phase 5 | Pending |
-| ALERT-02 | Phase 5 | Pending |
-| ALERT-03 | Phase 5 | Pending |
+| ALERT-02 | Phase 5 | Complete |
+| ALERT-03 | Phase 5 | Complete |
 | ALERT-04 | Phase 5 | Pending |
 | DASH-01 | Phase 5 | Pending |
 | BT-01 | Phase 6 | Complete |

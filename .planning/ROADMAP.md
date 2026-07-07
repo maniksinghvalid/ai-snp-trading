@@ -298,15 +298,15 @@ Plans:
 **Goal:** Close all 16 confirmed findings from the 2026-07-02 multi-agent code review (develop vs main) so the bot is safe for an unattended live paper run (Tier 1 blockers), behaviorally correct (Tier 2), and maintainable (Tier 3). Spec: `.planning/phases/06.2-code-review-remediation/06.2-SPEC.md`
 **Requirements**: Regression-test-first (TDD) per finding; full suite green per tier; live premarket UAT gates Tier 1 sign-off
 **Depends on:** Phase 06.1 (wire core trade loop) — NOT Phase 6 (backtester, unbuilt)
-**Plans:** 5/6 plans executed
+**Plans:** 2/3 plans executed
 Plans:
 **Wave 1**
 
-- [ ] 06.2-01-PLAN.md — Tier 1 live-run blockers (findings 1.1–1.5): wire FillEvent→PositionManager, reconcile guard, bar-handler re-register, post-cancel dealt_qty, calendar-aware force-close; full suite + live premarket UAT gate [Wave 1]
+- [x] 06.2-01-PLAN.md — Tier 1 live-run blockers (findings 1.1–1.5): wire FillEvent→PositionManager, reconcile guard, bar-handler re-register, post-cancel dealt_qty, calendar-aware force-close; full suite + live premarket UAT gate [Wave 1]
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06.2-02-PLAN.md — Tier 2 correctness (findings 2.1–2.8): bot-owned gate count, rescan active-codes, trades writer, bid/ask raise, orphan dedup, scanner staleness, exit-proxy R, config-driven orphan stop [Wave 2]
+- [x] 06.2-02-PLAN.md — Tier 2 correctness (findings 2.1–2.8): bot-owned gate count, rescan active-codes, trades writer, bid/ask raise, orphan dedup, scanner staleness, exit-proxy R, config-driven orphan stop [Wave 2]
 
 **Wave 3** *(blocked on Wave 2 completion)*
 

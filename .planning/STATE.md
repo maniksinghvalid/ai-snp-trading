@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-06-PLAN.md
-last_updated: "2026-07-07T14:48:49.442Z"
-last_activity: 2026-07-07
+stopped_at: Completed 06.2-02-PLAN.md
+last_updated: "2026-07-07T22:57:04.738Z"
+last_activity: 2026-07-07 -- Phase 06.2 execution started
 progress:
   total_phases: 9
   completed_phases: 8
   total_plans: 43
-  completed_plans: 41
+  completed_plans: 42
   percent: 89
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 06.2 — code-review-remediation (waves 2-3, gated on live UAT sign-off)
+**Current focus:** Phase 06.2 — code-review-remediation
 
 ## Current Position
 
-Phase: 06.2
-Plan: Not started
-Status: Phase 06 complete (verified 4/4, secured 0 open, nyquist-compliant) — next: 06.2 waves 2-3
-Last activity: 2026-07-07
+Phase: 06.2 (code-review-remediation) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
+Last activity: 2026-07-07 -- Phase 06.2 execution started
 
 Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
 
@@ -67,6 +67,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 06 P04 | 10 | 2 tasks | 1 files |
 | Phase 06-backtester P05 | 45 | 2 tasks | 2 files |
 | Phase 06-backtester P06 | 20 | 2 tasks | 2 files |
+| Phase 06.2 P02 | 24 | 8 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -138,6 +139,8 @@ Recent decisions affecting current work:
 - [Phase 06-06]: main(argv=None) returns an int exit code (not sys.exit) for testability; sys.exit(main()) only at __main__ guard
 - [Phase 06-06]: DB-collision guard tested via monkeypatching _scratch_db_path itself, since the real uuid-based path can never naturally collide with data/bot_state.db
 - [Phase 06-06]: end-to-end CLI test reuses test_harness.py's dedicated signal/fill/stop-out dataset (not the ahead-only fixture named in the plan) since the ahead-only fixture never clears the real SignalEngine I2 gate
+- [Phase 06.2]: 06.2-02: reused pre-existing store.record_trade (backtester harness writer) for the live exit-fill trades-table write instead of adding a duplicate insert_trade(dict) method
+- [Phase 06.2]: 06.2-02: gateway bid/ask price fetch retries then falls back to the last known good price within the same order loop (not bar-close data) on GatewayError; entry path now abandons gracefully instead of propagating an unhandled exception
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -170,6 +173,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T03:01:26.707Z
-Stopped at: Completed 06-06-PLAN.md
+Last session: 2026-07-07T22:57:04.733Z
+Stopped at: Completed 06.2-02-PLAN.md
 Resume file: None
