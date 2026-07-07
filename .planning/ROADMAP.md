@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
-- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (6/6 plans executed 2026-07-07; verification gaps_found — multi-day replay defects, gap closure pending)
+- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (6/6 plans executed 2026-07-07; verification gaps_found — 3 gap-closure plans (06-07..06-09) planned 2026-07-07 to fix 7 multi-day BLOCKERs CR-01..07 + WR-01)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
@@ -193,7 +193,7 @@ Plans:
   4. Historical 5m data is sourced from yfinance (or a flat CSV/Parquet export) rather than Moomoo (BT-04), avoiding broker historical-quota limits; the loader handles yfinance's 5m date-range window (≈60 days) and the strategy's ticker-format normalization
 
 **Resolved (was research flag):** historical data comes from yfinance/flat-file (BT-04), not Moomoo, removing the broker historical-quota concern. Remaining light research at Phase 6 planning: yfinance 5m history window/limits and whether a Parquet cache is needed for repeated multi-symbol backtests.
-**Plans**: 6 plans (4 waves)
+**Plans**: 9 plans (4 build waves + 3 gap-closure waves)
 
 Plans:
 **Wave 1**
@@ -214,6 +214,12 @@ Plans:
 
 - [x] 06-06-PLAN.md — run.py CLI (BT-01/03/04): argparse (--symbols/--start/--end/--rules-json/--output-dir), shared rules.json loader + ConfigError→exit(1), V5 input validation, live-DB collision guard (refuse data/bot_state.db), wire feed→harness→write_report, out-of-window loud failure [Wave 4]
 
+**Gap Closure** *(2026-07-07 — verification gaps_found, 7 confirmed multi-day BLOCKERs; do NOT replan 06-01..06-06)*
+
+- [ ] 06-07-PLAN.md — feed.py yfinance window + point-in-time (BT-02/BT-04): real 60-calendar-day 5m fetch matching the guard (CR-03), per-trading-day coverage check → BacktestWindowError naming uncovered days (CR-03), same-session next_bar (CR-04), one-time prepost=True premarket load → point-in-time premarket_highs (CR-02) + premarket-only synthetic_today_price (CR-07) [Gap Wave 1]
+- [ ] 06-08-PLAN.md — execution.py exit-fill semantics (BT-01/BT-03): no-next-bar exit returns 0 with no phantom fill (WR-01), force-close mode fills at last observed bar close + returns full qty so force_close_all reaches CLOSED (CR-05 mechanic) [Gap Wave 2, blocked on 06-07]
+- [ ] 06-09-PLAN.md — harness.py multi-day correctness (BT-01/BT-02/BT-03): per-day premarket-high freeze applied in replay_day (CR-01), _WATCHLIST_CAP + entry gate on persisted watchlist (CR-06), EOD/end-of-run force_close_all with manager now_et rebind (CR-05), + 2+-trading-day regression test proving CR-01/CR-04/CR-05/CR-06 closed [Gap Wave 3, blocked on 06-07/06-08]
+
 ### Phase 7: Strategy Optimization
 
 **Goal**: The live strategy's four structural weaknesses identified by quant feedback (2026-07-03) are closed: the RVOL gate is time-of-day normalized (restoring realistic signal frequency), exits stop feeding the left tail (model selected by backtest evidence), stop invalidation moves from 5m bar-close to tick/broker-side (eliminating fat-tail losses past 1R), and a -2R daily circuit breaker halts new entries on adverse days
@@ -227,7 +233,7 @@ Plans:
   4. When cumulative daily realized loss reaches -2R, all new entries are halted for the rest of the session (existing positions continue to be managed); the halt is logged, alerted, and resets next trading day
   5. All thresholds (RVOL-TOD min, circuit-breaker R, exit-model parameters) live in rules.json — no hardcoded strategy literals
 
-**Plans**: 6 plans (4 waves)
+**Plans**: 9 plans (4 build waves + 3 gap-closure waves)
 
 Plans:
 **Wave 1**
