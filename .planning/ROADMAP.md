@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
-- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code
+- [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (completed 2026-07-07)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
@@ -212,7 +212,7 @@ Plans:
 
 **Wave 4** *(blocked on 06-05)*
 
-- [ ] 06-06-PLAN.md — run.py CLI (BT-01/03/04): argparse (--symbols/--start/--end/--rules-json/--output-dir), shared rules.json loader + ConfigError→exit(1), V5 input validation, live-DB collision guard (refuse data/bot_state.db), wire feed→harness→write_report, out-of-window loud failure [Wave 4]
+- [x] 06-06-PLAN.md — run.py CLI (BT-01/03/04): argparse (--symbols/--start/--end/--rules-json/--output-dir), shared rules.json loader + ConfigError→exit(1), V5 input validation, live-DB collision guard (refuse data/bot_state.db), wire feed→harness→write_report, out-of-window loud failure [Wave 4]
 
 ### Phase 7: Strategy Optimization
 
@@ -260,7 +260,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 5/6 | In Progress|  |
+| 6. Backtester | 6/6 | Complete   | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1**

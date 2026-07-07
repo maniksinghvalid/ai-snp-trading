@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 06-05-PLAN.md
-last_updated: "2026-07-07T02:51:51.345Z"
+status: verifying
+stopped_at: Completed 06-06-PLAN.md
+last_updated: "2026-07-07T03:01:38.960Z"
 last_activity: 2026-07-07 -- Phase 06 execution started
 progress:
   total_phases: 9
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 37
-  completed_plans: 33
-  percent: 67
+  completed_plans: 34
+  percent: 78
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 Phase: 06 (backtester) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-07 -- Phase 06 execution started
 
 Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
@@ -65,6 +65,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 06 P03 | 20 | 2 tasks | 2 files |
 | Phase 06 P04 | 10 | 2 tasks | 1 files |
 | Phase 06-backtester P05 | 45 | 2 tasks | 2 files |
+| Phase 06-backtester P06 | 20 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -133,6 +134,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 06-05: harness.setup_day calls _compute_tod_baselines with cfg.rvol_tod_lookback_days (not rvol_lookback_days), matching scanner.py's run_daily_scan call site
 - [Phase ?]: 06-05: harness drops the D-08 circuit-breaker side-effect gate (_entries_enabled) -- no kill-switch concept in an offline replay; SignalEngine's own Gate 7 circuit-breaker check still runs
 - [Phase ?]: 06-05: harness sets PositionState.opened_at/updated_at from the fill's bar time at construction (not left None until on_fill) -- StateStore's positions table has both columns NOT NULL; harness also normalizes FillEvent.fill_time from SimulatedExecution's raw time_key string to a real ET datetime before on_fill() (both harness-side adapters, bot/ and backtester/execution.py unmodified)
+- [Phase 06-06]: main(argv=None) returns an int exit code (not sys.exit) for testability; sys.exit(main()) only at __main__ guard
+- [Phase 06-06]: DB-collision guard tested via monkeypatching _scratch_db_path itself, since the real uuid-based path can never naturally collide with data/bot_state.db
+- [Phase 06-06]: end-to-end CLI test reuses test_harness.py's dedicated signal/fill/stop-out dataset (not the ahead-only fixture named in the plan) since the ahead-only fixture never clears the real SignalEngine I2 gate
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -165,6 +169,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T02:51:51.340Z
-Stopped at: Completed 06-05-PLAN.md
+Last session: 2026-07-07T03:01:26.707Z
+Stopped at: Completed 06-06-PLAN.md
 Resume file: None
