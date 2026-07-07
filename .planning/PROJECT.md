@@ -105,7 +105,7 @@ The strategy is the product. It is fully specified and authoritative:
 - [ ] Telegram alerts for entries, exits (partial/breakeven/trail/stop/force-close), and a daily summary
 - [ ] Long-running scheduled service that orchestrates premarket → intraday loop → EOD unattended
 - [ ] Durable state + trade logging so the bot survives restarts and produces an auditable record
-- [ ] Backtester to validate Trend Join Long on historical 5m data
+- [x] Backtester to validate Trend Join Long on historical 5m data — Validated in Phase 06: Backtester (verified 4/4, 2026-07-07; replays 5m yfinance data through the unmodified live StrategyCore/FSM incl. Gate-7 breaker, produces per-trade CSV + summary report)
 
 ### Out of Scope
 
@@ -180,4 +180,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-23 after initialization*
+*Last updated: 2026-07-07 after Phase 06 (Backtester) completion*
