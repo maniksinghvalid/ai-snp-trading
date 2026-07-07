@@ -79,6 +79,33 @@ def test_out_of_window_start_raises_backtest_window_error_not_silent_empty(tmp_p
             list(feed.replay(ancient_start))
 
 
+def test_second_load_reads_csv_cache_zero_network_calls(tmp_path):
+    """A second SimulatedBarFeed over the same (symbol, range) hits the CSV cache -- 0 calls."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame()
+
+        feed1 = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+                                  cache_dir=str(tmp_path))
+        list(feed1.replay("2026-06-01"))
+        assert mock_dl.call_count == 1
+
+        feed2 = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+                                  cache_dir=str(tmp_path))
+        list(feed2.replay("2026-06-01"))
+        assert mock_dl.call_count == 1, "second load must hit the CSV cache, not the network"
+
+
+def test_moomoo_code_normalization_via_yfinance_to_moomoo(tmp_path):
+    """Bar dicts carry moomoo-format codes derived via yfinance_to_moomoo (BRK-B edge case)."""
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = _make_multi_bar_frame()
+        feed = SimulatedBarFeed(["US.BRK-B"], start="2026-06-01", end="2026-06-01",
+                                 cache_dir=str(tmp_path))
+        bars = list(feed.replay("2026-06-01"))
+    assert bars
+    assert all(b["code"] == "US.BRK-B" for b in bars)
+
+
 def _make_multi_bar_frame():
     """Title-Case OHLCV frame mimicking a raw yf.download() 5m result for one symbol."""
     import pandas as pd
