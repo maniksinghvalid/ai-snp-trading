@@ -1719,3 +1719,34 @@ class TestGetExternalCodes:
         assert "US.MSFT" not in result
         assert "US.NVDA" in result
 
+
+# ============================================================
+# MoomooGateway._compute_orphan_stop() — Finding 2.8
+# The orphan-adoption stop must be derived from rules.json's
+# initial_stop_pct (CFG-01 single source of truth), not a hardcoded
+# lod * 0.99 that silently diverges from the live strategy's stop.
+# ============================================================
+
+class TestComputeOrphanStopUsesConfigPct:
+    def test_compute_orphan_stop_uses_config_pct(self):
+        """initial_stop_pct=2.0 → stop = lod * (1 - 2/100) = lod * 0.98."""
+        cfg = GatewayConfig(acc_id=123456789, paper_trading=True, trd_env="SIMULATE")
+        gw = MoomooGateway(cfg, initial_stop_pct=2.0)
+
+        assert gw._compute_orphan_stop(100.0) == 98.0
+
+    def test_compute_orphan_stop_default_fallback(self):
+        """No initial_stop_pct supplied → safe 1.0% fallback (lod * 0.99), unchanged behavior."""
+        cfg = GatewayConfig(acc_id=123456789, paper_trading=True, trd_env="SIMULATE")
+        gw = MoomooGateway(cfg)
+
+        assert abs(gw._compute_orphan_stop(100.0) - 99.0) < 1e-9
+
+    def test_compute_orphan_stop_lod_zero_or_negative_returns_zero(self):
+        """lod <= 0 must still return 0.0 (unavailable-LOD guard, unchanged)."""
+        cfg = GatewayConfig(acc_id=123456789, paper_trading=True, trd_env="SIMULATE")
+        gw = MoomooGateway(cfg, initial_stop_pct=2.0)
+
+        assert gw._compute_orphan_stop(0.0) == 0.0
+        assert gw._compute_orphan_stop(-5.0) == 0.0
+

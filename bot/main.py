@@ -72,7 +72,9 @@ def main() -> None:
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
 
     # Step 4: Construct broker and state components
-    gateway = MoomooGateway(get_gateway_config())
+    # Finding 2.8: thread cfg.initial_stop_pct (rules.json) into the gateway so
+    # orphan-adoption's stop matches the live strategy's initial_stop (CFG-01).
+    gateway = MoomooGateway(get_gateway_config(), initial_stop_pct=cfg.initial_stop_pct)
     store = StateStore().open()
 
     # Step 5a: Construct strategy and execution engine

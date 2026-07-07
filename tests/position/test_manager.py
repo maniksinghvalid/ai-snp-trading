@@ -1487,6 +1487,7 @@ def test_restart_reconciliation():
     gw.cfg = cfg
     gw._quote_ctx = None
     gw._trade_ctx = None
+    gw._initial_stop_pct = 1.0  # Finding 2.8: bypassing __init__, set the default explicitly
 
     # Mock get_positions to return the broker DataFrame
     gw.get_positions = AsyncMock(return_value=(0, broker_df))

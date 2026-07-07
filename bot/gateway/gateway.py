@@ -302,7 +302,7 @@ class MoomooGateway:
         gw.close()
     """
 
-    def __init__(self, cfg: Optional[GatewayConfig] = None):
+    def __init__(self, cfg: Optional[GatewayConfig] = None, initial_stop_pct: float = 1.0):
         self.cfg: GatewayConfig = cfg or get_gateway_config()
         self._quote_ctx: Optional[OpenQuoteContext] = None
         self._trade_ctx: Optional[OpenSecTradeContext] = None
@@ -310,6 +310,11 @@ class MoomooGateway:
         # asyncio.create_task results are added here and removed via
         # add_done_callback(self._bg_tasks.discard) to prevent GC before send.
         self._bg_tasks: set = set()
+        # Finding 2.8: orphan-adoption stop percentage (CFG-01 — rules.json
+        # single source of truth via StrategyConfig.initial_stop_pct). Defaults
+        # to 1.0 (the pre-fix lod*0.99 behavior) as a safe fallback when the
+        # caller does not thread the live strategy config through.
+        self._initial_stop_pct: float = initial_stop_pct
 
     # --------------------------------------------------------
     # Context Creation (blocking, called from connect())
@@ -1456,22 +1461,26 @@ class MoomooGateway:
             return 0.0
 
     def _compute_orphan_stop(self, lod: float) -> float:
-        """Derive the orphan adoption stop via LOD - 1% (D-10).
+        """Derive the orphan adoption stop via LOD - initial_stop_pct% (D-10 / Finding 2.8).
 
-        Uses a fixed 1% fraction (matching 'lod_minus_1pct' stop rule from
-        StrategyConfig) so orphan adoption does not require the full config stack.
-        The actual strategy uses cfg.initial_stop_pct (configured to 1.0 from
-        'lod_minus_1pct') — replicate that math here without needing a config import.
+        Uses self._initial_stop_pct (threaded in from StrategyConfig.initial_stop_pct
+        at construction — CFG-01: rules.json is the single source of truth) rather
+        than a hardcoded 1% fraction, so the orphan-adoption stop always matches the
+        live strategy's initial_stop (bot/strategy/trend_join_long.py uses the same
+        lod * (1 - cfg.initial_stop_pct/100) formula). Falls back to the 1.0 default
+        set at __init__ when no config was threaded through (safe, matches prior
+        hardcoded 1% behavior).
 
         Args:
             lod: Low-of-day price (0.0 if unavailable).
 
         Returns:
-            float — stop price at lod * 0.99. Returns 0.0 if lod is 0.
+            float — stop price at lod * (1 - initial_stop_pct/100). Returns 0.0 if
+            lod <= 0.
         """
         if lod <= 0:
             return 0.0
-        return float(lod * 0.99)  # lod_minus_1pct — same as compute_initial_stop
+        return float(lod * (1.0 - self._initial_stop_pct / 100.0))
 
     async def reconciliation_loop(
         self,
