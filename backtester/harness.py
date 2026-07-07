@@ -45,11 +45,13 @@ effect is out of scope.
 Exports: BacktestHarness
 """
 from collections import deque
+from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
 
+import bot.position.manager as _position_manager_module
 import bot.signal.signal_engine as _signal_engine_module
-from bot.position.manager import PositionManager
+from bot.position.manager import PositionManager, get_force_close_time_et
 from bot.position.state import PositionPhase, PositionState
 from bot.risk.risk_engine import RiskEngine
 from bot.safety.et_helpers import ET
@@ -201,28 +203,58 @@ class BacktestHarness:
     # ============================================================
 
     async def replay_day(self, day) -> None:
-        """Replay every bar of `day` chronologically through the reused pipeline."""
+        """Replay every bar of `day` chronologically through the reused pipeline, then
+        force-close every non-CLOSED position at that day's force-close time (CR-05).
+
+        The force-close step naturally also covers end-of-run: the last day replayed
+        is force-closed last, so no position can ever survive run() still open.
+        """
         # CR-01: apply THIS day's own frozen premarket highs before any bar of this
         # day is processed -- Gate 1 must never see a later/earlier day's highs.
         self.signal_engine.set_premarket_highs(self._premarket_highs_by_day.get(day, {}))
 
+        bar_seen = False
         for bar_data in self._feed.replay(day):
+            bar_seen = True
             await self._process_bar(bar_data)
+
+        if not bar_seen:
+            return
+
+        # CR-05: pin the replay clock to THIS day's force-close moment so
+        # force_close_all's "not yet time" guard always fires, regardless of the
+        # day's actual last bar time (e.g. a short/degraded replay day).
+        day_date = self._parse_day(day)
+        fc_time = get_force_close_time_et(day_date)
+        self._replay_clock = datetime.combine(day_date, fc_time, tzinfo=ET)
+
+        self.sim_execution._force_close = True
+        try:
+            await self.position_manager.force_close_all(today=day_date)
+        finally:
+            self.sim_execution._force_close = False
+
+        self._capture_closed_trades()
 
     async def run(self) -> None:
         """Replay every day seeded via setup_day, in order.
 
-        Rebinds bot.signal.signal_engine.now_et to the harness's replay clock for
-        the duration of the run (T-06-11) -- restored in finally so the patch
-        never leaks to other code in-process.
+        Rebinds bot.signal.signal_engine.now_et AND bot.position.manager.now_et to
+        the harness's replay clock for the duration of the run (T-06-11) -- both
+        saved and restored in finally so the patch never leaks to other code
+        in-process. The position-manager clock drives force_close_all's own
+        now_et() time guard and every pos.updated_at = now_et() write during replay.
         """
-        original_now_et = _signal_engine_module.now_et
+        original_signal_now_et = _signal_engine_module.now_et
+        original_position_now_et = _position_manager_module.now_et
         _signal_engine_module.now_et = lambda: self._replay_clock
+        _position_manager_module.now_et = lambda: self._replay_clock
         try:
             for day in self._days:
                 await self.replay_day(day)
         finally:
-            _signal_engine_module.now_et = original_now_et
+            _signal_engine_module.now_et = original_signal_now_et
+            _position_manager_module.now_et = original_position_now_et
 
     async def _process_bar(self, bar_data: dict) -> None:
         """Single-bar pipeline -- ports bot.service.bot.TradingBot._process_bar.

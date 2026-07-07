@@ -52,6 +52,8 @@ feed_mod = pytest.importorskip("backtester.feed")
 BacktestHarness = mod.BacktestHarness
 SimulatedBarFeed = feed_mod.SimulatedBarFeed
 
+from bot.position.state import PositionPhase
+
 _DAY = "2026-06-01"
 _SIGNAL_BUCKETS = ["10:05", "10:10", "10:15", "10:20", "10:25", "10:30", "10:35"]
 
@@ -108,15 +110,19 @@ def _make_premarket_frame():
     )
 
 
-def _make_5m_frame():
+def _make_5m_frame(today_bars=_TODAY_BARS):
     """Combined 5m frame: 14 prior business days (flat, low volume, SAME bucket times as
     today) + today's dedicated signal/fill/stop-out/exit sequence. Serves BOTH the feed's
     own replay load and the harness's TOD-baseline call (both request interval="5m",
     prepost=False) -- the harness itself is responsible for excluding `day` before
-    computing baselines (BT-02 no-look-ahead; see backtester.harness._prior_sessions_only)."""
+    computing baselines (BT-02 no-look-ahead; see backtester.harness._prior_sessions_only).
+
+    today_bars: overridable so a test can replace the default signal/fill/stop-out/exit
+    sequence with its own (e.g. a shorter sequence that leaves a position open at EOD,
+    CR-05)."""
     rows = []
     index = []
-    for time_key, o, h, l, c, v in _TODAY_BARS:
+    for time_key, o, h, l, c, v in today_bars:
         index.append(pd.Timestamp(time_key))
         rows.append((o, h, l, c, v))
 
@@ -287,3 +293,56 @@ def test_full_replay_produces_a_closed_trade_filled_at_next_bar_open(monkeypatch
     # Pitfall 6: bar_buffer must have been populated during the replay so the swing-low
     # trail (POS-03) has data to compute from.
     assert len(harness._bar_buffer["US.TEST"]) > 0
+
+
+# Same signal/fill sequence as _TODAY_BARS but with NO crash/exit bar afterward -- the
+# entry fills at 10:25's open (N+1) and the position is simply still open when the day's
+# last replayed bar (10:25) ends (CR-05: force_close_all must reach it at EOD).
+_OPEN_AT_EOD_BARS = [
+    ("2026-06-01 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
+    ("2026-06-01 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
+    ("2026-06-01 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
+    ("2026-06-01 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
+    ("2026-06-01 10:25:00", 103.00, 103.50, 101.00, 103.20, 5_000),
+]
+
+
+def test_replay_day_force_closes_position_left_open_at_eod(monkeypatch, tmp_path):
+    """CR-05: a position still open at the day's last replayed bar must be force-closed
+    by run() -- reaching CLOSED and landing in trade_log with exit_reason == 'force_close'
+    and a real exit price (the last observed bar's close, per backtester/execution.py's
+    force-close fill mechanic, not a fabricated/None price)."""
+    from bot.config.loader import load_strategy_config
+    from bot.state.store import StateStore
+
+    def _mock_yf_download_no_exit(*_args, **kwargs):
+        interval = kwargs.get("interval")
+        prepost = kwargs.get("prepost", False)
+        if interval == "1d":
+            return _make_daily_frame()
+        if interval == "5m" and prepost:
+            return _make_premarket_frame()
+        if interval == "5m":
+            return _make_5m_frame(_OPEN_AT_EOD_BARS)
+        return pd.DataFrame()
+
+    monkeypatch.setattr("yfinance.download", _mock_yf_download_no_exit)
+
+    cfg = load_strategy_config("rules.json")
+    store = StateStore(db_path=str(tmp_path / "backtest_scratch.db")).open()
+    feed = SimulatedBarFeed(["US.TEST"], start=_DAY, end=_DAY, cache_dir=str(tmp_path / "cache"))
+    harness = BacktestHarness(cfg=cfg, feed=feed, store=store)
+
+    harness.setup_day(_DAY, ["US.TEST"])
+    asyncio.run(harness.run())
+
+    assert all(
+        p.phase == PositionPhase.CLOSED for p in harness.position_manager._positions.values()
+    ), "CR-05: every position must reach CLOSED by end of run(), including one still open at EOD."
+
+    forced = [t for t in harness.trade_log if t["exit_reason"] == "force_close"]
+    assert len(forced) == 1, "the EOD-open position must be captured into trade_log as a force_close."
+    assert forced[0]["exit_price"] == 103.20, (
+        "force-close exit_price must be the last observed bar's close (BT-02/CR-05), "
+        "never a fabricated or None price."
+    )
