@@ -222,8 +222,8 @@ Plans:
 
 **Post-Review Gap Closure** *(2026-07-07 — re-verification gaps_found 1/4, 2 new BLOCKERs from code review 06d8b5b; do NOT replan 06-01..06-09)*
 
-- [ ] 06-10-PLAN.md — feed.py NaN-row hygiene (BT-04/BT-02): dropna(open/high/low/close/volume) in _materialize_bars and _load_premarket (both network + CSV-cache paths) so a realistic multi-ticker yf.download union-index NaN-padded frame neither crashes int(NaN) nor poisons premarket_highs; + union-index regression test [Post-Review Gap Wave 1]
-- [ ] 06-11-PLAN.md — Gate-7 trades persistence + exit-slippage sign (BT-01/BT-03): new parameterized StateStore.record_trade; _capture_closed_trades writes each closed trade to the scratch trades table so the reused SignalEngine Gate-7 -2R circuit breaker reads real realized P&L and can block entries; adverse exit slippage (SELL exits subtract); truthful harness docstring; + Gate-7-trip and slippage-sign regression tests [Post-Review Gap Wave 1]
+- [x] 06-10-PLAN.md — feed.py NaN-row hygiene (BT-04/BT-02): dropna(open/high/low/close/volume) in _materialize_bars and _load_premarket (both network + CSV-cache paths) so a realistic multi-ticker yf.download union-index NaN-padded frame neither crashes int(NaN) nor poisons premarket_highs; + union-index regression test [Post-Review Gap Wave 1]
+- [x] 06-11-PLAN.md — Gate-7 trades persistence + exit-slippage sign (BT-01/BT-03): new parameterized StateStore.record_trade; _capture_closed_trades writes each closed trade to the scratch trades table so the reused SignalEngine Gate-7 -2R circuit breaker reads real realized P&L and can block entries; adverse exit slippage (SELL exits subtract); truthful harness docstring; + Gate-7-trip and slippage-sign regression tests [Post-Review Gap Wave 1]
 - [ ] 06-12-PLAN.md — test-suite time-bomb hygiene (non-blocking, test-only): recent_session_days() helper + retrofit hardcoded 2026-06-01/02 fixture dates across the backtester suite so the rolling 60-day window guard never turns the suite red on a future calendar date [Post-Review Gap Wave 2, blocked on 06-10/06-11]
 
 ### Phase 7: Strategy Optimization
@@ -272,7 +272,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 9/9 | Gaps found (2 new BLOCKERs, re-verified 2026-07-07) |  |
+| 6. Backtester | 11/12 | In Progress|  |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -286,7 +286,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 9/9 plans complete
+**Plans:** 11/12 plans executed
 
 Plans:
 **Wave 1**
