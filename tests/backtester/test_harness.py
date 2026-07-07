@@ -55,26 +55,35 @@ BacktestHarness = mod.BacktestHarness
 SimulatedBarFeed = feed_mod.SimulatedBarFeed
 
 from bot.position.state import PositionPhase
+from tests.backtester.fixtures import recent_session_days
 
-_DAY = "2026-06-01"
+# _DAY MUST equal _MD_DAY1 (both derived from the SAME recent_session_days(2) call):
+# _make_5m_frame's shared prior-14-business-day warm-up anchor (below) is built relative
+# to _DAY, and that same helper is reused by the multi-day test's _mock_yf_download_multiday
+# for BOTH _TESTA_BARS and _TESTB_BARS (each anchored to _MD_DAY1/_MD_DAY2). If _DAY and
+# _MD_DAY1 were derived independently they could diverge, causing _make_5m_frame's warm-up
+# window to overlap _MD_DAY1 itself and silently duplicate-inject quiet-volume bars into
+# that day's replay stream.
+_MD_DAY1, _MD_DAY2 = recent_session_days(2)
+_DAY = _MD_DAY1
 _SIGNAL_BUCKETS = ["10:05", "10:10", "10:15", "10:20", "10:25", "10:30", "10:35"]
 
 # (time_key, open, high, low, close, volume)
 _TODAY_BARS = [
-    ("2026-06-01 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
-    ("2026-06-01 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
-    ("2026-06-01 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
+    (f"{_DAY} 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
+    (f"{_DAY} 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
+    (f"{_DAY} 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
     # Signal bar: closes AT its own high (no upper wick) so I2 (close >= hod, where hod
     # INCLUDES this bar's own high) is satisfiable; volume spike drives I3 (rvol >= 2.0).
-    ("2026-06-01 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
+    (f"{_DAY} 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
     # N+1 bar: gap DOWN from the signal bar's close (105.00) -- the entry must fill here
     # (open=103.00), never at the signal bar's close (BT-02 look-ahead proof).
-    ("2026-06-01 10:25:00", 103.00, 103.50, 101.00, 101.50, 5_000),
+    (f"{_DAY} 10:25:00", 103.00, 103.50, 101.00, 101.50, 5_000),
     # Crash bar: closes well below the initial stop (LOD(99.50) * 0.99 = 98.505) -- triggers
     # STOP_OUT so the position actually reaches CLOSED (captured into trade_log).
-    ("2026-06-01 10:30:00", 101.50, 101.50, 90.00, 90.00, 5_000),
+    (f"{_DAY} 10:30:00", 101.50, 101.50, 90.00, 90.00, 5_000),
     # Exit fill bar (N+1 relative to the crash bar).
-    ("2026-06-01 10:35:00", 91.00, 91.50, 89.00, 90.50, 5_000),
+    (f"{_DAY} 10:35:00", 91.00, 91.50, 89.00, 90.50, 5_000),
 ]
 
 
@@ -90,7 +99,7 @@ def _make_daily_frame():
     bar) so D1 (today close > prior-day high) and D3 (>= 3% gap) both pass too.
     """
     periods = 200
-    dates = pd.bdate_range(end=pd.Timestamp("2026-05-29"), periods=periods)
+    dates = pd.bdate_range(end=pd.Timestamp(_DAY) - pd.Timedelta(days=1), periods=periods)
     closes = [70.0 + i * (90.0 - 70.0) / (periods - 1) for i in range(periods)]
     return pd.DataFrame(
         {"Open": closes, "High": [c + 0.5 for c in closes], "Low": [c - 0.5 for c in closes],
@@ -103,7 +112,7 @@ def _make_premarket_frame():
     """prepost=True 5m frame with bars before 09:30 ET on _DAY -- premarket_high=98.0,
     comfortably below the signal bar's close (105.00) so I1 passes."""
     index = pd.to_datetime(
-        ["2026-06-01 09:00:00", "2026-06-01 09:15:00"]
+        [f"{_DAY} 09:00:00", f"{_DAY} 09:15:00"]
     ).tz_localize("America/New_York")
     return pd.DataFrame(
         {"Open": [97.0, 97.5], "High": [98.0, 97.8], "Low": [96.5, 97.0],
@@ -128,7 +137,7 @@ def _make_5m_frame(today_bars=_TODAY_BARS):
         index.append(pd.Timestamp(time_key))
         rows.append((o, h, l, c, v))
 
-    prior_dates = pd.bdate_range(end=pd.Timestamp("2026-06-01") - pd.Timedelta(days=1), periods=14)
+    prior_dates = pd.bdate_range(end=pd.Timestamp(_DAY) - pd.Timedelta(days=1), periods=14)
     for d in prior_dates:
         for bucket in _SIGNAL_BUCKETS:
             index.append(pd.Timestamp(f"{d.date()} {bucket}:00"))
@@ -263,10 +272,10 @@ def test_replay_clock_drives_entry_window_gate(monkeypatch, tmp_path):
     harness = _build_real_harness(monkeypatch, tmp_path)
     original_now_et = se_mod.now_et
     try:
-        se_mod.now_et = lambda: harness._parse_time_key_et("2026-06-01 10:20:00")  # inside window
+        se_mod.now_et = lambda: harness._parse_time_key_et(f"{_DAY} 10:20:00")  # inside window
         assert harness.signal_engine._in_entry_window() is True
 
-        se_mod.now_et = lambda: harness._parse_time_key_et("2026-06-01 09:00:00")  # before earliest
+        se_mod.now_et = lambda: harness._parse_time_key_et(f"{_DAY} 09:00:00")  # before earliest
         assert harness.signal_engine._in_entry_window() is False
     finally:
         se_mod.now_et = original_now_et
@@ -301,11 +310,11 @@ def test_full_replay_produces_a_closed_trade_filled_at_next_bar_open(monkeypatch
 # entry fills at 10:25's open (N+1) and the position is simply still open when the day's
 # last replayed bar (10:25) ends (CR-05: force_close_all must reach it at EOD).
 _OPEN_AT_EOD_BARS = [
-    ("2026-06-01 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
-    ("2026-06-01 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
-    ("2026-06-01 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
-    ("2026-06-01 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
-    ("2026-06-01 10:25:00", 103.00, 103.50, 101.00, 103.20, 5_000),
+    (f"{_DAY} 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
+    (f"{_DAY} 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
+    (f"{_DAY} 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
+    (f"{_DAY} 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
+    (f"{_DAY} 10:25:00", 103.00, 103.50, 101.00, 103.20, 5_000),
 ]
 
 
@@ -360,8 +369,7 @@ def test_replay_day_force_closes_position_left_open_at_eod(monkeypatch, tmp_path
 #   US.TESTB -- fires ONLY on day1's own LAST bar (no further TESTB bars that day) but
 #               DOES have a later bar on day2 -- proving next_bar() must never treat
 #               that day2 bar as day1's "N+1" fill (CR-04), through the full harness.
-_MD_DAY1 = "2026-06-01"
-_MD_DAY2 = "2026-06-02"
+# _MD_DAY1/_MD_DAY2 are already defined at module top (== _DAY / the day after it).
 
 # Day1: warm-up + breakout signal (closes at its own high, big volume spike) that must
 # be gated by DAY 1's OWN premarket high (98.0) -- NOT day 2's much higher one (130.0);
@@ -369,14 +377,14 @@ _MD_DAY2 = "2026-06-02"
 # would fail to break it, producing zero entries. No bar after 10:25 -- the filled
 # position simply stays open until force_close_all reaches it at day1's EOD.
 _TESTA_BARS = [
-    ("2026-06-01 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
-    ("2026-06-01 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
-    ("2026-06-01 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
-    ("2026-06-01 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
-    ("2026-06-01 10:25:00", 103.00, 103.50, 101.00, 103.20, 5_000),
+    (f"{_MD_DAY1} 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
+    (f"{_MD_DAY1} 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
+    (f"{_MD_DAY1} 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
+    (f"{_MD_DAY1} 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
+    (f"{_MD_DAY1} 10:25:00", 103.00, 103.50, 101.00, 103.20, 5_000),
     # Quiet day2 bar: below day2's own (higher) premarket high, so it never re-enters --
     # only present so the feed has non-empty day2 coverage for this code too.
-    ("2026-06-02 10:05:00", 100.00, 100.20, 99.80, 100.00, 1_000),
+    (f"{_MD_DAY2} 10:05:00", 100.00, 100.20, 99.80, 100.00, 1_000),
 ]
 
 # Day1: TESTB's ONLY bar this day IS its signal bar (closes at its own high, volume
@@ -384,8 +392,8 @@ _TESTA_BARS = [
 # STRICTLY-later bar; a day2 bar deliberately exists so a buggy next_bar() that
 # ignores the session boundary would wrongly return it as the "N+1" fill.
 _TESTB_BARS = [
-    ("2026-06-01 10:20:00", 100.90, 108.00, 100.80, 108.00, 40_000),
-    ("2026-06-02 10:05:00", 100.00, 100.00, 99.00, 99.50, 1_000),
+    (f"{_MD_DAY1} 10:20:00", 100.90, 108.00, 100.80, 108.00, 40_000),
+    (f"{_MD_DAY2} 10:05:00", 100.00, 100.00, 99.00, 99.50, 1_000),
 ]
 
 
@@ -393,10 +401,10 @@ def _make_premarket_frame_for(day1_high, day2_high=None):
     """Premarket 5m frame with a distinct, engineered high per day -- day2's high is
     deliberately HIGHER than day1's so a cross-day clobber (CR-01) would be observable
     (a correctly-gated day1 entry would fail if it saw day2's higher number instead)."""
-    idx = ["2026-06-01 09:00:00"]
+    idx = [f"{_MD_DAY1} 09:00:00"]
     highs = [day1_high]
     if day2_high is not None:
-        idx.append("2026-06-02 09:00:00")
+        idx.append(f"{_MD_DAY2} 09:00:00")
         highs.append(day2_high)
     index = pd.to_datetime(idx).tz_localize("America/New_York")
     return pd.DataFrame(

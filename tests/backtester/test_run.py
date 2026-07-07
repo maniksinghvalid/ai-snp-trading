@@ -12,15 +12,21 @@ below its own high and never clears the real I2 gate (documented in 06-05-SUMMAR
 deviation 5) -- reusing test_harness.py's proven dataset avoids re-deriving that fixture.
 """
 import backtester.run as run_mod
+from tests.backtester.fixtures import recent_session_days
 from tests.backtester.test_harness import _DAY as _E2E_DAY
 from tests.backtester.test_harness import _mock_yf_download as _e2e_mock_yf_download
+
+# Runtime-derived anchor (never a hardcoded literal) so the rolling ~60-calendar-day
+# window guard can never turn this suite red on a future calendar date (06-12
+# gap-closure, WR-06 time bomb).
+_DAY = recent_session_days(1)[0]
 
 
 def _base_args(output_dir, **overrides):
     args = {
         "--symbols": "US.AAPL",
-        "--start": "2026-06-01",
-        "--end": "2026-06-01",
+        "--start": _DAY,
+        "--end": _DAY,
         "--output-dir": str(output_dir),
     }
     args.update(overrides)
@@ -38,7 +44,7 @@ def test_bad_start_date_exits_nonzero_before_fetch(tmp_path, capsys):
     exit_code = run_mod.main([
         "--symbols", "US.AAPL",
         "--start", "not-a-date",
-        "--end", "2026-06-30",
+        "--end", _DAY,
         "--output-dir", str(tmp_path),
     ])
 
@@ -50,8 +56,8 @@ def test_bad_start_date_exits_nonzero_before_fetch(tmp_path, capsys):
 def test_empty_symbols_exits_nonzero(tmp_path, capsys):
     exit_code = run_mod.main([
         "--symbols", "   ",
-        "--start", "2026-06-01",
-        "--end", "2026-06-30",
+        "--start", _DAY,
+        "--end", _DAY,
         "--output-dir", str(tmp_path),
     ])
 

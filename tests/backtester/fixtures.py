@@ -6,6 +6,13 @@ Pure functions only — NO network access, NO import of any `backtester.*` modul
 file is always importable, even before backtester/feed.py, execution.py, harness.py, or
 report.py exist (Wave 0 scaffold, plan 06-01).
 
+  recent_session_days(n=1) — returns the `n` most recent consecutive NYSE trading days (as
+    "YYYY-MM-DD" strings, chronological order), ending a few days before today. Every
+    fixture in this module (and the retrofitted test_feed.py/test_harness.py/test_run.py
+    date anchors) derives its dates from this helper instead of a hardcoded literal, so
+    SimulatedBarFeed._enforce_window's rolling ~60-calendar-day cutoff can never turn the
+    suite red on a future calendar date (06-12 gap-closure, WR-06 time bomb).
+
   make_ahead_only_5m_dataset() — deterministic 5m bar sequence for one code/session,
     engineered so the ONLY bar clearing entry conditions is bar N, and bar N+1's open is
     materially different from bar N's close (BT-02 look-ahead proof: the fill must use
@@ -17,6 +24,25 @@ report.py exist (Wave 0 scaffold, plan 06-01).
     entry_price, exit_price, quantity, exit_reason, r_multiple, closed_at) with hand-computed
     expected metrics documented below, for the 06-04 report test.
 """
+from datetime import datetime, timedelta
+
+import pandas_market_calendars as mcal
+
+
+def recent_session_days(n=1):
+    """Return the `n` most recent consecutive NYSE trading days, as "YYYY-MM-DD" strings
+    in chronological order, ending a few days before today.
+
+    Keeps every fixture date safely inside the ~60-calendar-day yfinance 5m window
+    (backtester.feed.SimulatedBarFeed._enforce_window) regardless of when the suite runs.
+    """
+    calendar = mcal.get_calendar("NYSE")
+    valid_days = calendar.valid_days(
+        start_date=(datetime.now() - timedelta(days=20)).date(),
+        end_date=(datetime.now() - timedelta(days=2)).date(),
+    )
+    selected = valid_days[-n:]
+    return [d.strftime("%Y-%m-%d") for d in selected]
 
 
 def make_ahead_only_5m_dataset():
@@ -34,14 +60,15 @@ def make_ahead_only_5m_dataset():
     Bar index 5 (09:55) is the LAST bar: close=107.50 also clears the running hod, but
     there is no bar 6, so a signal sourced from this bar must yield no fill.
     """
+    day = recent_session_days(1)[0]
     raw = [
         # (time_key, open, high, low, close, volume)
-        ("2026-06-01 09:30:00", 100.00, 100.50, 99.50, 100.20, 10_000),
-        ("2026-06-01 09:35:00", 100.20, 100.80, 100.00, 100.60, 9_000),
-        ("2026-06-01 09:40:00", 100.60, 101.00, 100.30, 100.90, 8_000),
-        ("2026-06-01 09:45:00", 100.90, 105.50, 100.80, 105.00, 50_000),  # bar N
-        ("2026-06-01 09:50:00", 103.50, 104.00, 103.00, 103.80, 20_000),  # bar N+1 (gap down)
-        ("2026-06-01 09:55:00", 103.80, 108.00, 103.70, 107.50, 30_000),  # last bar, no N+1
+        (f"{day} 09:30:00", 100.00, 100.50, 99.50, 100.20, 10_000),
+        (f"{day} 09:35:00", 100.20, 100.80, 100.00, 100.60, 9_000),
+        (f"{day} 09:40:00", 100.60, 101.00, 100.30, 100.90, 8_000),
+        (f"{day} 09:45:00", 100.90, 105.50, 100.80, 105.00, 50_000),  # bar N
+        (f"{day} 09:50:00", 103.50, 104.00, 103.00, 103.80, 20_000),  # bar N+1 (gap down)
+        (f"{day} 09:55:00", 103.80, 108.00, 103.70, 107.50, 30_000),  # last bar, no N+1
     ]
     bars = []
     running_hod = float("-inf")
@@ -93,21 +120,22 @@ def make_trade_log():
             after T3: cum=1300  peak=1300  dd=500   (peak updates before dd each step)
             after T4: cum=300   peak=1300  dd=1000  <- max_drawdown_usd = 1000.00
     """
+    day1, day2 = recent_session_days(2)
     return [
         {
             "code": "US.AAA", "entry_price": 100.00, "exit_price": 110.00, "quantity": 100,
-            "exit_reason": "TARGET", "r_multiple": 2.0, "closed_at": "2026-06-01 10:00:00",
+            "exit_reason": "TARGET", "r_multiple": 2.0, "closed_at": f"{day1} 10:00:00",
         },
         {
             "code": "US.BBB", "entry_price": 100.00, "exit_price": 95.00, "quantity": 100,
-            "exit_reason": "STOP", "r_multiple": -1.0, "closed_at": "2026-06-01 11:00:00",
+            "exit_reason": "STOP", "r_multiple": -1.0, "closed_at": f"{day1} 11:00:00",
         },
         {
             "code": "US.CCC", "entry_price": 50.00, "exit_price": 54.00, "quantity": 200,
-            "exit_reason": "TRAIL", "r_multiple": 1.5, "closed_at": "2026-06-02 10:00:00",
+            "exit_reason": "TRAIL", "r_multiple": 1.5, "closed_at": f"{day2} 10:00:00",
         },
         {
             "code": "US.DDD", "entry_price": 50.00, "exit_price": 45.00, "quantity": 200,
-            "exit_reason": "STOP", "r_multiple": -1.0, "closed_at": "2026-06-02 11:00:00",
+            "exit_reason": "STOP", "r_multiple": -1.0, "closed_at": f"{day2} 11:00:00",
         },
     ]

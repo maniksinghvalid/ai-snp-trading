@@ -23,6 +23,13 @@ mod = pytest.importorskip("backtester.feed")
 SimulatedBarFeed = mod.SimulatedBarFeed
 BacktestWindowError = mod.BacktestWindowError
 
+from tests.backtester.fixtures import recent_session_days
+
+# Runtime-derived anchors (never hardcoded literals) so the rolling ~60-calendar-day
+# window guard (_enforce_window) can never turn this suite red on a future calendar
+# date (06-12 gap-closure, WR-06 time bomb).
+_DAY1, _DAY2 = recent_session_days(2)
+
 
 def _empty_yf_download(*args, **kwargs):
     """Mock yfinance.download returning an empty frame -- feed must not silently proceed."""
@@ -34,9 +41,9 @@ def test_replay_yields_chronologically_ordered_bars_with_computed_running_fields
     """replay(day) yields bars sorted by time_key with point-in-time hod/lod/cum_volume."""
     with patch("yfinance.download") as mock_dl:
         mock_dl.return_value = _make_multi_bar_frame()
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                  cache_dir=str(tmp_path))
-        bars = list(feed.replay("2026-06-01"))
+        bars = list(feed.replay(_DAY1))
 
     assert len(bars) >= 3
     time_keys = [b["time_key"] for b in bars if b["code"] == "US.TEST"]
@@ -54,16 +61,16 @@ def test_next_bar_returns_strictly_next_bar_or_none_at_end(tmp_path):
     """next_bar(code, after) returns the first bar with time_key > after, else None."""
     with patch("yfinance.download") as mock_dl:
         mock_dl.return_value = _make_multi_bar_frame()
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                  cache_dir=str(tmp_path))
-        list(feed.replay("2026-06-01"))  # populate feed's internal bar store
+        list(feed.replay(_DAY1))  # populate feed's internal bar store
 
-        first_key = "2026-06-01 09:30:00"
+        first_key = f"{_DAY1} 09:30:00"
         nxt = feed.next_bar("US.TEST", after=first_key)
         assert nxt is not None
         assert nxt["time_key"] > first_key
 
-        last_key = "2026-06-01 09:55:00"
+        last_key = f"{_DAY1} 09:55:00"
         assert feed.next_bar("US.TEST", after=last_key) is None, (
             "next_bar past the last bar must return None, never raise or wrap around"
         )
@@ -87,14 +94,14 @@ def test_second_load_reads_csv_cache_zero_network_calls(tmp_path):
     construction over the identical range must hit both CSV caches and add zero calls.
     """
     with patch("yfinance.download", side_effect=_dispatch_by_prepost) as mock_dl:
-        feed1 = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed1 = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                   cache_dir=str(tmp_path))
-        list(feed1.replay("2026-06-01"))
+        list(feed1.replay(_DAY1))
         assert mock_dl.call_count == 2
 
-        feed2 = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed2 = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                   cache_dir=str(tmp_path))
-        list(feed2.replay("2026-06-01"))
+        list(feed2.replay(_DAY1))
         assert mock_dl.call_count == 2, "second load must hit the CSV cache, not the network"
 
 
@@ -102,9 +109,9 @@ def test_moomoo_code_normalization_via_yfinance_to_moomoo(tmp_path):
     """Bar dicts carry moomoo-format codes derived via yfinance_to_moomoo (BRK-B edge case)."""
     with patch("yfinance.download") as mock_dl:
         mock_dl.return_value = _make_multi_bar_frame()
-        feed = SimulatedBarFeed(["US.BRK-B"], start="2026-06-01", end="2026-06-01",
+        feed = SimulatedBarFeed(["US.BRK-B"], start=_DAY1, end=_DAY1,
                                  cache_dir=str(tmp_path))
-        bars = list(feed.replay("2026-06-01"))
+        bars = list(feed.replay(_DAY1))
     assert bars
     assert all(b["code"] == "US.BRK-B" for b in bars)
 
@@ -122,9 +129,9 @@ def _dispatch_by_prepost(*args, **kwargs):
 def test_premarket_highs_excludes_bars_at_or_after_0930(tmp_path):
     """premarket_highs() counts only ET bars before 09:30 -- a 09:35 bar's high must not count."""
     with patch("yfinance.download", side_effect=_dispatch_by_prepost):
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                  cache_dir=str(tmp_path))
-        highs = feed.premarket_highs("2026-06-01")
+        highs = feed.premarket_highs(_DAY1)
 
     assert highs == {"US.TEST": 102.0}, (
         "the 09:35 bar's high=250.0 must be excluded -- only pre-09:30 bars count"
@@ -140,11 +147,11 @@ def test_premarket_highs_keyed_correctly_per_distinct_day(tmp_path):
         return _make_two_day_frame()  # RTH bars on BOTH days -- satisfies the coverage guard
 
     with patch("yfinance.download", side_effect=_two_day_dispatch):
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-02",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY2,
                                  cache_dir=str(tmp_path))
 
-    highs_day1 = feed.premarket_highs("2026-06-01")
-    highs_day2 = feed.premarket_highs("2026-06-02")
+    highs_day1 = feed.premarket_highs(_DAY1)
+    highs_day2 = feed.premarket_highs(_DAY2)
     assert highs_day1 == {"US.TEST": 102.0}
     assert highs_day2 == {"US.TEST": 111.0}
     assert highs_day1 != highs_day2
@@ -155,9 +162,9 @@ def test_synthetic_today_price_is_premarket_only_not_rth(tmp_path):
     today_price = latest premarket close, today_high = max premarket high -- both must
     differ from the day's RTH close (107.50) / RTH max high (108.00) fixture values."""
     with patch("yfinance.download", side_effect=_dispatch_by_prepost):
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                  cache_dir=str(tmp_path))
-        today_price = feed.synthetic_today_price("US.TEST", "2026-06-01")
+        today_price = feed.synthetic_today_price("US.TEST", _DAY1)
 
     assert today_price is not None
     assert today_price.today_price == 101.5, "today_price must equal the latest premarket bar's close"
@@ -170,7 +177,7 @@ def test_synthetic_today_price_is_premarket_only_not_rth(tmp_path):
 def test_synthetic_today_price_none_without_premarket_bars(tmp_path):
     """synthetic_today_price returns None for a day/code with zero premarket bars."""
     with patch("yfinance.download", side_effect=_dispatch_by_prepost):
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-01",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY1,
                                  cache_dir=str(tmp_path))
         assert feed.synthetic_today_price("US.TEST", "2099-01-01") is None
 
@@ -181,8 +188,8 @@ def _make_two_day_premarket_frame():
     import pandas as pd
 
     index = pd.to_datetime([
-        "2026-06-01 09:00:00", "2026-06-01 09:15:00", "2026-06-01 09:35:00",
-        "2026-06-02 09:00:00", "2026-06-02 09:15:00",
+        f"{_DAY1} 09:00:00", f"{_DAY1} 09:15:00", f"{_DAY1} 09:35:00",
+        f"{_DAY2} 09:00:00", f"{_DAY2} 09:15:00",
     ]).tz_localize("America/New_York")
     return pd.DataFrame({
         "Open": [100.0, 100.5, 200.0, 109.0, 110.0],
@@ -197,7 +204,7 @@ def test_traversal_symbol_rejected_before_any_cache_or_network_access(tmp_path):
     """T-06-03: a symbol with path separators must raise ValueError, never build a cache path."""
     with patch("yfinance.download") as mock_dl:
         with pytest.raises(ValueError):
-            SimulatedBarFeed(["US.../../evil"], start="2026-06-01", end="2026-06-01",
+            SimulatedBarFeed(["US.../../evil"], start=_DAY1, end=_DAY1,
                              cache_dir=str(tmp_path))
         mock_dl.assert_not_called()
     assert list(tmp_path.iterdir()) == [], "no cache file may be created for a rejected symbol"
@@ -223,26 +230,26 @@ def test_coverage_guard_names_the_uncovered_trading_day(tmp_path):
     """CR-03: a two-trading-day range with bars for only day 1 raises BacktestWindowError
     naming day 2."""
     with patch("yfinance.download") as mock_dl:
-        mock_dl.return_value = _make_multi_bar_frame()  # bars only on 2026-06-01
+        mock_dl.return_value = _make_multi_bar_frame()  # bars only on _DAY1
         with pytest.raises(BacktestWindowError) as exc_info:
-            SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-02",
+            SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY2,
                              cache_dir=str(tmp_path))
-    assert "2026-06-02" in str(exc_info.value)
+    assert _DAY2 in str(exc_info.value)
 
 
 def test_next_bar_never_crosses_a_session_boundary(tmp_path):
     """CR-04: next_bar must not return the following day's open as the "next" bar."""
     with patch("yfinance.download") as mock_dl:
         mock_dl.return_value = _make_two_day_frame()
-        feed = SimulatedBarFeed(["US.TEST"], start="2026-06-01", end="2026-06-02",
+        feed = SimulatedBarFeed(["US.TEST"], start=_DAY1, end=_DAY2,
                                  cache_dir=str(tmp_path))
 
-    assert feed.next_bar("US.TEST", after="2026-06-01 15:55:00") is None, (
+    assert feed.next_bar("US.TEST", after=f"{_DAY1} 15:55:00") is None, (
         "day D's last bar must not fill on day D+1's open"
     )
-    nxt = feed.next_bar("US.TEST", after="2026-06-01 10:05:00")
+    nxt = feed.next_bar("US.TEST", after=f"{_DAY1} 10:05:00")
     assert nxt is not None
-    assert nxt["time_key"] == "2026-06-01 10:10:00"
+    assert nxt["time_key"] == f"{_DAY1} 10:10:00"
 
 
 def _make_multi_bar_frame_for(day: str):
@@ -266,8 +273,8 @@ def _make_two_day_frame():
     import pandas as pd
 
     index = pd.to_datetime([
-        "2026-06-01 10:05:00", "2026-06-01 10:10:00", "2026-06-01 15:55:00",
-        "2026-06-02 09:30:00", "2026-06-02 09:35:00",
+        f"{_DAY1} 10:05:00", f"{_DAY1} 10:10:00", f"{_DAY1} 15:55:00",
+        f"{_DAY2} 09:30:00", f"{_DAY2} 09:35:00",
     ]).tz_localize("America/New_York")
     return pd.DataFrame({
         "Open": [100.00, 100.20, 100.60, 101.00, 101.20],
@@ -383,8 +390,8 @@ def test_dashed_and_dotted_real_tickers_still_accepted(tmp_path):
     """T-06-03 guard must not reject legitimate symbol shapes (BRK-B, BF.B)."""
     with patch("yfinance.download") as mock_dl:
         mock_dl.return_value = _make_multi_bar_frame()
-        feed = SimulatedBarFeed(["US.BRK-B"], start="2026-06-01",
-                                end="2026-06-01", cache_dir=str(tmp_path))
+        feed = SimulatedBarFeed(["US.BRK-B"], start=_DAY1,
+                                end=_DAY1, cache_dir=str(tmp_path))
     assert feed.codes == ["US.BRK-B"]
 
 
@@ -393,7 +400,7 @@ def _make_premarket_5m_frame():
     import pandas as pd
 
     index = pd.to_datetime([
-        "2026-06-01 09:00:00", "2026-06-01 09:15:00", "2026-06-01 09:35:00",
+        f"{_DAY1} 09:00:00", f"{_DAY1} 09:15:00", f"{_DAY1} 09:35:00",
     ]).tz_localize("America/New_York")
     return pd.DataFrame({
         "Open": [100.0, 100.5, 200.0],
@@ -409,8 +416,8 @@ def _make_multi_bar_frame():
     import pandas as pd
 
     index = pd.to_datetime([
-        "2026-06-01 09:30:00", "2026-06-01 09:35:00", "2026-06-01 09:40:00",
-        "2026-06-01 09:45:00", "2026-06-01 09:50:00", "2026-06-01 09:55:00",
+        f"{_DAY1} 09:30:00", f"{_DAY1} 09:35:00", f"{_DAY1} 09:40:00",
+        f"{_DAY1} 09:45:00", f"{_DAY1} 09:50:00", f"{_DAY1} 09:55:00",
     ]).tz_localize("America/New_York")
     return pd.DataFrame({
         "Open": [100.00, 100.20, 100.60, 100.90, 103.50, 103.80],
