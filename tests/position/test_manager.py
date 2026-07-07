@@ -2273,6 +2273,67 @@ def test_exit_alert_fires_after_manage_exit(tmp_state_db):
         store.close()
 
 
+def test_stop_out_alert_uses_stop_as_exit_proxy(tmp_state_db):
+    """Finding 2.7 regression: _trigger_stop_out's pre-fill exit alert must
+    compute R-multiple from pos.trail_stop (the price we're stopping out at),
+    NOT from pos.avg_fill_price (which equals the entry price here and would
+    yield R ~= 0 — a meaningless alert).
+    """
+    from bot.state.store import StateStore
+
+    mock_engine = MagicMock()
+    mock_engine.manage_exit = AsyncMock(return_value=100)
+
+    mock_strategy = MagicMock()
+    mock_strategy.compute_swing_low_2_2 = MagicMock(return_value=96.0)
+
+    alert_calls = []
+
+    def on_exit_alert_cb(code, reason, r_multiple):
+        alert_calls.append((code, reason, r_multiple))
+
+    store = StateStore(db_path=tmp_state_db).open()
+    try:
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=store,
+            engine=mock_engine,
+            cfg=cfg,
+            strategy=mock_strategy,
+            on_exit_alert=on_exit_alert_cb,
+        )
+
+        # entry=100, initial_stop=98 (risk=2), trail_stop=97 (one risk-unit-ish
+        # below entry), avg_fill_price=entry_price=100 — if the alert used
+        # avg_fill_price, R would be exactly 0 (meaningless).
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE,
+            entry_price=100.0,
+            initial_stop=98.0,
+            trail_stop=97.0,
+            avg_fill_price=100.0,
+            full_quantity=100,
+            remaining_quantity=100,
+        )
+        mgr._positions["US.AAPL"] = pos
+        store.upsert_position(pos)
+
+        # bar.close=96.0 is below trail_stop=97.0 — triggers stop-out path
+        bar = _make_bar(close=96.0)
+        asyncio.run(mgr.on_bar(bar))
+
+        assert len(alert_calls) == 1, f"Expected one exit alert, got {alert_calls}"
+        code, reason, r_multiple = alert_calls[0]
+        assert code == "US.AAPL"
+        # (trail_stop - entry) / (entry - initial_stop) = (97-100)/(100-98) = -1.5
+        assert abs(r_multiple - (-1.5)) < 1e-6, (
+            f"Expected R computed from trail_stop (-1.5), got {r_multiple} "
+            "(avg_fill_price-based R would be 0.0 — meaningless)"
+        )
+    finally:
+        store.close()
+
+
 # ============================================================
 # Test: manager.adopt_orphan() — CR-03 in-memory registration
 # ============================================================

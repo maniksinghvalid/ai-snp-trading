@@ -928,7 +928,10 @@ class PositionManager:
                     try:
                         entry = pos.entry_price or 0.0
                         stop = pos.initial_stop or 0.0
-                        exit_proxy = pos.avg_fill_price or entry
+                        # Finding 2.7: use the stop price (what we're stopping out
+                        # at) as the exit proxy, not avg_fill_price (the ENTRY
+                        # fill price — always ~= entry, which made R ~= 0).
+                        exit_proxy = pos.trail_stop or entry
                         risk = entry - stop
                         r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
                         self._on_exit_alert(
@@ -951,7 +954,8 @@ class PositionManager:
                         try:
                             entry = pos.entry_price or 0.0
                             stop = pos.initial_stop or 0.0
-                            exit_proxy = pos.avg_fill_price or entry
+                            # Finding 2.7: same stop-as-exit-proxy fix as above.
+                            exit_proxy = pos.trail_stop or entry
                             risk = entry - stop
                             r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
                             self._on_exit_alert(
