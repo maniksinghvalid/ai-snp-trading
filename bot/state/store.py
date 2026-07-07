@@ -28,6 +28,7 @@ import stat
 import tempfile
 import threading
 from typing import Optional
+from uuid import uuid4
 
 from bot.state.migrations import run_migrations
 
@@ -336,6 +337,73 @@ class StateStore:
                     pos.opened_at.isoformat() if pos.opened_at else None,
                     pos.updated_at.isoformat() if pos.updated_at else None,
                     pos.broker_stop_order_id,
+                ),
+            )
+            self._conn.commit()
+
+    def record_trade(
+        self,
+        position_id: str,
+        code: str,
+        entry_price: float,
+        exit_price: float,
+        quantity: int,
+        exit_reason: str,
+        r_multiple: Optional[float],
+        closed_at,
+        trade_id: Optional[str] = None,
+    ) -> None:
+        """Insert a closed-trade row into the trades table atomically (guarded write).
+
+        Mirrors upsert_position's structure exactly: acquire self._lock, run a single
+        parameterized INSERT (all values via '?' placeholders -- never string-formatted
+        into the SQL, T-06-11-01), then commit immediately (T-06-11-05).
+
+        This is the write BacktestHarness._capture_closed_trades calls for every newly
+        CLOSED position (T-06-11-03) -- get_daily_trade_stats' DATE(closed_at) filter is
+        the sole reader SignalEngine's -2R circuit breaker (Gate 7) depends on. Purely
+        additive: no existing call site changes, so live behaviour is unaffected.
+
+        closed_at is normalised to an ISO-8601 string: a datetime (the harness passes
+        pos.updated_at, a tz-aware ET value) is converted via .isoformat(); anything else
+        is coerced with str(). An ET afternoon closed_at converts to the SAME UTC calendar
+        date for RTH close times, so DATE(closed_at) correctly matches the replay clock's
+        now_et().date() session key (D-09 convention).
+
+        Args:
+            position_id:  The originating position_id UUID string.
+            code:         Moomoo-format stock code (e.g. "US.AAPL").
+            entry_price:  Actual average entry fill price.
+            exit_price:   Actual average exit fill price (qty-weighted if partial+final).
+            quantity:     Total exited quantity (position.full_quantity).
+            exit_reason:  e.g. "stop_out", "breakeven", "trail_stop", "force_close".
+            r_multiple:   (exit_price - entry_price) / (entry_price - initial_stop); may
+                          be None (nullable column, matches migration 0001 schema).
+            closed_at:    datetime (isoformat() called) or an already-ISO string.
+            trade_id:     Optional explicit trade_id; a uuid4() string is generated when
+                          None (mirrors record_position's PK-generation-free pattern --
+                          trades has no natural caller-supplied PK equivalent).
+        """
+        trade_id = trade_id or str(uuid4())
+        closed_at_str = (
+            closed_at.isoformat() if hasattr(closed_at, "isoformat") else str(closed_at)
+        )
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO trades
+                   (trade_id, position_id, code, entry_price, exit_price, quantity,
+                    exit_reason, r_multiple, closed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    trade_id,
+                    position_id,
+                    code,
+                    entry_price,
+                    exit_price,
+                    quantity,
+                    exit_reason,
+                    r_multiple,
+                    closed_at_str,
                 ),
             )
             self._conn.commit()
