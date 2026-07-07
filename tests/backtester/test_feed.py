@@ -278,6 +278,107 @@ def _make_two_day_frame():
     }, index=index)
 
 
+def test_union_index_nan_rows_do_not_crash_or_poison_premarket_high(tmp_path):
+    """06-VERIFICATION Gap 1: a realistic multi-ticker frame with all-NaN union-index
+    padding rows (the NORMAL shape yf.download(group_by="ticker") emits when a symbol
+    lacks a bar at a peer's timestamp -- halts, illiquid names, staggered premarket
+    coverage) must not crash SimulatedBarFeed construction (T-06-10-01) and must never
+    poison premarket_highs() with a NaN (T-06-10-02). US.LIQUID has real bars at every
+    timestamp; US.HALTED shares those same timestamps but is NaN at one RTH bar and one
+    premarket bar -- the exact union-index padding shape, not an all-NaN frame (which
+    get_ticker_frame already filters out entirely, so it wouldn't reach _materialize_bars
+    at all)."""
+    import math
+
+    import pandas as pd
+    import pandas_market_calendars as mcal
+
+    # Runtime-derived recent NYSE trading day -- no hardcoded date literal, so this test
+    # never contributes to the 06-12 window-guard time bomb (_enforce_window requires
+    # start within ~60 calendar days of "now").
+    day = mcal.get_calendar("NYSE").valid_days(
+        start_date=(datetime.now() - timedelta(days=15)).date(),
+        end_date=(datetime.now() - timedelta(days=2)).date(),
+    )[-1].strftime("%Y-%m-%d")
+
+    rth_index = pd.to_datetime([f"{day} 09:30:00", f"{day} 09:35:00"]).tz_localize(
+        "America/New_York"
+    )
+    pre_index = pd.to_datetime([f"{day} 09:00:00", f"{day} 09:15:00"]).tz_localize(
+        "America/New_York"
+    )
+
+    liquid_rth = pd.DataFrame(
+        {"Open": [100.0, 100.5], "High": [101.0, 101.5], "Low": [99.5, 100.0],
+         "Close": [100.5, 101.0], "Volume": [10_000, 11_000]},
+        index=rth_index,
+    )
+    liquid_pre = pd.DataFrame(
+        {"Open": [98.0, 98.5], "High": [99.0, 99.5], "Low": [97.5, 98.0],
+         "Close": [98.5, 99.0], "Volume": [500, 600]},
+        index=pre_index,
+    )
+    # US.HALTED: real bar at the FIRST shared timestamp, all-NaN union-index padding at
+    # the SECOND -- reproduces the verifier's exact crash site (int(row["volume"]) on a
+    # NaN row) while keeping the frame as a whole non-all-NaN (get_ticker_frame only
+    # filters a frame that is NaN in EVERY row).
+    halted_rth = pd.DataFrame(
+        {"Open": [55.0, float("nan")], "High": [56.0, float("nan")],
+         "Low": [54.5, float("nan")], "Close": [55.5, float("nan")],
+         "Volume": [2_000, float("nan")]},
+        index=rth_index,
+    )
+    halted_pre = pd.DataFrame(
+        {"Open": [40.0, float("nan")], "High": [41.0, float("nan")],
+         "Low": [39.5, float("nan")], "Close": [40.5, float("nan")],
+         "Volume": [300, float("nan")]},
+        index=pre_index,
+    )
+
+    def _dispatch_union_padded(*_args, **kwargs):
+        tickers = kwargs.get("tickers") or []
+        if isinstance(tickers, str):
+            tickers = [tickers]
+        interval = kwargs.get("interval")
+        prepost = kwargs.get("prepost", False)
+        if interval != "5m":
+            return {}
+        result = {}
+        if prepost:
+            if "LIQUID" in tickers:
+                result["LIQUID"] = liquid_pre
+            if "HALTED" in tickers:
+                result["HALTED"] = halted_pre
+        else:
+            if "LIQUID" in tickers:
+                result["LIQUID"] = liquid_rth
+            if "HALTED" in tickers:
+                result["HALTED"] = halted_rth
+        return result
+
+    with patch("yfinance.download", side_effect=_dispatch_union_padded):
+        # Pre-fix: raised ValueError: cannot convert float NaN to integer.
+        feed = SimulatedBarFeed(
+            ["US.LIQUID", "US.HALTED"], start=day, end=day, cache_dir=str(tmp_path)
+        )
+        highs = feed.premarket_highs(day)
+
+    assert highs, "at least one code must have a premarket high"
+    for code, high in highs.items():
+        assert not math.isnan(high), f"{code}'s premarket high must never be NaN"
+    if "US.HALTED" in highs:
+        assert highs["US.HALTED"] == 41.0, "HALTED's real premarket bar must survive dropna"
+
+    # Mirrors the verifier's own reproduction directly: an all-NaN lowercase-column frame
+    # fed straight into _materialize_bars must not raise.
+    all_nan_frame = pd.DataFrame(
+        {"open": [float("nan")], "high": [float("nan")], "low": [float("nan")],
+         "close": [float("nan")], "volume": [float("nan")]},
+        index=pd.to_datetime([f"{day} 09:40:00"]).tz_localize("America/New_York"),
+    )
+    assert feed._materialize_bars("HALTED", all_nan_frame) == []
+
+
 def test_dashed_and_dotted_real_tickers_still_accepted(tmp_path):
     """T-06-03 guard must not reject legitimate symbol shapes (BRK-B, BF.B)."""
     with patch("yfinance.download") as mock_dl:
