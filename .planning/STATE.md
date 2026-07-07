@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-07-07T01:52:26.794Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-07-07T02:06:48.761Z"
 last_activity: 2026-07-07 -- Phase 06 execution started
 progress:
   total_phases: 9
   completed_phases: 6
   total_plans: 37
-  completed_plans: 29
+  completed_plans: 30
   percent: 67
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 06 (backtester) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-07-07 -- Phase 06 execution started
 
@@ -61,6 +61,7 @@ Progress: [██████████░░░░░░░░░░] 3/6 pha
 | Phase 03-intraday-signal-and-risk-engine P03 | 310 | 2 tasks | 4 files |
 | Phase 07.1 P01 | 6 minutes | 2 tasks | 2 files |
 | Phase 06-backtester PP01 | 12 minutes | 2 tasks tasks | 7 files files |
+| Phase 06 P02 | 25 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -118,6 +119,9 @@ Recent decisions affecting current work:
 - 07.1-01: Wiring-regression pattern — drive real bot.main.main() with only I/O seams patched (MoomooGateway/StateStore/asyncio.run), capture the real PositionManager, assert _gateway identity + arm_stop_protection→subscribe_quote dispatch; hand-built PositionManager(gateway=mock) is what let this ship broken
 - [Phase ?]: 06-01: fixture bars engineered so bar N close (105.00) and bar N+1 open (103.50) are trivially distinguishable — no look-ahead false negatives possible
 - [Phase ?]: 06-01: test_execution.py uses a hand-rolled _FakeFeed (not backtester.feed.SimulatedBarFeed) to keep the stub dependent only on fixtures.py per the plan's key_links
+- [Phase ?]: 06-02: next_bar(code, after) param named 'after' (matches PATTERNS.md SimulatedExecution call-site + test stub, not the plan prose's 'after_time_key')
+- [Phase ?]: 06-02: premarket_highs() reuses bot.scanner.fetcher._download_batch directly (no public prepost=True 5m wrapper exists) rather than duplicating retry/degradation logic
+- [Phase ?]: 06-02: daily_bars()/intraday_5m_for_tod() return the RAW yf.download dict (not routed through get_ticker_frame) since _evaluate_symbol/_compute_tod_baselines expect the raw per-ticker frame themselves
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -150,6 +154,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T01:52:26.790Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-07-07T02:06:48.757Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None

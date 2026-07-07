@@ -84,9 +84,9 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 ### Backtesting
 
 - [ ] **BT-01**: Backtester replays historical 5m data through the exact same StrategyCore + PositionState FSM as the live bot
-- [ ] **BT-02**: Backtester enters at bar N+1 open (no look-ahead); gap/SMA200/premarket-high/RVOL computed point-in-time
+- [x] **BT-02**: Backtester enters at bar N+1 open (no look-ahead); gap/SMA200/premarket-high/RVOL computed point-in-time
 - [ ] **BT-03**: Backtester produces a performance report (win rate, avg R, max drawdown, profit factor, per-trade CSV)
-- [ ] **BT-04**: Backtest historical data is sourced from yfinance (or flat CSV/Parquet export), not Moomoo, avoiding broker historical-quota limits at 500-symbol scale
+- [x] **BT-04**: Backtest historical data is sourced from yfinance (or flat CSV/Parquet export), not Moomoo, avoiding broker historical-quota limits at 500-symbol scale
 
 ### Strategy Optimization (Phase 7)
 
@@ -174,9 +174,9 @@ Which phases cover which requirements.
 | ALERT-04 | Phase 5 | Pending |
 | DASH-01 | Phase 5 | Pending |
 | BT-01 | Phase 6 | Pending |
-| BT-02 | Phase 6 | Pending |
+| BT-02 | Phase 6 | Complete |
 | BT-03 | Phase 6 | Pending |
-| BT-04 | Phase 6 | Pending |
+| BT-04 | Phase 6 | Complete |
 | SIG-RVOL-TOD | Phase 7 | Planned (07-01, 07-02, 07-05) |
 | RISK-TICK-STOP | Phase 7 | Built (07-01, 07-03) but dead in production — wiring gap tracked as Phase 07.1 |
 | RISK-CIRCUIT | Phase 7 | Planned (07-01, 07-05) |
