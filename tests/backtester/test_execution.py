@@ -121,6 +121,66 @@ def test_manage_exit_fills_at_next_bar_open_and_returns_int_qty():
     assert exit_row in execution.fills
 
 
+def test_manage_exit_force_close_fills_at_last_bar_close_and_returns_full_qty():
+    """CR-05 mechanic: force-close mode fills at the last observed bar close, never next_bar."""
+    bars = make_ahead_only_5m_dataset()
+    bar_n = bars[3]  # close=105.00 -- the "final observed bar" in this scenario
+
+    execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
+    execution.on_bar(bar_n)
+    execution._force_close = True
+
+    filled_qty = asyncio.run(
+        execution.manage_exit(
+            code=bar_n["code"], qty=7, side="SELL",
+            escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
+        )
+    )
+
+    assert filled_qty == 7
+    assert execution.exit_fills[-1]["exit_price"] == bar_n["close"]
+    assert execution.exit_fills[-1]["qty"] == 7
+    assert execution.exit_fills[-1] in execution.fills
+
+
+def test_manage_exit_force_close_with_no_recorded_bar_returns_zero():
+    """Defensive: force-close with no on_bar() call yet for this code must not fabricate a fill."""
+    bars = make_ahead_only_5m_dataset()
+    execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
+    execution._force_close = True
+
+    filled_qty = asyncio.run(
+        execution.manage_exit(
+            code="US.NEVER_SEEN", qty=3, side="SELL",
+            escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
+        )
+    )
+
+    assert filled_qty == 0
+    assert execution.exit_fills == []
+    assert execution.fills == []
+
+
+def test_manage_exit_returns_zero_and_records_no_fill_when_no_next_bar():
+    """WR-01: a stop-out with no next bar returns 0 and stays open -- no exit_price=None fabrication."""
+    bars = make_ahead_only_5m_dataset()
+    last_bar = bars[-1]  # no N+1 bar exists after this one
+
+    execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
+    execution.on_bar(last_bar)
+
+    filled_qty = asyncio.run(
+        execution.manage_exit(
+            code=last_bar["code"], qty=5, side="SELL",
+            escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
+        )
+    )
+
+    assert filled_qty == 0
+    assert execution.exit_fills == []
+    assert execution.fills == []
+
+
 def test_simulated_gateway_get_positions_excludes_awaiting_fill_and_closed():
     fake_manager = SimpleNamespace(
         _positions={
