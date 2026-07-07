@@ -434,20 +434,34 @@ class TestFetchPremarketHighs:
 # SIG-04 / RISK-04: concurrent cap
 # ============================================================
 
+def _insert_position_row(store: StateStore, position_id: str, code: str,
+                          remaining_quantity: int, phase: str = "OPEN") -> None:
+    """Insert a minimal positions row directly (bot-owned DB truth for the cap gate)."""
+    store.conn.execute(
+        """INSERT INTO positions
+           (position_id, code, phase, entry_price, initial_stop, trail_stop,
+            full_quantity, remaining_quantity, opened_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (position_id, code, phase, 100.0, 99.0, 99.0,
+         100, remaining_quantity, "2026-06-24T09:30:00", "2026-06-24T09:30:00"),
+    )
+    store.conn.commit()
+
+
 class TestSignalEngineConcurrentCap:
     """No signal when open positions >= max_concurrent_positions."""
 
     def test_concurrent_cap(self):
         """
-        When the number of open broker positions equals cfg.max_concurrent_positions,
-        the signal engine emits no SignalEvent (SIG-04, RISK-04).
-        Below the cap, a passing setup still emits.
+        When the number of open bot-owned (DB) positions equals
+        cfg.max_concurrent_positions, the signal engine emits no SignalEvent
+        (SIG-04, RISK-04). Below the cap, a passing setup still emits.
         """
         cfg = make_cfg(max_concurrent_positions=3, max_trades_per_day=10)
 
         scan_date = "2026-06-24"
 
-        def make_positioned_store():
+        def make_positioned_store(n_open: int):
             s = StateStore(db_path=":memory:")
             s.open()
             s.conn.execute(
@@ -456,40 +470,79 @@ class TestSignalEngineConcurrentCap:
                 (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
             )
             s.conn.commit()
+            for i in range(n_open):
+                _insert_position_row(s, f"pos-{i}", f"US.X{i}", remaining_quantity=100)
             return s
 
         bar = make_bar(close=155.0, hod=154.0)
         premarket_highs = {"US.AAPL": 150.0}
 
-        # Simulate 3 open positions (= cap)
-        open_pos_df = pd.DataFrame({
-            "code": ["US.X1", "US.X2", "US.X3"],
-            "qty": [100, 100, 100],
-        })
-        gateway_at_cap = MagicMock()
-        gateway_at_cap.get_positions = AsyncMock(return_value=(0, open_pos_df))
+        # Broker snapshot is irrelevant to the cap count post-2.1 (may show
+        # anything, incl. manual holdings) — the gate now counts DB rows only.
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame({"code": ["US.X1"]})))
 
         in_window_time = datetime(2026, 6, 24, 10, 10, 0)
         with patch("bot.signal.signal_engine.now_et", return_value=in_window_time):
-            # AT cap: no signal
-            store_cap = make_positioned_store()
-            engine_at_cap = make_engine(cfg=cfg, gateway=gateway_at_cap, store=store_cap,
+            # AT cap: 3 bot-owned open DB positions, max=3 → no signal
+            store_cap = make_positioned_store(n_open=3)
+            engine_at_cap = make_engine(cfg=cfg, gateway=gateway, store=store_cap,
                                         premarket_highs=premarket_highs)
             result_at_cap = run(engine_at_cap.on_bar(bar))
-            assert result_at_cap is None, "At cap (3 positions, max=3), expected no signal"
+            assert result_at_cap is None, "At cap (3 DB positions, max=3), expected no signal"
 
-            # BELOW cap: signal should fire
-            below_cap_df = pd.DataFrame({
-                "code": ["US.X1", "US.X2"],
-                "qty": [100, 100],
-            })
-            gateway_below_cap = MagicMock()
-            gateway_below_cap.get_positions = AsyncMock(return_value=(0, below_cap_df))
-            store_below = make_positioned_store()
-            engine_below = make_engine(cfg=cfg, gateway=gateway_below_cap, store=store_below,
+            # BELOW cap: 2 bot-owned open DB positions, max=3 → signal fires
+            store_below = make_positioned_store(n_open=2)
+            engine_below = make_engine(cfg=cfg, gateway=gateway, store=store_below,
                                        premarket_highs=premarket_highs)
             result_below = run(engine_below.on_bar(bar))
-            assert result_below is not None, "Below cap (2 positions, max=3), expected signal"
+            assert result_below is not None, "Below cap (2 DB positions, max=3), expected signal"
+
+    def test_signal_engine_excludes_zero_qty_and_external_positions(self):
+        """
+        Regression (Finding 2.1): the concurrent-position cap must count only
+        bot-owned (DB positions table) rows with remaining_quantity > 0 — a
+        qty=0 row (fully exited but not yet marked CLOSED) and manual/external
+        holdings visible only in the broker snapshot on the shared account
+        must NOT count toward the cap.
+        """
+        cfg = make_cfg(max_concurrent_positions=2, max_trades_per_day=10)
+        scan_date = "2026-06-24"
+
+        store = StateStore(db_path=":memory:")
+        store.open()
+        store.conn.execute(
+            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
+        )
+        store.conn.commit()
+
+        # One qty=0 row (does not count) and one real qty>0 row (counts = 1).
+        _insert_position_row(store, "pos-zero", "US.ZERO", remaining_quantity=0)
+        _insert_position_row(store, "pos-real", "US.REAL", remaining_quantity=100)
+
+        # Broker snapshot reports 3 manual/external holdings not tracked in the
+        # DB positions table at all — these must never saturate the cap.
+        external_df = pd.DataFrame({
+            "code": ["US.EXT1", "US.EXT2", "US.EXT3"],
+            "qty": [50, 50, 50],
+        })
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, external_df))
+
+        bar = make_bar(close=155.0, hod=154.0)
+        premarket_highs = {"US.AAPL": 150.0}
+
+        in_window_time = datetime(2026, 6, 24, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window_time):
+            engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                                 premarket_highs=premarket_highs)
+            result = run(engine.on_bar(bar))
+            assert result is not None, (
+                "Only 1 bot-owned qty>0 DB position exists (below max=2) — "
+                "qty=0 row and 3 external broker rows must not count toward the cap"
+            )
 
 
 # ============================================================
@@ -577,12 +630,15 @@ class TestSignalEngineDailyCap:
         bar = make_bar(close=155.0, hod=154.0)
         premarket_highs = {"US.AAPL": 150.0}
 
-        # Simulate position count AT cap to block the signal
-        open_pos_df = pd.DataFrame({"code": ["US.X1", "US.X2", "US.X3"]})
+        # Broker snapshot is irrelevant to the cap post-2.1 (gate counts DB rows).
         gateway = MagicMock()
-        gateway.get_positions = AsyncMock(return_value=(0, open_pos_df))
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame({"code": ["US.X1"]})))
 
         store = self._make_daily_store(filled_count=0)
+        # Simulate 3 bot-owned open DB positions (= cap) to block the signal
+        _insert_position_row(store, "pos-x1", "US.X1", remaining_quantity=100)
+        _insert_position_row(store, "pos-x2", "US.X2", remaining_quantity=100)
+        _insert_position_row(store, "pos-x3", "US.X3", remaining_quantity=100)
 
         in_window_time = datetime(2026, 6, 24, 10, 10, 0)
         with patch("bot.signal.signal_engine.now_et", return_value=in_window_time):

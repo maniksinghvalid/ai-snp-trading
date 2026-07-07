@@ -594,8 +594,15 @@ class SignalEngine:
             )
             return None
 
-        # Count distinct open codes from broker truth (any non-empty DataFrame row = open)
-        open_position_count = len(positions_data) if hasattr(positions_data, "__len__") else 0
+        # Count only bot-owned (DB positions table) qty>0, non-CLOSED rows (Finding 2.1).
+        # The broker snapshot above may include manual/zero-qty holdings on a shared
+        # SIMULATE account (e.g. acc 1727266) — those must never saturate the cap.
+        db_positions = self._store.get_open_positions()
+        open_position_count = sum(
+            1
+            for p in db_positions
+            if (p.get("remaining_quantity") or 0) > 0 and p.get("phase") != "CLOSED"
+        )
 
         # Also check if this code is already in an open position (re-entry blocking)
         open_codes: set = set()
