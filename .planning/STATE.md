@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 06 — backtester
+**Current focus:** Phase 06.2 — code-review-remediation (waves 2-3, gated on live UAT sign-off)
 
 ## Current Position
 
 Phase: 06.2
 Plan: Not started
-Status: Executing Phase 06
+Status: Phase 06 complete (verified 4/4, secured 0 open, nyquist-compliant) — next: 06.2 waves 2-3
 Last activity: 2026-07-07
 
 Progress: [██████████░░░░░░░░░░] 3/6 phases (50%)
