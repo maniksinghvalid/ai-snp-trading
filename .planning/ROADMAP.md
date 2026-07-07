@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
-- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (6/6 plans executed 2026-07-07; verification gaps_found — 3 gap-closure plans (06-07..06-09) planned 2026-07-07 to fix 7 multi-day BLOCKERs CR-01..07 + WR-01)
+- [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (6/6 plans executed 2026-07-07; verification gaps_found — 3 gap-closure plans (06-07..06-09) planned 2026-07-07 to fix 7 multi-day BLOCKERs CR-01..07 + WR-01) (completed 2026-07-07)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
@@ -218,7 +218,7 @@ Plans:
 
 - [x] 06-07-PLAN.md — feed.py yfinance window + point-in-time (BT-02/BT-04): real 60-calendar-day 5m fetch matching the guard (CR-03), per-trading-day coverage check → BacktestWindowError naming uncovered days (CR-03), same-session next_bar (CR-04), one-time prepost=True premarket load → point-in-time premarket_highs (CR-02) + premarket-only synthetic_today_price (CR-07) [Gap Wave 1]
 - [x] 06-08-PLAN.md — execution.py exit-fill semantics (BT-01/BT-03): no-next-bar exit returns 0 with no phantom fill (WR-01), force-close mode fills at last observed bar close + returns full qty so force_close_all reaches CLOSED (CR-05 mechanic) [Gap Wave 2, blocked on 06-07]
-- [ ] 06-09-PLAN.md — harness.py multi-day correctness (BT-01/BT-02/BT-03): per-day premarket-high freeze applied in replay_day (CR-01), _WATCHLIST_CAP + entry gate on persisted watchlist (CR-06), EOD/end-of-run force_close_all with manager now_et rebind (CR-05), + 2+-trading-day regression test proving CR-01/CR-04/CR-05/CR-06 closed [Gap Wave 3, blocked on 06-07/06-08]
+- [x] 06-09-PLAN.md — harness.py multi-day correctness (BT-01/BT-02/BT-03): per-day premarket-high freeze applied in replay_day (CR-01), _WATCHLIST_CAP + entry gate on persisted watchlist (CR-06), EOD/end-of-run force_close_all with manager now_et rebind (CR-05), + 2+-trading-day regression test proving CR-01/CR-04/CR-05/CR-06 closed [Gap Wave 3, blocked on 06-07/06-08]
 
 ### Phase 7: Strategy Optimization
 
@@ -266,7 +266,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 8/9 | In Progress|  |
+| 6. Backtester | 9/9 | Complete   | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
   2. A regression test drives the actual `bot/main.py` (or `TradingBot`) construction path — not a hand-built `PositionManager(gateway=...)` — and asserts `arm_stop_protection()` calls `gateway.place_stop_order`/`subscribe_quote` rather than no-op'ing
   3. Full test suite stays green; no behavior change to the bar-close stop backstop (D-03) which remains active regardless
 
-**Plans:** 8/9 plans executed
+**Plans:** 9/9 plans complete
 
 Plans:
 **Wave 1**
