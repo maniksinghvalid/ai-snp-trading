@@ -346,3 +346,170 @@ def test_replay_day_force_closes_position_left_open_at_eod(monkeypatch, tmp_path
         "force-close exit_price must be the last observed bar's close (BT-02/CR-05), "
         "never a fabricated or None price."
     )
+
+
+# ============================================================
+# Multi-day (2 NYSE trading days) regression: CR-01/CR-04/CR-05/CR-06 (Task 3)
+# ============================================================
+#
+# Two symbols isolate the two distinct regressions under test on the SAME days:
+#   US.TESTA -- fires and fills mid-day1 (2026-06-01), stays open the rest of the day,
+#               and is force-closed at day1's EOD (proves CR-01 + CR-05).
+#   US.TESTB -- fires ONLY on day1's own LAST bar (no further TESTB bars that day) but
+#               DOES have a later bar on day2 -- proving next_bar() must never treat
+#               that day2 bar as day1's "N+1" fill (CR-04), through the full harness.
+_MD_DAY1 = "2026-06-01"
+_MD_DAY2 = "2026-06-02"
+
+# Day1: warm-up + breakout signal (closes at its own high, big volume spike) that must
+# be gated by DAY 1's OWN premarket high (98.0) -- NOT day 2's much higher one (130.0);
+# if CR-01's clobber bug were reintroduced, day1's Gate 1 would see 130.0 and 105.00
+# would fail to break it, producing zero entries. No bar after 10:25 -- the filled
+# position simply stays open until force_close_all reaches it at day1's EOD.
+_TESTA_BARS = [
+    ("2026-06-01 10:05:00", 100.00, 100.50, 99.50, 100.20, 1_000),
+    ("2026-06-01 10:10:00", 100.20, 100.80, 100.00, 100.60, 1_000),
+    ("2026-06-01 10:15:00", 100.60, 101.00, 100.30, 100.90, 1_000),
+    ("2026-06-01 10:20:00", 100.90, 105.00, 100.80, 105.00, 40_000),
+    ("2026-06-01 10:25:00", 103.00, 103.50, 101.00, 103.20, 5_000),
+    # Quiet day2 bar: below day2's own (higher) premarket high, so it never re-enters --
+    # only present so the feed has non-empty day2 coverage for this code too.
+    ("2026-06-02 10:05:00", 100.00, 100.20, 99.80, 100.00, 1_000),
+]
+
+# Day1: TESTB's ONLY bar this day IS its signal bar (closes at its own high, volume
+# spike) -- there is no later TESTB bar on day1, so the entry can only ever fill on a
+# STRICTLY-later bar; a day2 bar deliberately exists so a buggy next_bar() that
+# ignores the session boundary would wrongly return it as the "N+1" fill.
+_TESTB_BARS = [
+    ("2026-06-01 10:20:00", 100.90, 108.00, 100.80, 108.00, 40_000),
+    ("2026-06-02 10:05:00", 100.00, 100.00, 99.00, 99.50, 1_000),
+]
+
+
+def _make_premarket_frame_for(day1_high, day2_high=None):
+    """Premarket 5m frame with a distinct, engineered high per day -- day2's high is
+    deliberately HIGHER than day1's so a cross-day clobber (CR-01) would be observable
+    (a correctly-gated day1 entry would fail if it saw day2's higher number instead)."""
+    idx = ["2026-06-01 09:00:00"]
+    highs = [day1_high]
+    if day2_high is not None:
+        idx.append("2026-06-02 09:00:00")
+        highs.append(day2_high)
+    index = pd.to_datetime(idx).tz_localize("America/New_York")
+    return pd.DataFrame(
+        {"Open": [h - 1.0 for h in highs], "High": highs, "Low": [h - 2.0 for h in highs],
+         "Close": [h - 0.5 for h in highs], "Volume": [2_000] * len(highs)},
+        index=index,
+    )
+
+
+def _mock_yf_download_multiday(*_args, **kwargs):
+    """Multi-symbol yfinance.download stub: returns a {symbol: frame} dict (never a bare
+    DataFrame) since _to_data_dict only accepts a bare flat-column frame for a SINGLE
+    requested ticker -- this feed requests US.TESTA + US.TESTB together."""
+    tickers = kwargs.get("tickers") or []
+    if isinstance(tickers, str):
+        tickers = [tickers]
+    interval = kwargs.get("interval")
+    prepost = kwargs.get("prepost", False)
+
+    if interval == "1d":
+        return {t: _make_daily_frame() for t in tickers}
+    if interval == "5m" and prepost:
+        result = {}
+        if "TESTA" in tickers:
+            result["TESTA"] = _make_premarket_frame_for(98.0, 130.0)
+        if "TESTB" in tickers:
+            result["TESTB"] = _make_premarket_frame_for(98.0)
+        return result
+    if interval == "5m":
+        result = {}
+        if "TESTA" in tickers:
+            result["TESTA"] = _make_5m_frame(_TESTA_BARS)
+        if "TESTB" in tickers:
+            result["TESTB"] = _make_5m_frame(_TESTB_BARS)
+        return result
+    return {}
+
+
+def _fake_evaluate_symbol_always_candidate(symbol, data, cfg, scan_date, today_price):
+    """setup_day's daily-filter reuse is already proven by the single-symbol tests above
+    (test_setup_day_reuses_scanner_point_in_time_functions); this multi-day test's job is
+    the replay-time regressions (CR-01/CR-04/CR-05), so both symbols unconditionally land
+    in the watchlist for every day, regardless of the (irrelevant, dummy) daily frame."""
+    return {
+        "code": f"US.{symbol}", "gap_pct": 5.0, "prior_day_high": 90.0,
+        "prior_close": 88.0, "sma200": 80.0, "rvol_baseline": 10_000.0,
+    }
+
+
+def test_multiday_replay_proves_cr01_cr04_cr05_cr06(monkeypatch, tmp_path):
+    """Drives a real 2-trading-day replay through BacktestHarness (only yfinance's I/O
+    seam patched) and asserts all four verification-required behaviours:
+
+    (a) CR-01: day1's Gate 1 used day1's OWN premarket high (98.0), not day2's much
+        higher one (130.0) -- proven by TESTA's day1 entry actually occurring.
+    (b) CR-04: TESTB's signal on day1's own last bar never fills on day2's bar, even
+        though a later TESTB bar exists on day2 (through the full harness, not just
+        feed.next_bar in isolation).
+    (c) CR-05: zero non-CLOSED positions remain after run(), and TESTA's EOD-open
+        position is captured into trade_log with exit_reason=='force_close' and a
+        real (non-fabricated) exit price.
+    (d) CR-06 (incidental): the watchlist cap/gate from Task 1 does not interfere --
+        both symbols are legitimately in the day's watchlist here.
+    """
+    from bot.config.loader import load_strategy_config
+    from bot.state.store import StateStore
+
+    monkeypatch.setattr("yfinance.download", _mock_yf_download_multiday)
+    monkeypatch.setattr("backtester.harness._evaluate_symbol", _fake_evaluate_symbol_always_candidate)
+
+    cfg = load_strategy_config("rules.json")
+    store = StateStore(db_path=str(tmp_path / "backtest_scratch.db")).open()
+    symbols = ["US.TESTA", "US.TESTB"]
+    feed = SimulatedBarFeed(symbols, start=_MD_DAY1, end=_MD_DAY2, cache_dir=str(tmp_path / "cache"))
+    harness = BacktestHarness(cfg=cfg, feed=feed, store=store)
+
+    for day in (_MD_DAY1, _MD_DAY2):
+        harness.setup_day(day, symbols)
+
+    # CR-01 sanity: the two days' frozen highs really do differ for TESTA -- otherwise
+    # a clobber would be undetectable.
+    assert (
+        harness._premarket_highs_by_day[_MD_DAY1]["US.TESTA"]
+        != harness._premarket_highs_by_day[_MD_DAY2]["US.TESTA"]
+    )
+
+    asyncio.run(harness.run())
+
+    # (a) CR-01: TESTA's day-1 entry actually fired (gated by day1's OWN 98.0 high, not
+    # day2's 130.0 -- had the clobber bug been present, close=105.00 < 130.0 would have
+    # failed Gate 1 and no entry would exist at all).
+    testa_trades = [t for t in harness.trade_log if t["code"] == "US.TESTA"]
+    assert len(testa_trades) == 1, "TESTA must have entered on day1, gated by day1's own premarket high."
+    assert testa_trades[0]["entry_price"] == 103.00
+
+    # (b) CR-04: TESTB's day1-last-bar signal must never fill on day2's bar.
+    # sim_execution.fills mixes FillEvent objects (entries) with plain exit-fill dicts
+    # (manage_exit) -- normalise both shapes' "code" before filtering.
+    def _fill_code(f):
+        return f.code if hasattr(f, "code") else f.get("code")
+
+    testb_fills = [f for f in harness.sim_execution.fills if _fill_code(f) == "US.TESTB"]
+    assert testb_fills == [], (
+        "a signal on day1's last bar must not fill on day2's open/bar -- next_bar() must "
+        "never cross the session boundary (CR-04), even though a later TESTB bar exists "
+        "on day2."
+    )
+    assert "US.TESTB" not in {
+        p.code for p in harness.position_manager._positions.values()
+    }, "an abandoned (never-filled) intent must never register a PositionState."
+
+    # (c) CR-05: zero non-CLOSED positions after run(), and TESTA's EOD-open position
+    # was captured with a real force-close exit price.
+    assert all(
+        p.phase == PositionPhase.CLOSED for p in harness.position_manager._positions.values()
+    ), "every position must reach CLOSED by end of run(), across the full multi-day replay."
+    assert testa_trades[0]["exit_reason"] == "force_close"
+    assert testa_trades[0]["exit_price"] == 103.20  # last observed TESTA bar's close
