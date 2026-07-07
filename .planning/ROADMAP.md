@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Intraday Signal and Risk Engine** - 5m bar loop with bar-close gating, intraday filters, and position sizing (all plans executed 2026-06-24; pending live SIMULATE UAT)
 - [x] **Phase 4: Order and Position Management** - Full position lifecycle FSM, order execution, reconciliation, and EOD force-close (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop)
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
-- [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (6/6 plans executed 2026-07-07; verification gaps_found — 3 gap-closure plans (06-07..06-09) planned 2026-07-07 to fix 7 multi-day BLOCKERs CR-01..07 + WR-01) (completed 2026-07-07)
+- [ ] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (9/9 plans executed 2026-07-07; gap-closure 06-07..06-09 closed all 7 original multi-day BLOCKERs, but re-verification gaps_found — 2 NEW BLOCKERs: NaN union-index bars crash multi-ticker replay; Gate 7 -2R circuit breaker can never trip during replay)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 
 ## Phase Details
@@ -266,7 +266,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 3. Intraday Signal and Risk Engine | 3/3 | Complete   | 2026-06-24 |
 | 4. Order and Position Management | 4/4 | Complete   | 2026-06-24 |
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
-| 6. Backtester | 9/9 | Complete   | 2026-07-07 |
+| 6. Backtester | 9/9 | Gaps found (2 new BLOCKERs, re-verified 2026-07-07) |  |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
