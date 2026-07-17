@@ -360,6 +360,13 @@ class MoomooGateway:
             PaperGuardError — paper-safety guard failed (SAFE-01)
             GatewayError — SDK context creation failed
         """
+        # Close any prior contexts before creating new ones. The watchdog
+        # reconnect loop (D-10) calls connect() on every disconnect; without
+        # this, each cycle orphans the old OpenQuoteContext/OpenSecTradeContext,
+        # whose SDK background reconnect threads keep opening sockets to OpenD
+        # until the 128-connection cap is blown. Idempotent on first connect
+        # (both ctxs are None).
+        self.close()
         _check_opend_alive(self.cfg.opend_host, self.cfg.opend_port)
         self._quote_ctx = self._make_quote_ctx()
         self._trade_ctx = self._make_trade_ctx()

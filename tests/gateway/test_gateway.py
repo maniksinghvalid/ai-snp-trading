@@ -224,6 +224,28 @@ class TestConnect:
             "Pre-flight check must fire before context creation"
         )
 
+    def test_reconnect_closes_prior_contexts(self):
+        """A second connect() (watchdog reconnect) must close the prior contexts
+        before creating new ones — otherwise orphaned SDK contexts leak sockets
+        until OpenD's 128-connection cap is blown."""
+        cfg = GatewayConfig(acc_id=123456789, paper_trading=True, trd_env="SIMULATE")
+        gw = MoomooGateway(cfg)
+        old_quote, old_trade = MagicMock(), _make_mock_ctx(acc_id=123456789)
+        new_quote, new_trade = MagicMock(), _make_mock_ctx(acc_id=123456789)
+        quotes = iter([old_quote, new_quote])
+        trades = iter([old_trade, new_trade])
+
+        with patch("bot.gateway.gateway._check_opend_alive"):
+            with patch.object(gw, "_make_quote_ctx", side_effect=lambda: next(quotes)):
+                with patch.object(gw, "_make_trade_ctx", side_effect=lambda: next(trades)):
+                    with patch("bot.gateway.gateway.assert_paper_account"):
+                        gw.connect()   # first connect
+                        gw.connect()   # reconnect
+
+        old_quote.close.assert_called_once()
+        old_trade.close.assert_called_once()
+        assert gw._quote_ctx is new_quote and gw._trade_ctx is new_trade
+
 
 # ============================================================
 # Reconciliation Skeletons
