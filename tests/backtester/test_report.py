@@ -137,3 +137,100 @@ def test_write_report_emits_equity_curve_and_opened_at_column(tmp_path):
     curve_lines = (tmp_path / "equity_curve.csv").read_text(encoding="utf-8").strip().splitlines()
     assert curve_lines[0] == "date,equity"
     assert len(curve_lines) >= 2
+
+
+# ============================================================
+# Sortino / Calmar + assumptions block (strategy-audit plan, P0-A)
+# ============================================================
+
+def test_sortino_ratio_hand_computed_from_three_day_equity_path():
+    day1, day2, day3 = recent_session_days(3)
+    trades = [
+        {"code": "US.AAA", "entry_price": 100.0, "exit_price": 110.0, "quantity": 100,
+         "exit_reason": "TRAIL", "r_multiple": 2.0, "closed_at": f"{day1} 10:00:00"},
+        {"code": "US.BBB", "entry_price": 100.0, "exit_price": 80.0, "quantity": 100,
+         "exit_reason": "STOP", "r_multiple": -1.0, "closed_at": f"{day2} 10:00:00"},
+        {"code": "US.CCC", "entry_price": 100.0, "exit_price": 130.0, "quantity": 100,
+         "exit_reason": "TRAIL", "r_multiple": 3.0, "closed_at": f"{day3} 10:00:00"},
+    ]
+    # equity path: 100000 -> 101000 -> 99000 -> 102000
+    m = compute_metrics(trades, starting_capital=100_000.0, start=day1, end=day3)
+    assert m["sortino_ratio"] == pytest.approx(9.48870900716157, rel=1e-6)
+
+
+def test_sortino_ratio_zero_when_no_down_days():
+    day1, day2 = recent_session_days(2)
+    trades = [
+        {"code": "US.AAA", "entry_price": 100.0, "exit_price": 110.0, "quantity": 100,
+         "exit_reason": "TRAIL", "r_multiple": 2.0, "closed_at": f"{day1} 10:00:00"},
+    ]
+    m = compute_metrics(trades, starting_capital=100_000.0, start=day1, end=day2)
+    assert m["sortino_ratio"] == 0.0  # no downside deviation to divide by (mirrors Sharpe's std==0 case)
+
+
+def test_calmar_ratio_matches_cagr_over_max_drawdown_pct():
+    day1, day2, day3 = recent_session_days(3)
+    trades = [
+        {"code": "US.AAA", "entry_price": 100.0, "exit_price": 110.0, "quantity": 100,
+         "exit_reason": "TRAIL", "r_multiple": 2.0, "closed_at": f"{day1} 10:00:00"},
+        {"code": "US.BBB", "entry_price": 100.0, "exit_price": 80.0, "quantity": 100,
+         "exit_reason": "STOP", "r_multiple": -1.0, "closed_at": f"{day2} 10:00:00"},
+        {"code": "US.CCC", "entry_price": 100.0, "exit_price": 130.0, "quantity": 100,
+         "exit_reason": "TRAIL", "r_multiple": 3.0, "closed_at": f"{day3} 10:00:00"},
+    ]
+    m = compute_metrics(trades, starting_capital=100_000.0, start=day1, end=day3)
+    assert m["max_drawdown_pct"] == pytest.approx(1.9801980198019802)
+    assert m["calmar_ratio"] == pytest.approx(m["cagr_pct"] / m["max_drawdown_pct"])
+
+
+def test_calmar_ratio_zero_when_no_drawdown():
+    day1, day2 = recent_session_days(2)
+    trades = [
+        {"code": "US.AAA", "entry_price": 100.0, "exit_price": 110.0, "quantity": 100,
+         "exit_reason": "TRAIL", "r_multiple": 2.0, "closed_at": f"{day1} 10:00:00"},
+    ]
+    m = compute_metrics(trades, starting_capital=100_000.0, start=day1, end=day2)
+    assert m["max_drawdown_pct"] == 0.0
+    assert m["calmar_ratio"] == 0.0
+
+
+def test_empty_trades_include_sortino_and_calmar_zeroed():
+    m = compute_metrics([])
+    assert m["sortino_ratio"] == 0.0
+    assert m["calmar_ratio"] == 0.0
+
+
+def test_assumptions_block_records_reporting_inputs():
+    m = compute_metrics(make_trade_log(), starting_capital=75_000.0, commission_per_share=0.01)
+    assert m["assumptions"] == {
+        "starting_capital_usd": 75_000.0,
+        "commission_per_share_usd": 0.01,
+    }
+
+
+def test_assumptions_block_merges_extra_keys_from_caller():
+    # run.py's CLI layer knows things report.py doesn't (slippage, rules-json path) --
+    # extra_assumptions merges them into the SAME summary.json block rather than a
+    # second write pass.
+    m = compute_metrics(
+        make_trade_log(), starting_capital=75_000.0, commission_per_share=0.01,
+        extra_assumptions={"slippage_usd": 0.03, "rules_json": "rules.json"},
+    )
+    assert m["assumptions"] == {
+        "starting_capital_usd": 75_000.0,
+        "commission_per_share_usd": 0.01,
+        "slippage_usd": 0.03,
+        "rules_json": "rules.json",
+    }
+
+
+def test_write_report_summary_json_contains_assumptions(tmp_path):
+    write_report(
+        make_trade_log(), str(tmp_path), starting_capital=60_000.0, commission_per_share=0.02,
+        extra_assumptions={"slippage_usd": 0.0},
+    )
+    with open(tmp_path / "summary.json", encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["assumptions"]["starting_capital_usd"] == 60_000.0
+    assert summary["assumptions"]["commission_per_share_usd"] == 0.02
+    assert summary["assumptions"]["slippage_usd"] == 0.0

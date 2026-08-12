@@ -84,14 +84,19 @@ def build_equity_curve(trades: list, starting_capital: float,
     return curve
 
 
-def _sharpe_ratio(curve: list, starting_capital: float) -> float:
-    """Annualised Sharpe (rf=0) from daily equity returns (flat days = 0 return)."""
+def _daily_returns(curve: list, starting_capital: float) -> list:
+    """Daily equity returns (flat days = 0 return) — shared by Sharpe and Sortino."""
     equities = [starting_capital] + [e for _, e in curve]
-    returns = [
+    return [
         equities[i] / equities[i - 1] - 1.0
         for i in range(1, len(equities))
         if equities[i - 1] > 0
     ]
+
+
+def _sharpe_ratio(curve: list, starting_capital: float) -> float:
+    """Annualised Sharpe (rf=0) from daily equity returns (flat days = 0 return)."""
+    returns = _daily_returns(curve, starting_capital)
     if len(returns) < 2:
         return 0.0
     mean = sum(returns) / len(returns)
@@ -100,6 +105,34 @@ def _sharpe_ratio(curve: list, starting_capital: float) -> float:
     if std == 0:
         return 0.0
     return (mean / std) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+
+
+def _sortino_ratio(curve: list, starting_capital: float) -> float:
+    """Annualised Sortino (rf=0, MAR=0): mean daily return over downside deviation.
+
+    Downside deviation = sqrt(mean(min(r, 0)^2)) over ALL daily returns (population,
+    not sample — every day counts in the denominator, not just losing days), so a
+    day with zero return contributes zero downside, same convention _sharpe_ratio's
+    numerator uses. Mirrors Sharpe's own std==0 handling: no downside days -> 0.0,
+    not +inf (a strategy that never loses is not yet distinguishable from one with
+    too few observations to say so).
+    """
+    returns = _daily_returns(curve, starting_capital)
+    if len(returns) < 2:
+        return 0.0
+    mean = sum(returns) / len(returns)
+    downside_sq = sum(min(r, 0.0) ** 2 for r in returns) / len(returns)
+    downside_dev = downside_sq ** 0.5
+    if downside_dev == 0:
+        return 0.0
+    return (mean / downside_dev) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+
+
+def _calmar_ratio(cagr_pct: float, max_drawdown_pct: float) -> float:
+    """CAGR / max drawdown (both in percent). 0.0 when there is no drawdown to divide by."""
+    if max_drawdown_pct == 0:
+        return 0.0
+    return cagr_pct / max_drawdown_pct
 
 
 def _exposure_pct(trades: list, n_trading_days: int) -> float:
@@ -146,21 +179,40 @@ def _win_loss_stats(pnls: list) -> dict:
     }
 
 
+def _assumptions(starting_capital: float, commission_per_share: float,
+                 extra_assumptions: dict = None) -> dict:
+    """The reporting-inputs block embedded in every summary.json.
+
+    report.py only knows starting_capital/commission_per_share; extra_assumptions
+    lets the CLI layer (run.py: slippage, rules-json path) merge into the SAME
+    block rather than a second write pass over summary.json.
+    """
+    return {
+        "starting_capital_usd": float(starting_capital),
+        "commission_per_share_usd": float(commission_per_share),
+        **(extra_assumptions or {}),
+    }
+
+
 def compute_metrics(trades: list, starting_capital: float = 100_000.0,
                     commission_per_share: float = 0.0,
-                    start=None, end=None) -> dict:
+                    start=None, end=None, extra_assumptions: dict = None) -> dict:
     """Full performance metrics for the run + per-symbol breakdown.
 
     trades: closed-trade dicts in chronological (exit-time) order — required
         for the trade-sequence max_drawdown_usd calculation.
     starting_capital / commission_per_share / start / end: reporting
         assumptions ("YYYY-MM-DD" window; defaults to the traded span).
+    extra_assumptions: additional key/value pairs merged into the returned
+        "assumptions" block (e.g. slippage_usd, rules_json — inputs the CLI
+        layer knows that this function does not).
 
     Backward-compatible keys (unchanged values at the default arguments):
     win_rate, avg_r_multiple, profit_factor, max_drawdown_usd, total_trades.
     Empty trade list returns a zeroed dict without raising.
     """
     curve = build_equity_curve(trades, starting_capital, commission_per_share, start, end)
+    assumptions = _assumptions(starting_capital, commission_per_share, extra_assumptions)
 
     if not trades:
         return {
@@ -170,9 +222,10 @@ def compute_metrics(trades: list, starting_capital: float = 100_000.0,
             "final_portfolio_value_usd": float(starting_capital),
             "net_pnl_usd": 0.0, "total_commission_usd": 0.0,
             "total_return_pct": 0.0, "cagr_pct": 0.0, "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0, "calmar_ratio": 0.0,
             "max_drawdown_pct": 0.0, "avg_win_usd": 0.0, "avg_loss_usd": 0.0,
             "exposure_pct": 0.0, "num_trading_days": len(curve),
-            "per_symbol": {},
+            "per_symbol": {}, "assumptions": assumptions,
         }
 
     pnls = [_net_pnl(t, commission_per_share) for t in trades]
@@ -228,12 +281,15 @@ def compute_metrics(trades: list, starting_capital: float = 100_000.0,
         "total_return_pct": total_return_pct,
         "cagr_pct": cagr_pct,
         "sharpe_ratio": _sharpe_ratio(curve, float(starting_capital)),
+        "sortino_ratio": _sortino_ratio(curve, float(starting_capital)),
+        "calmar_ratio": _calmar_ratio(cagr_pct, max_dd_pct),
         "max_drawdown_pct": max_dd_pct,
         "avg_win_usd": wl["avg_win_usd"],
         "avg_loss_usd": wl["avg_loss_usd"],
         "exposure_pct": _exposure_pct(trades, len(curve)),
         "num_trading_days": len(curve),
         "per_symbol": per_symbol,
+        "assumptions": assumptions,
     }
 
 
@@ -242,21 +298,25 @@ _CSV_FIELDS = ["code", "opened_at", "entry_price", "exit_price", "quantity",
 
 
 def write_report(trades: list, output_dir: str, starting_capital: float = 100_000.0,
-                 commission_per_share: float = 0.0, start=None, end=None) -> dict:
+                 commission_per_share: float = 0.0, start=None, end=None,
+                 extra_assumptions: dict = None) -> dict:
     """Write trades.csv + equity_curve.csv + summary.json to output_dir.
 
     Creates output_dir if absent (operator-chosen local path, T-06-08).
     trades.csv: one row per trade (stdlib csv.DictWriter); rows missing
         opened_at (older logs) get an empty cell, never a crash.
     equity_curve.csv: (date, equity) per NYSE day — independently inspectable.
-    summary.json: compute_metrics dict. json.dump defaults to allow_nan=True,
-        so profit_factor == inf round-trips as the JSON token `Infinity`.
+    summary.json: compute_metrics dict (including the "assumptions" block,
+        merged with extra_assumptions — see compute_metrics). json.dump
+        defaults to allow_nan=True, so profit_factor == inf round-trips as
+        the JSON token `Infinity`.
 
     Returns the metrics dict.
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    metrics = compute_metrics(trades, starting_capital, commission_per_share, start, end)
+    metrics = compute_metrics(trades, starting_capital, commission_per_share, start, end,
+                              extra_assumptions)
     curve = build_equity_curve(trades, starting_capital, commission_per_share, start, end)
 
     with open(os.path.join(output_dir, "trades.csv"), "w", newline="", encoding="utf-8") as f:

@@ -211,4 +211,36 @@ def test_flags_plumb_capital_slippage_and_report_kwargs(monkeypatch, tmp_path):
         "commission_per_share": 0.005,
         "start": _DAY,
         "end": _DAY,
+        "extra_assumptions": {"slippage_usd": 0.02, "rules_json": "rules.json"},
     }
+
+
+# ============================================================
+# Zero-cost guardrail (strategy-audit plan, P0-A)
+# ============================================================
+
+def test_zero_slippage_warns_on_stderr(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("yfinance.download", _e2e_mock_yf_download)
+    output_dir = tmp_path / "out"
+
+    exit_code = run_mod.main([
+        "--symbols", "US.TEST", "--start", _E2E_DAY, "--end", _E2E_DAY,
+        "--output-dir", str(output_dir),
+    ])
+
+    assert exit_code == 0
+    err = capsys.readouterr().err
+    assert "[WARN]" in err and "slippage" in err.lower()
+
+
+def test_nonzero_slippage_does_not_warn(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("yfinance.download", _e2e_mock_yf_download)
+    output_dir = tmp_path / "out"
+
+    exit_code = run_mod.main([
+        "--symbols", "US.TEST", "--start", _E2E_DAY, "--end", _E2E_DAY,
+        "--output-dir", str(output_dir), "--slippage-usd", "0.02",
+    ])
+
+    assert exit_code == 0
+    assert "[WARN]" not in capsys.readouterr().err

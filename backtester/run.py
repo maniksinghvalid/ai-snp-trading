@@ -150,6 +150,17 @@ def main(argv=None) -> int:
         print("[ERROR] --starting-capital must be > 0", file=sys.stderr)
         return 1
 
+    # Cost-realism guardrail (strategy-audit P0-A): live pays spread + $0.10 of
+    # entry/exit buffers + $0.10/round exit escalation (bot/execution/engine.py).
+    # A zero-slippage backtest is an upper-bound diagnostic, not a comparable result.
+    if args.slippage_usd == 0:
+        print(
+            "[WARN] --slippage-usd is 0 -- this run has no fill cost realism and "
+            "overstates live performance (live pays spread + buffers + escalation). "
+            "Treat these numbers as an upper bound, not a forecast.",
+            file=sys.stderr,
+        )
+
     configure_logging()
     get_logger(__name__)
 
@@ -202,6 +213,7 @@ def main(argv=None) -> int:
         starting_capital=starting_capital,
         commission_per_share=args.commission_per_share,
         start=args.start, end=args.end,
+        extra_assumptions={"slippage_usd": args.slippage_usd, "rules_json": args.rules_json},
     )
     print(json.dumps(metrics, indent=2, default=str))
     return 0
