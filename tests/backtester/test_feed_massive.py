@@ -80,6 +80,11 @@ def test_massive_daily_and_tod_accessors_use_preloaded_frames(tmp_path):
     tod = feed.intraday_5m_for_tod()
     assert len(fake.calls) == n_fetches  # no new fetches per accessor call
     assert "Volume" in daily["AAPL"].columns
+    # _evaluate_symbol compares the daily index against a tz-NAIVE
+    # pd.Timestamp(scan_date) (bot/scanner/scanner.py) — a tz-aware index there
+    # raises "Cannot compare tz-naive and tz-aware". Daily frames must mirror
+    # yfinance's naive-date shape.
+    assert daily["AAPL"].index.tz is None
     tod_keys = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in tod["AAPL"].index]
     assert f"{PRIOR} 09:30:00" in tod_keys           # padded prior session kept
     assert f"{DAY1} 09:00:00" not in tod_keys        # premarket excluded

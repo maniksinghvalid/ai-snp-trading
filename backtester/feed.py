@@ -371,6 +371,13 @@ class SimulatedBarFeed:
 
             daily = self._massive.cached_bars(sym, "1d", 1, "day", daily_start, self.end)
             if not daily.empty:
+                # yfinance daily frames are tz-NAIVE dates, and _evaluate_symbol
+                # compares the index against a naive pd.Timestamp(scan_date)
+                # (bot/scanner/scanner.py) — a tz-aware index there raises
+                # "Cannot compare tz-naive and tz-aware". Strip the ET tz
+                # (keeping ET wall dates) so Massive daily frames match the
+                # consumer's expected shape exactly.
+                daily.index = daily.index.tz_localize(None).normalize()
                 self._massive_daily[sym] = daily
 
             full_5m = self._massive.cached_bars(sym, "5m", 5, "minute", tod_start, self.end)
