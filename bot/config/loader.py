@@ -39,6 +39,21 @@ _IMPLEMENTED_EXIT_MODELS = ("partial_be_trail",)
 
 
 # ============================================================
+# I2 gate mode (CFG-01, strategy-audit finding: close>=hod is unsatisfiable —
+# hod includes the closing bar's own high, so I2 demands a float-exact
+# close-on-high. close_above_prior_hod is the conventional breakout-close
+# reading. Defaults to close_at_hod, today's behavior, until backtester
+# evidence supports flipping rules.json.)
+# ============================================================
+
+# Defense-in-depth mirroring _IMPLEMENTED_EXIT_MODELS: both candidates are
+# schema-valid AND implemented today, but any future third candidate added to
+# the schema enum still needs explicit loader opt-in here before it can run —
+# passing schema validation alone must never be enough.
+_IMPLEMENTED_I2_MODES = ("close_at_hod", "close_above_prior_hod")
+
+
+# ============================================================
 # Stop-rule parsing (CFG-01 / D-12)
 # ============================================================
 
@@ -164,6 +179,13 @@ class StrategyConfig:
     # the loader's own default so direct StrategyConfig construction in tests stays valid.
     exit_model: str = "partial_be_trail"  # exit.model — the selected exit FSM variant
 
+    # ---- I2 gate mode (CFG-01, strategy-audit finding) ----
+    # "close_at_hod" (default, today's behavior): close >= hod, where hod includes
+    # the closing bar's own high — a float-exact close-on-session-high condition.
+    # "close_above_prior_hod": close > the PRIOR bar's hod (conventional breakout
+    # close). Consumers must read cfg.i2_mode — never hardcode either comparison.
+    i2_mode: str = "close_at_hod"  # intraday_filters.I2_mode
+
 
 # ============================================================
 # Loader
@@ -227,6 +249,17 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
             f"set exit.model to 'partial_be_trail'"
         )
 
+    # --- Step 4b: I2-mode fail-closed guard (strategy-audit finding) ---
+    # Schema validation (Step 3) already rejected unknown strings via enum.
+    # This guard mirrors the exit-model pattern: passing schema alone must
+    # never be sufficient to run a candidate the loader hasn't opted into.
+    i2_mode_raw = inf.get("I2_mode", "close_at_hod")
+    if i2_mode_raw not in _IMPLEMENTED_I2_MODES:
+        raise ConfigError(
+            f"intraday_filters.I2_mode '{i2_mode_raw}' is not implemented; "
+            f"expected one of: {', '.join(_IMPLEMENTED_I2_MODES)}"
+        )
+
     return StrategyConfig(
         # universe
         min_price_usd=float(uf["min_price_usd"]),
@@ -241,6 +274,7 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         force_close_et=str(tf["force_close_et"]),
         # exit
         exit_model=model_raw,
+        i2_mode=i2_mode_raw,
         initial_stop_pct=parse_initial_stop_rule(str(ex["initial_stop_rule"])),
         partial_profit_trigger_r=float(ex["partial_profit_trigger_R"]),
         partial_profit_fraction=float(ex["partial_profit_fraction"]),

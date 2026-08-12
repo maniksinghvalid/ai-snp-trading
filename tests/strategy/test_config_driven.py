@@ -259,6 +259,74 @@ class TestPassesIntradayFilters:
 
 
 # ============================================================
+# TrendJoinLong — I2 gate mode (cfg.i2_mode, strategy-audit finding)
+# ============================================================
+
+def _make_config_with_i2_mode(i2_mode: str) -> StrategyConfig:
+    return dataclass_replace(_make_canonical_config(), i2_mode=i2_mode)
+
+
+class TestI2Mode:
+    def _make_5m_bars(self, last_close: float) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"open": last_close - 0.1, "high": last_close + 0.1, "low": last_close - 0.2, "close": last_close}
+        ])
+
+    def test_close_at_hod_is_the_default_mode(self):
+        assert _make_canonical_config().i2_mode == "close_at_hod"
+
+    def test_close_at_hod_ignores_hod_prev(self):
+        """Default mode: hod_prev is accepted but never consulted."""
+        cfg = _make_config_with_i2_mode("close_at_hod")
+        strat = TrendJoinLong(cfg)
+        bars = self._make_5m_bars(50.0)
+        # close=50.0 >= hod=50.0 passes I2 regardless of hod_prev.
+        assert strat.passes_intraday_filters(
+            "US.TEST", bars, premarket_high=45.0, hod=50.0, rvol=3.0, hod_prev=None,
+        ) is True
+        assert strat.passes_intraday_filters(
+            "US.TEST", bars, premarket_high=45.0, hod=50.0, rvol=3.0, hod_prev=999.0,
+        ) is True
+
+    def test_close_above_prior_hod_passes_on_a_breakout_close(self):
+        cfg = _make_config_with_i2_mode("close_above_prior_hod")
+        strat = TrendJoinLong(cfg)
+        bars = self._make_5m_bars(50.0)
+        # close=50.0 > hod_prev=48.0 -> I2 passes, even though close < hod=51.0
+        # (this bar's own high) -- proving the two modes are genuinely different.
+        assert strat.passes_intraday_filters(
+            "US.TEST", bars, premarket_high=45.0, hod=51.0, rvol=3.0, hod_prev=48.0,
+        ) is True
+
+    def test_close_above_prior_hod_fails_when_not_a_new_high(self):
+        cfg = _make_config_with_i2_mode("close_above_prior_hod")
+        strat = TrendJoinLong(cfg)
+        bars = self._make_5m_bars(50.0)
+        # close=50.0 == hod_prev=50.0 -> not a NEW high -> I2 fails (strict >).
+        assert strat.passes_intraday_filters(
+            "US.TEST", bars, premarket_high=45.0, hod=50.0, rvol=3.0, hod_prev=50.0,
+        ) is False
+
+    def test_close_above_prior_hod_fails_closed_when_hod_prev_is_none(self):
+        """No prior-bar hod (first bar of a session / restart) must fail I2, never
+        silently pass or fall back to the other mode."""
+        cfg = _make_config_with_i2_mode("close_above_prior_hod")
+        strat = TrendJoinLong(cfg)
+        bars = self._make_5m_bars(50.0)
+        assert strat.passes_intraday_filters(
+            "US.TEST", bars, premarket_high=45.0, hod=50.0, rvol=3.0, hod_prev=None,
+        ) is False
+
+    def test_i2_mode_honors_config_default_when_hod_prev_omitted(self):
+        """passes_intraday_filters must default hod_prev=None so existing
+        positional/keyword call sites that predate this parameter keep working."""
+        cfg = _make_config_with_i2_mode("close_above_prior_hod")
+        strat = TrendJoinLong(cfg)
+        bars = self._make_5m_bars(50.0)
+        assert strat.passes_intraday_filters("US.TEST", bars, 45.0, 50.0, 3.0) is False
+
+
+# ============================================================
 # TrendJoinLong — compute_initial_stop
 # ============================================================
 

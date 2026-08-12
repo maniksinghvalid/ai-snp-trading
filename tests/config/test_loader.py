@@ -465,3 +465,64 @@ class TestExitModelConfig:
         msg = str(exc_info.value)
         # Schema validation error must mention enum or the invalid value
         assert "moon" in msg or "enum" in msg.lower() or "schema" in msg.lower()
+
+
+# ============================================================
+# I2-mode config tests (CFG-01, strategy-audit finding)
+# ============================================================
+
+class TestI2ModeConfig:
+    """I2-mode config surface (intraday_filters.I2_mode, schema enum, StrategyConfig.i2_mode).
+
+    Mirrors TestExitModelConfig's structure:
+    1. Real rules.json: i2_mode == "close_at_hod" (the explicit default / current behavior)
+    2. Config with I2_mode omitted: defaults to "close_at_hod" (no KeyError)
+    3. I2_mode = "close_above_prior_hod": accepted (both candidates are implemented)
+    4. I2_mode = unknown string ("moon"): fails jsonschema enum validation (ConfigError)
+    """
+
+    def test_real_rules_json_i2_mode_is_close_at_hod(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.i2_mode == "close_at_hod"
+
+    def test_i2_mode_omitted_defaults_to_close_at_hod(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"].pop("I2_mode", None)  # ensure key is absent
+        path = tmp_path / "no_i2_mode.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.i2_mode == "close_at_hod"
+
+    def test_i2_mode_close_above_prior_hod_is_accepted(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"]["I2_mode"] = "close_above_prior_hod"
+        path = tmp_path / "i2_prior_hod.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.i2_mode == "close_above_prior_hod"
+
+    def test_i2_mode_unknown_string_fails_schema_validation(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"]["I2_mode"] = "moon"
+        path = tmp_path / "unknown_i2_mode.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        msg = str(exc_info.value)
+        assert "moon" in msg or "enum" in msg.lower() or "schema" in msg.lower()
+
+    def test_i2_mode_not_in_implemented_set_fails_closed(self, tmp_path, monkeypatch):
+        """Defense-in-depth: a value that somehow passed schema but isn't in the
+        loader's own implemented set must still be rejected (mirrors
+        _IMPLEMENTED_EXIT_MODELS' fail-closed guard) -- passing schema alone must
+        never be sufficient to run a candidate the loader hasn't opted into."""
+        import bot.config.loader as loader_mod
+
+        monkeypatch.setattr(loader_mod, "_IMPLEMENTED_I2_MODES", ("close_at_hod",))
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"]["I2_mode"] = "close_above_prior_hod"
+        path = tmp_path / "not_yet_implemented.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        assert "close_above_prior_hod" in str(exc_info.value)

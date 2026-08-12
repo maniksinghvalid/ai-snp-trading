@@ -17,7 +17,7 @@ Exports: SignalEngine
 """
 
 from datetime import datetime, time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -79,6 +79,14 @@ class SignalEngine:
         # fetch_premarket_highs() / set_premarket_highs(). Only codes with
         # pre_high_price > 0 at freeze time are included.
         self._premarket_highs: Dict[str, float] = {}
+
+        # I2 close_above_prior_hod mode: per-code (session_date, hod) as of the
+        # PRIOR closed bar (excludes the bar currently being evaluated). Keyed
+        # by session date (not just code) so a multi-day backtest replay through
+        # one long-lived SignalEngine instance never leaks yesterday's hod into
+        # today's first bar; a live restart starts empty and correctly fails
+        # I2 closed on the first bar of the session it comes back up in.
+        self._prev_hod: Dict[str, Tuple[str, float]] = {}
 
         # D-09 burst guard: in-memory tally of OrderIntents emitted this session.
         # Incremented on each emitted SignalEvent; combined with filled_count from
@@ -480,6 +488,19 @@ class SignalEngine:
         code = event.code
 
         # --------------------------------------------------------
+        # I2 close_above_prior_hod tracker (strategy-audit finding) — read the
+        # PRIOR closed bar's hod BEFORE overwriting with this bar's, and
+        # unconditionally at the top of on_bar so no gate below can starve the
+        # tracker on a code that keeps failing early gates. Session-date-keyed:
+        # a different date than what's stored means no same-session prior bar
+        # exists yet (session boundary / first bar / restart) -> hod_prev=None,
+        # which passes_intraday_filters treats as a fail-closed I2.
+        session_day = event.time_key[:10]
+        stored = self._prev_hod.get(code)
+        hod_prev = stored[1] if stored is not None and stored[0] == session_day else None
+        self._prev_hod[code] = (session_day, event.hod)
+
+        # --------------------------------------------------------
         # Gate 1: Premarket-high guard (D-03)
         # --------------------------------------------------------
         premarket_high = self._premarket_highs.get(code)
@@ -543,6 +564,7 @@ class SignalEngine:
             premarket_high=premarket_high,
             hod=event.hod,
             rvol=rvol,
+            hod_prev=hod_prev,
         ):
             _logger.info(
                 "signal_skipped_filters",

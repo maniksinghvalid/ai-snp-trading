@@ -116,12 +116,24 @@ class TrendJoinLong(StrategyCore):
         premarket_high: float,
         hod: float,
         rvol: float,
+        hod_prev: Optional[float] = None,
     ) -> bool:
         """
         Evaluate I1/I2/I3 intraday filters on a closed 5m bar.
 
         I1: close > premarket_high (above premarket high)
-        I2: close >= hod (at or above high-of-day)
+        I2: config-driven via cfg.i2_mode (CFG-01, strategy-audit finding) —
+            "close_at_hod" (default): close >= hod. hod INCLUDES the closing
+                bar's own high, so this demands close == the session high
+                exactly — verified against 84 days of real data to pass 0/462
+                candidate bars. Kept as the default only until backtester
+                evidence supports flipping rules.json.
+            "close_above_prior_hod": close > hod_prev (the PRIOR bar's
+                high-of-day, excluding this bar's own high) — the conventional
+                breakout-close reading. Fails closed (returns False) when
+                hod_prev is None (first bar of a session, or the tracker has
+                no prior-day carryover) rather than falling back to the other
+                mode — a missing prior-HOD must never silently relax I2.
         I3: rvol >= self._cfg.rvol_min (relative volume threshold from config)
 
         All thresholds read from self._cfg.
@@ -130,16 +142,23 @@ class TrendJoinLong(StrategyCore):
             code:           Stock code (for logging).
             bars_5m:        DataFrame of closed 5m bars; uses iloc[-1]["close"].
             premarket_high: Premarket high (before 09:30 ET).
-            hod:            Current session high-of-day.
+            hod:            Current session high-of-day (includes this bar).
             rvol:           Pre-computed relative volume ratio.
+            hod_prev:       High-of-day as of the PRIOR closed bar, or None.
 
         Returns:
             True if all intraday conditions are satisfied; False otherwise.
         """
         current_close = float(bars_5m.iloc[-1]["close"])
+
+        if self._cfg.i2_mode == "close_above_prior_hod":
+            passes_i2 = hod_prev is not None and hod_prev > 0.0 and current_close > hod_prev
+        else:
+            passes_i2 = current_close >= hod  # "close_at_hod" — today's behavior
+
         return (
             current_close > premarket_high          # I1
-            and current_close >= hod                # I2
+            and passes_i2                            # I2 — mode from config
             and rvol >= self._cfg.rvol_min          # I3 — threshold from config
         )
 

@@ -1524,3 +1524,137 @@ class TestCircuitBreakerGate:
             "get_positions must NOT be called when circuit breaker is tripped "
             "(Gate 7 before Gate 4 — T-07-18 mitigation)."
         )
+
+
+# ============================================================
+# I2 close_above_prior_hod tracker (strategy-audit finding)
+# ============================================================
+
+class TestI2ModeTracker:
+    """SignalEngine's per-code (session_day, hod) prior-bar tracker: updates
+    regardless of which gate a bar fails, and resets across a session boundary.
+    """
+
+    @staticmethod
+    def _seed_rvol(store: StateStore, session_date: str, code: str = "US.AAPL") -> None:
+        store.conn.execute(
+            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_date, code, 2.0, 1, f"{session_date}T09:30:00", 500_000),
+        )
+        store.conn.commit()
+
+    def test_tracker_updates_even_when_an_earlier_gate_fails(self):
+        """Bar 1 fails Gate 1 (no premarket high yet) and returns None -- the
+        prior-hod tracker must still have recorded bar 1's hod, so bar 2 (once
+        the premarket high becomes available, e.g. via a later intraday rescan)
+        sees the correct hod_prev instead of None."""
+        cfg = make_cfg(i2_mode="close_above_prior_hod")
+        session_date = "2026-07-03"
+        store = StateStore(db_path=":memory:")
+        store.open()
+        self._seed_rvol(store, session_date)
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        # No premarket_highs seeded yet -- bar 1 must fail Gate 1.
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store)
+
+        bar1 = BarEvent(
+            code="US.AAPL", time_key=f"{session_date} 10:05:00",
+            open=140.0, high=148.0, low=139.0, close=145.0,
+            volume=1_000_000, hod=148.0, lod=138.0, cum_volume=1_000_000,
+        )
+        in_window = datetime(2026, 7, 3, 10, 5, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window):
+            result1 = run(engine.on_bar(bar1))
+        assert result1 is None, "bar 1 must fail Gate 1 (no premarket high yet)"
+
+        # Premarket high becomes available (e.g. a later rescan) -- bar 2 closes
+        # ABOVE bar 1's hod=148 (I2 close_above_prior_hod) but BELOW its own
+        # running hod=153 (I2 close_at_hod would fail this same bar), proving
+        # both that the tracker survived bar 1's early Gate-1 failure and that
+        # the two I2 modes are genuinely different.
+        engine.set_premarket_highs({"US.AAPL": 140.0})
+        bar2 = BarEvent(
+            code="US.AAPL", time_key=f"{session_date} 10:10:00",
+            open=145.0, high=153.0, low=144.0, close=150.0,
+            volume=1_000_000, hod=153.0, lod=138.0, cum_volume=2_000_000,
+        )
+        in_window2 = datetime(2026, 7, 3, 10, 10, 0)
+        with patch("bot.signal.signal_engine.now_et", return_value=in_window2):
+            result2 = run(engine.on_bar(bar2))
+
+        assert result2 is not None, (
+            "bar 2 (close=150 > bar1's hod_prev=148) must pass I2 under "
+            "close_above_prior_hod despite bar 1 never reaching Gate 2."
+        )
+
+    def test_close_at_hod_mode_fails_the_same_bar_that_close_above_prior_hod_passes(self):
+        """Same two-bar sequence as above, default i2_mode -- proves the discriminator
+        is real: close_at_hod correctly rejects bar 2 (close=150 < its own hod=153)."""
+        cfg = make_cfg()  # i2_mode defaults to "close_at_hod"
+        session_date = "2026-07-03"
+        store = StateStore(db_path=":memory:")
+        store.open()
+        self._seed_rvol(store, session_date)
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs={"US.AAPL": 140.0})
+
+        bar1 = BarEvent(
+            code="US.AAPL", time_key=f"{session_date} 10:05:00",
+            open=140.0, high=148.0, low=139.0, close=145.0,
+            volume=1_000_000, hod=148.0, lod=138.0, cum_volume=1_000_000,
+        )
+        bar2 = BarEvent(
+            code="US.AAPL", time_key=f"{session_date} 10:10:00",
+            open=145.0, high=153.0, low=144.0, close=150.0,
+            volume=1_000_000, hod=153.0, lod=138.0, cum_volume=2_000_000,
+        )
+        with patch("bot.signal.signal_engine.now_et", return_value=datetime(2026, 7, 3, 10, 5, 0)):
+            run(engine.on_bar(bar1))
+        with patch("bot.signal.signal_engine.now_et", return_value=datetime(2026, 7, 3, 10, 10, 0)):
+            result2 = run(engine.on_bar(bar2))
+
+        assert result2 is None, "close_at_hod must reject close=150 < hod=153"
+
+    def test_tracker_resets_across_a_session_boundary(self):
+        """A bar on day 2 must not inherit day 1's hod -- hod_prev fails closed
+        (I2 rejects) rather than leaking yesterday's high across the boundary."""
+        cfg = make_cfg(i2_mode="close_above_prior_hod")
+        day1, day2 = "2026-07-02", "2026-07-03"
+        store = StateStore(db_path=":memory:")
+        store.open()
+        self._seed_rvol(store, day1)
+        self._seed_rvol(store, day2)
+
+        gateway = MagicMock()
+        gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
+        engine = make_engine(cfg=cfg, gateway=gateway, store=store,
+                             premarket_highs={"US.AAPL": 140.0})
+
+        bar_day1 = BarEvent(
+            code="US.AAPL", time_key=f"{day1} 15:25:00",
+            open=140.0, high=148.0, low=139.0, close=145.0,
+            volume=1_000_000, hod=148.0, lod=138.0, cum_volume=1_000_000,
+        )
+        with patch("bot.signal.signal_engine.now_et", return_value=datetime(2026, 7, 2, 15, 25, 0)):
+            run(engine.on_bar(bar_day1))
+
+        # Day 2's first bar: close=150 WOULD pass I2 if hod_prev leaked in as
+        # day 1's 148 (150 > 148) -- it must instead fail closed (hod_prev=None
+        # because the tracker's stored session_day "2026-07-02" != "2026-07-03").
+        bar_day2 = BarEvent(
+            code="US.AAPL", time_key=f"{day2} 10:05:00",
+            open=145.0, high=153.0, low=144.0, close=150.0,
+            volume=1_000_000, hod=153.0, lod=138.0, cum_volume=1_000_000,
+        )
+        with patch("bot.signal.signal_engine.now_et", return_value=datetime(2026, 7, 3, 10, 5, 0)):
+            result_day2 = run(engine.on_bar(bar_day2))
+
+        assert result_day2 is None, (
+            "hod_prev must reset across the session boundary, not leak day 1's hod=148"
+        )
