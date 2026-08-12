@@ -302,3 +302,17 @@ def test_trail_never_loosens():
         "close above trail_stop with no new swing-low should return NONE"
     )
     assert pos2.trail_stop == 103.0, "trail_stop must not change if no swing_low supplied"
+
+
+# ============================================================
+# P1-B (strategy-audit finding): in-memory blended-exit accumulator fields
+# ============================================================
+
+def test_exit_accumulator_fields_default_to_zero_and_unrecorded():
+    """PositionState gains exit_filled_qty/exit_notional/trade_recorded --
+    in-memory only (never persisted, same as pending_exit_reason), populated
+    by PositionManager._record_trade_if_closed as each exit leg fills."""
+    pos = _make_pos()
+    assert pos.exit_filled_qty == 0
+    assert pos.exit_notional == 0.0
+    assert pos.trade_recorded is False

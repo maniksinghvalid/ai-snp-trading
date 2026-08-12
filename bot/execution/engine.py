@@ -413,7 +413,7 @@ class ExecutionEngine:
         escalation_step: float,
         escalation_cadence: float,
         ttl: float,
-    ) -> int:
+    ) -> tuple:
         """Place a marketable-limit exit; escalate until fully flat (D-07/EXEC-02).
 
         Prices the exit through the bid (bid - cfg.exit_limit_buffer_usd). If
@@ -435,7 +435,11 @@ class ExecutionEngine:
             ttl:                Seconds before each cancel-replace cycle.
 
         Returns:
-            int — total filled quantity across all exit order_ids (cumulative).
+            (total_filled, avg_price) — total_filled is the cumulative filled
+            quantity across all exit order_ids; avg_price is the qty-weighted
+            average fill price across every leg (P1-B: lets the caller record
+            one blended trades-table row instead of discarding fill prices).
+            avg_price is 0.0 when total_filled is 0 (no fill occurred).
 
         Fill detection uses get_order_status(order_id) → order_list_query (cumulative
         dealt_qty per order) instead of get_order_fills() → deal_list_query. The latter
@@ -449,6 +453,7 @@ class ExecutionEngine:
         CR-02 quantity-tracking invariants (remaining decrements once per order_id fill).
         """
         total_filled = 0
+        total_notional = 0.0  # P1-B: qty-weighted price accumulator across legs
         remaining = qty
         # Price through bid with buffer (D-07). Finding 2.4: bounded retry inside
         # _get_price_with_fallback; no fallback price exists yet for this very
@@ -506,6 +511,11 @@ class ExecutionEngine:
                 ]
                 if matched:
                     order_filled_this_round = int(matched[0].get("dealt_qty", 0) or 0)
+                    # Fallback price if the post-cancel re-query below has no match
+                    # (P1-B: manage_exit's own weighted-avg-price accumulator).
+                    order_filled_price_this_round = float(
+                        matched[0].get("dealt_avg_price", 0.0) or 0.0
+                    )
                     if order_filled_this_round > 0:
                         break
 
@@ -531,12 +541,18 @@ class ExecutionEngine:
                     ]
                     if post_matched:
                         post_cancel_filled = int(post_matched[0].get("dealt_qty", 0) or 0)
+                        post_cancel_price = float(
+                            post_matched[0].get("dealt_avg_price", 0.0) or 0.0
+                        )
                     else:
                         post_cancel_filled = order_filled_this_round  # safe fallback
+                        post_cancel_price = order_filled_price_this_round
                 except Exception:
                     post_cancel_filled = order_filled_this_round  # safe fallback
+                    post_cancel_price = order_filled_price_this_round
 
                 total_filled += post_cancel_filled
+                total_notional += post_cancel_filled * post_cancel_price
                 remaining = qty - total_filled
 
                 append_audit({
@@ -576,7 +592,8 @@ class ExecutionEngine:
                 _logger.info("exit_escalating", code=code, round=escalation_rounds,
                              new_limit=limit_price)
 
-        return total_filled
+        avg_price = total_notional / total_filled if total_filled > 0 else 0.0
+        return total_filled, avg_price
 
     # --------------------------------------------------------
     # Internal helpers

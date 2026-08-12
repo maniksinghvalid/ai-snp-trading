@@ -23,16 +23,21 @@ replay_day(day)/run() port bot.service.bot.TradingBot._process_bar bar-for-bar
     BEFORE position_manager.on_bar(bar) (Pitfall 6 -- swing-low trail wiring)
   - sim_execution.on_bar(bar) is called so manage_exit has an anchor for its
     own next-bar lookup (06-03 deviation)
-  - the replay clock is rebound to bot.signal.signal_engine.now_et for the
-    duration of run() (try/finally) so the entry-window gate and the
-    session-date baseline keys evaluate against the REPLAYED bar's ET time,
-    never the wall clock (T-06-11) -- a runtime module-attribute rebind, not
-    a bot/ source edit.
-  - closed positions are captured into self.trade_log AND persisted into the
-    scratch StateStore's `trades` table via store.record_trade (T-06-11) --
-    since nothing in bot/ itself ever writes that table for a backtest run,
-    the harness is the sole writer, and it is what lets Gate 7 see real
-    realized P&L.
+  - the replay clock is rebound to bot.signal.signal_engine.now_et AND
+    bot.position.manager.now_et for the duration of run() (try/finally) so
+    the entry-window gate, the session-date baseline keys, and every FSM
+    handler's pos.updated_at = now_et() write evaluate against the REPLAYED
+    bar's ET time, never the wall clock (T-06-11) -- a runtime
+    module-attribute rebind, not a bot/ source edit.
+  - closed positions are captured into self.trade_log for the CSV/report
+    output. The scratch StateStore's `trades` table itself is written by
+    PositionManager's own _record_trade_if_closed (P1-B, strategy-audit
+    finding) -- the SAME code path the live bot uses, called from the SAME
+    _trigger_stop_out/_trigger_partial_profit/force_close_all handlers this
+    harness's reused PositionManager instance runs. The harness no longer
+    writes that table itself (a prior duplicate write here would have
+    double-counted every trade's realized P&L). This is what lets Gate 7
+    see real realized P&L, in both stacks, from one code path.
 
 Scope: replays the CURRENT partial_be_trail exit-model FSM only (06-RESEARCH
 Open-Q2) -- fixed_2r/full_to_1p5r_trail remain Phase 7's job (07-06).
@@ -41,11 +46,11 @@ Drops the D-08 circuit-breaker side-effect gate (_entries_enabled /
 _handle_circuit_breaker_side_effects) -- there is no kill-switch concept in
 an offline replay; entries are always enabled here (documented choice, see
 SUMMARY). SignalEngine's own Gate 7 circuit-breaker check runs against the
-backtest's OWN recorded closed trades -- _capture_closed_trades persists every
-newly-CLOSED position via store.record_trade (T-06-11), so a replay day whose
-realized P&L crosses -daily_circuit_breaker_r x 1R blocks further entries
-exactly as the live FSM would; only the TradingBot-specific abandon+alert side
-effect is out of scope.
+backtest's OWN recorded closed trades -- PositionManager persists every
+newly-CLOSED position via _record_trade_if_closed as it closes, so a replay
+day whose realized P&L crosses -daily_circuit_breaker_r x 1R blocks further
+entries exactly as the live FSM would; only the TradingBot-specific
+abandon+alert side effect is out of scope.
 
 Exports: BacktestHarness
 """
@@ -129,11 +134,11 @@ class BacktestHarness:
         # Per-day setup order, populated by setup_day(); replayed in this order by run().
         self._days: List = []
 
-        # Trade-log capture bookkeeping (nothing in bot/ writes the `trades` DB table
-        # for a backtest run -- 06-RESEARCH override of the get_closed_trades note).
+        # Trade-log capture bookkeeping. The `trades` DB table itself is written
+        # by PositionManager (_record_trade_if_closed, P1-B) as each position
+        # closes -- this list is built alongside it, purely for the CSV/report.
         self.trade_log: List[dict] = []
         self._captured_position_ids: set = set()
-        self._exit_fills_consumed: Dict[str, int] = {}
 
         # Replay clock: rebound onto bot.signal.signal_engine.now_et for the
         # duration of run() (T-06-11). Defaults to None until run() starts.
@@ -372,14 +377,19 @@ class BacktestHarness:
     # ============================================================
 
     def _capture_closed_trades(self) -> None:
-        """Append a trade-log row for any position newly reaching CLOSED, and persist
-        the SAME row into the scratch StateStore's trades table via store.record_trade
-        (T-06-11) so SignalEngine's Gate 7 (get_daily_trade_stats) sees real realized
-        P&L instead of always reading 0.0.
+        """Append a trade-log row (for the CSV/report) for any position newly
+        reaching CLOSED.
 
-        exit_price is the qty-weighted average of the exit fills SimulatedExecution
-        recorded for that code since the last capture (partial + final stop/force
-        legs); r_multiple = (exit_price - entry_price) / (entry_price - initial_stop).
+        P1-B (strategy-audit finding): the scratch StateStore's `trades` table
+        is now written by PositionManager itself (_record_trade_if_closed),
+        called from the SAME _trigger_stop_out/_trigger_partial_profit/
+        force_close_all handlers this harness's reused PositionManager runs --
+        the harness no longer writes that table separately (a second write
+        here would double-count every trade's realized P&L, corrupting Gate 7's
+        get_daily_trade_stats read). trade_log reads the IDENTICAL blended
+        exit_price PositionManager computed (pos.exit_notional /
+        pos.exit_filled_qty), so the CSV/report and the trades-table row can
+        never diverge.
         """
         for pos in self.position_manager._positions.values():
             if pos.phase != PositionPhase.CLOSED:
@@ -387,26 +397,15 @@ class BacktestHarness:
             if pos.position_id in self._captured_position_ids:
                 continue
 
-            code = pos.code
-            all_code_fills = [f for f in self.sim_execution.exit_fills if f["code"] == code]
-            start = self._exit_fills_consumed.get(code, 0)
-            new_fills = all_code_fills[start:]
-            self._exit_fills_consumed[code] = len(all_code_fills)
-
-            total_qty = sum(f["qty"] for f in new_fills if f.get("exit_price") is not None)
-            if total_qty > 0:
-                exit_price = (
-                    sum(f["exit_price"] * f["qty"] for f in new_fills if f["exit_price"] is not None)
-                    / total_qty
-                )
-            else:
-                exit_price = pos.entry_price  # fallback: no recorded fill (defensive)
-
+            exit_price = (
+                pos.exit_notional / pos.exit_filled_qty if pos.exit_filled_qty > 0
+                else pos.entry_price  # fallback: no recorded fill (defensive)
+            )
             risk = pos.entry_price - pos.initial_stop
             r_multiple = (exit_price - pos.entry_price) / risk if risk != 0 else 0.0
 
             self.trade_log.append({
-                "code": code,
+                "code": pos.code,
                 "entry_price": pos.entry_price,
                 "exit_price": exit_price,
                 "quantity": pos.full_quantity,
@@ -415,19 +414,6 @@ class BacktestHarness:
                 "opened_at": pos.opened_at,
                 "closed_at": pos.updated_at,
             })
-            # T-06-11: persist the SAME row into the scratch trades table so Gate 7's
-            # get_daily_trade_stats sees this trade before the next bar's read (this
-            # runs at the END of _process_bar; Gate 7 runs on the FOLLOWING bar).
-            self._store.record_trade(
-                position_id=pos.position_id,
-                code=code,
-                entry_price=pos.entry_price,
-                exit_price=exit_price,
-                quantity=pos.full_quantity,
-                exit_reason=pos.pending_exit_reason,
-                r_multiple=r_multiple,
-                closed_at=pos.updated_at,
-            )
             self._captured_position_ids.add(pos.position_id)
 
     # ============================================================

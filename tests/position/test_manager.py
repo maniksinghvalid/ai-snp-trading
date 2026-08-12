@@ -142,7 +142,7 @@ def open_store(tmp_state_db):
 def mock_engine():
     """Return an async mock ExecutionEngine."""
     engine = MagicMock()
-    engine.manage_exit = AsyncMock(return_value=0)
+    engine.manage_exit = AsyncMock(return_value=(0, 0.0))
     return engine
 
 
@@ -678,7 +678,7 @@ class TestOnBarStopOut:
         """
         # Full-fill engine so the stop-out completes
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=300)
+        engine.manage_exit = AsyncMock(return_value=(300, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -754,7 +754,7 @@ class TestOnBarStopOut:
         import structlog.testing as stl_testing
 
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=0)
+        engine.manage_exit = AsyncMock(return_value=(0, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -822,7 +822,7 @@ class TestOnBarStopOut:
         import structlog.testing as stl_testing
 
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=120)
+        engine.manage_exit = AsyncMock(return_value=(120, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -878,7 +878,7 @@ class TestOnBarStopOut:
         """
         alert_calls = []
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=300)
+        engine.manage_exit = AsyncMock(return_value=(300, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -961,7 +961,7 @@ class TestOnBarPartialProfit:
         """
         # Wire manage_exit to return 99 (non-zero real fill)
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=99)
+        engine.manage_exit = AsyncMock(return_value=(99, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -1002,7 +1002,7 @@ class TestOnBarPartialProfit:
         import structlog.testing as stl_testing
 
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=40)
+        engine.manage_exit = AsyncMock(return_value=(40, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -1045,7 +1045,7 @@ class TestOnBarPartialProfit:
         stays at 300.
         """
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=0)
+        engine.manage_exit = AsyncMock(return_value=(0, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -1084,7 +1084,7 @@ class TestOnBarPartialProfit:
         """
         engine = MagicMock()
         # manage_exit returns the full remaining quantity
-        engine.manage_exit = AsyncMock(return_value=99)
+        engine.manage_exit = AsyncMock(return_value=(99, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -1621,7 +1621,7 @@ def test_force_close_half_day():
 
     # ---- (c) force_close_all calls engine.manage_exit for each non-CLOSED position ----
     mock_engine = MagicMock()
-    mock_engine.manage_exit = AsyncMock(return_value=0)
+    mock_engine.manage_exit = AsyncMock(return_value=(0, 100.0))
     mock_store = MagicMock()
     mock_store.upsert_position = MagicMock()
 
@@ -1753,7 +1753,7 @@ class TestPendingExitReason:
         and the position transitions to CLOSED.
         """
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=300)
+        engine.manage_exit = AsyncMock(return_value=(300, 100.0))
         cfg = _minimal_cfg()
         mgr = PositionManager(
             store=open_store,
@@ -1789,7 +1789,7 @@ class TestPendingExitReason:
         Uses a full-fill engine (manage_exit returns 300).
         """
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=300)
+        engine.manage_exit = AsyncMock(return_value=(300, 100.0))
         cfg = _minimal_cfg()
         mgr = PositionManager(
             store=open_store,
@@ -1825,7 +1825,7 @@ class TestPendingExitReason:
         Uses a full-fill engine (manage_exit returns 300).
         """
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=300)
+        engine.manage_exit = AsyncMock(return_value=(300, 100.0))
         cfg = _minimal_cfg()
         mgr = PositionManager(
             store=open_store,
@@ -1890,7 +1890,7 @@ class TestPendingExitReason:
         cfg.exit_ttl_seconds = 10.0
 
         # Engine fully fills the position
-        mock_engine.manage_exit = AsyncMock(return_value=100)
+        mock_engine.manage_exit = AsyncMock(return_value=(100, 100.0))
 
         mgr = PositionManager(
             store=open_store,
@@ -2223,7 +2223,7 @@ def test_exit_alert_fires_after_manage_exit(tmp_state_db):
 
     # Build mock engine whose manage_exit returns filled_qty=100 (full fill of 100 remaining)
     mock_engine = MagicMock()
-    mock_engine.manage_exit = AsyncMock(return_value=100)
+    mock_engine.manage_exit = AsyncMock(return_value=(100, 100.0))
 
     mock_strategy = MagicMock()
     mock_strategy.compute_swing_low_2_2 = MagicMock(return_value=99.0)
@@ -2284,7 +2284,7 @@ def test_stop_out_alert_uses_stop_as_exit_proxy(tmp_state_db):
     from bot.state.store import StateStore
 
     mock_engine = MagicMock()
-    mock_engine.manage_exit = AsyncMock(return_value=100)
+    mock_engine.manage_exit = AsyncMock(return_value=(100, 100.0))
 
     mock_strategy = MagicMock()
     mock_strategy.compute_swing_low_2_2 = MagicMock(return_value=96.0)
@@ -2418,7 +2418,7 @@ class TestAdoptOrphan:
 
         # Wire manage_exit to return 200 (full fill) so the STOP_OUT path completes
         engine = MagicMock()
-        engine.manage_exit = AsyncMock(return_value=200)
+        engine.manage_exit = AsyncMock(return_value=(200, 100.0))
 
         cfg = _minimal_cfg()
         mgr = PositionManager(
@@ -2953,7 +2953,7 @@ class TestQuoteTickFallback:
         """_on_quote with bid_price <= pos.trail_stop invokes engine.manage_exit
         once for the remaining_quantity."""
         mock_engine = MagicMock()
-        mock_engine.manage_exit = AsyncMock(return_value=100)
+        mock_engine.manage_exit = AsyncMock(return_value=(100, 100.0))
 
         cfg = _minimal_cfg()
         cfg.use_broker_stop_orders = False
@@ -2986,7 +2986,7 @@ class TestQuoteTickFallback:
     async def test_on_quote_above_trail_stop_does_nothing(self, open_store, mock_strategy):
         """_on_quote with bid_price > pos.trail_stop must NOT invoke manage_exit."""
         mock_engine = MagicMock()
-        mock_engine.manage_exit = AsyncMock(return_value=0)
+        mock_engine.manage_exit = AsyncMock(return_value=(0, 100.0))
 
         cfg = _minimal_cfg()
         cfg.use_broker_stop_orders = False
@@ -3013,9 +3013,14 @@ class TestQuoteTickFallback:
     @pytest.mark.asyncio
     async def test_on_quote_fires_at_most_once(self, open_store, mock_strategy):
         """_on_quote fires the exit at most once per position (one-shot guard).
-        A second tick at the same or lower bid must NOT call manage_exit again."""
+        A second tick at the same or lower bid must NOT call manage_exit again.
+
+        Uses a PARTIAL fill (50 of 200) so the position stays open after tick 1 --
+        proving the one-shot GUARD itself blocks tick 2, independent of the
+        early "already CLOSED" phase check that a full fill would also trigger.
+        """
         mock_engine = MagicMock()
-        mock_engine.manage_exit = AsyncMock(return_value=200)
+        mock_engine.manage_exit = AsyncMock(return_value=(50, 99.0))
 
         cfg = _minimal_cfg()
         cfg.use_broker_stop_orders = False
@@ -3043,3 +3048,225 @@ class TestQuoteTickFallback:
         assert mock_engine.manage_exit.call_count == 1, (
             "_on_quote one-shot guard must prevent double-fire on repeated ticks"
         )
+
+
+# ============================================================
+# P1-B (strategy-audit finding): trade recording restored across every exit path
+# ============================================================
+
+class TestP1BTradeRecording:
+    """PositionManager is the SOLE trades-table writer: every exit path
+    (_trigger_stop_out, _trigger_partial_profit, force_close_all, _on_quote,
+    _on_exit_fill) now credits _record_trade_if_closed, restoring the -2R
+    circuit breaker (SignalEngine Gate 7 reads get_daily_trade_stats, which
+    reads this table) and EOD reporting truth."""
+
+    def test_stop_out_writes_one_trade_row_with_engines_real_price(
+        self, open_store, mock_strategy
+    ):
+        """A full-fill stop-out writes exactly one trades row using the price
+        manage_exit actually returned -- not a stale/approximate value."""
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=(300, 94.5))
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store, engine=engine, cfg=cfg, strategy=mock_strategy,
+        )
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE, entry_price=100.0, initial_stop=95.0,
+            trail_stop=95.0, remaining_quantity=300, full_quantity=300,
+            updated_at=datetime(2026, 6, 24, 10, 5, 0, tzinfo=timezone.utc),
+        )
+        mgr._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=94.0)  # close <= trail_stop=95.0 -> STOP_OUT
+        with patch("bot.position.manager.now_et",
+                  return_value=datetime(2026, 6, 24, 10, 6, 0)):
+            asyncio.run(mgr.on_bar(bar))
+
+        assert pos.phase == PositionPhase.CLOSED
+        rows = open_store.get_closed_trades("2026-06-24")
+        assert len(rows) == 1, f"Expected exactly one trade row, got {rows!r}"
+        assert rows[0]["exit_price"] == pytest.approx(94.5)
+        assert rows[0]["quantity"] == 300
+        assert pos.trade_recorded is True
+
+    def test_partial_then_stop_out_writes_one_blended_row(
+        self, open_store, mock_strategy
+    ):
+        """A partial-profit leg (100@110) followed by a stop-out leg (200@94.5)
+        must write exactly ONE trades row, blended across both legs --
+        (100*110 + 200*94.5) / 300 -- never two rows, never the last-leg-only price."""
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(side_effect=[(100, 110.0), (200, 94.5)])
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store, engine=engine, cfg=cfg, strategy=mock_strategy,
+        )
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE, entry_price=100.0, initial_stop=95.0,
+            trail_stop=95.0, remaining_quantity=300, full_quantity=300,
+            updated_at=datetime(2026, 6, 24, 10, 5, 0, tzinfo=timezone.utc),
+        )
+        mgr._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        # Leg 1: partial profit (evaluate_close's own 0.75R math -- ACTIVE with
+        # entry=100, initial_stop=95 (R=5) -> partial trigger = 100 + 0.75*5 = 103.75.
+        bar1 = _make_bar(close=104.0)
+        with patch("bot.position.manager.now_et",
+                  return_value=datetime(2026, 6, 24, 10, 5, 30)):
+            asyncio.run(mgr.on_bar(bar1))
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        assert open_store.get_closed_trades("2026-06-24") == [], (
+            "a partial leg alone must not write a trades row yet"
+        )
+
+        # Leg 2: stop-out on the remainder.
+        bar2 = _make_bar(close=94.0)  # close <= trail_stop=95.0 -> STOP_OUT
+        with patch("bot.position.manager.now_et",
+                  return_value=datetime(2026, 6, 24, 10, 6, 0)):
+            asyncio.run(mgr.on_bar(bar2))
+        assert pos.phase == PositionPhase.CLOSED
+
+        rows = open_store.get_closed_trades("2026-06-24")
+        assert len(rows) == 1, f"Expected exactly ONE blended trade row, got {rows!r}"
+        expected_blended = (100 * 110.0 + 200 * 94.5) / 300
+        assert rows[0]["exit_price"] == pytest.approx(expected_blended)
+        assert rows[0]["quantity"] == 300
+
+    def test_force_close_writes_a_trade_row_using_returned_exit_price(
+        self, open_store, mock_strategy
+    ):
+        """force_close_all records the trade with the engine's real exit price
+        (not avg_fill_price, the ENTRY price -- same class of bug as Finding 2.7)."""
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=(150, 97.25))
+
+        cfg = _minimal_cfg()
+        cfg.force_close_escalation_step_usd = 0.20
+        cfg.force_close_escalation_cadence_seconds = 0.01
+        cfg.exit_ttl_seconds = 10.0
+
+        alert_calls = []
+        mgr = PositionManager(
+            store=open_store, engine=engine, cfg=cfg, strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: alert_calls.append((code, reason, r)),
+        )
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE, entry_price=100.0, initial_stop=95.0,
+            remaining_quantity=150, full_quantity=150,
+            avg_fill_price=100.0,  # entry fill price -- must NOT be used as exit_proxy
+            updated_at=datetime(2026, 6, 24, 10, 5, 0, tzinfo=timezone.utc),
+        )
+        mgr._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        with patch("bot.position.manager.get_force_close_time_et",
+                  return_value=datetime(2026, 6, 24, 15, 51).time()), \
+             patch("bot.position.manager.now_et",
+                  return_value=datetime(2026, 6, 24, 15, 51, 30)):
+            asyncio.run(mgr.force_close_all(today=datetime(2026, 6, 24).date()))
+
+        rows = open_store.get_closed_trades("2026-06-24")
+        assert len(rows) == 1, f"Expected exactly one trade row, got {rows!r}"
+        assert rows[0]["exit_price"] == pytest.approx(97.25)
+        # R = (97.25-100)/(100-95) = -0.55 -- proves the alert used the real
+        # exit price, not avg_fill_price=100 (which would give R=0).
+        assert len(alert_calls) == 1
+        assert alert_calls[0][2] == pytest.approx(-0.55)
+
+    @pytest.mark.asyncio
+    async def test_on_quote_full_fill_closes_and_records_trade(
+        self, open_store, mock_strategy
+    ):
+        """Regression: _on_quote previously called manage_exit with a signature
+        that does not exist (code=, qty=, pos=) -- every real invocation raised
+        TypeError, swallowed by a bare except, so the D-02 tick-level stop never
+        actually worked despite being the live rules.json setting
+        (use_broker_stop_orders=false). Proves the fixed path closes the
+        position, records the trade, and fires the alert."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=(200, 96.5))
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        alert_calls = []
+        manager = PositionManager(
+            store=open_store, engine=mock_engine, cfg=cfg, strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: alert_calls.append((code, reason, r)),
+        )
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE, entry_price=100.0, initial_stop=95.0,
+            trail_stop=98.0, remaining_quantity=200, full_quantity=200,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        await manager._on_quote(pos.code, bid_price=97.5)  # <= trail_stop=98.0
+
+        assert pos.phase == PositionPhase.CLOSED
+        assert pos.remaining_quantity == 0
+        rows = open_store.get_closed_trades(pos.updated_at.date().isoformat())
+        assert len(rows) == 1, f"Expected exactly one trade row, got {rows!r}"
+        assert rows[0]["exit_price"] == pytest.approx(96.5)
+        assert len(alert_calls) == 1
+        assert alert_calls[0][0] == pos.code
+
+    @pytest.mark.asyncio
+    async def test_on_quote_partial_fill_stays_open_no_trade_row_no_alert(
+        self, open_store, mock_strategy
+    ):
+        """A partial fill via _on_quote leaves the position open -- no trade row,
+        no exit alert (mirrors the bar-close stop-out's own partial handling)."""
+        mock_engine = MagicMock()
+        mock_engine.manage_exit = AsyncMock(return_value=(50, 96.5))
+
+        cfg = _minimal_cfg()
+        cfg.use_broker_stop_orders = False
+
+        alert_calls = []
+        manager = PositionManager(
+            store=open_store, engine=mock_engine, cfg=cfg, strategy=mock_strategy,
+            on_exit_alert=lambda code, reason, r: alert_calls.append((code, reason, r)),
+        )
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE, entry_price=100.0, initial_stop=95.0,
+            trail_stop=98.0, remaining_quantity=200, full_quantity=200,
+        )
+        manager._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        await manager._on_quote(pos.code, bid_price=97.5)
+
+        assert pos.phase != PositionPhase.CLOSED
+        assert pos.remaining_quantity == 150
+        assert open_store.get_closed_trades(pos.updated_at.date().isoformat()) == []
+        assert alert_calls == []
+
+    def test_record_trade_if_closed_is_a_noop_once_already_recorded(
+        self, open_store, mock_strategy
+    ):
+        """Guard: calling _record_trade_if_closed again on an already-recorded
+        position must never write a second row (double-write protection)."""
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store, engine=MagicMock(), cfg=cfg, strategy=mock_strategy,
+        )
+        pos = _make_pos(
+            phase=PositionPhase.CLOSED, entry_price=100.0, initial_stop=95.0,
+            remaining_quantity=0, full_quantity=100,
+            updated_at=datetime(2026, 6, 24, 10, 5, 0, tzinfo=timezone.utc),
+        )
+        open_store.upsert_position(pos)
+
+        mgr._record_trade_if_closed(pos, 100, 105.0)
+        assert len(open_store.get_closed_trades("2026-06-24")) == 1
+
+        # Second call (e.g. a stray duplicate credit) must be a no-op.
+        mgr._record_trade_if_closed(pos, 0, 105.0)
+        assert len(open_store.get_closed_trades("2026-06-24")) == 1

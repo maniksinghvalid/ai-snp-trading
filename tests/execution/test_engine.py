@@ -689,7 +689,7 @@ def test_paper_fill_exit_no_deal_list_query():
         sell_side = "SELL"
 
     # Must NOT raise GatewayError
-    total_filled = _run(engine.manage_exit(
+    total_filled, avg_price = _run(engine.manage_exit(
         code="US.NVDA",
         qty=300,
         side=sell_side,
@@ -700,6 +700,9 @@ def test_paper_fill_exit_no_deal_list_query():
 
     assert total_filled == 300, (
         f"Paper exit fill: expected total_filled=300, got {total_filled}"
+    )
+    assert avg_price == pytest.approx(149.85), (
+        "P1-B: manage_exit must also return the fill's avg price"
     )
     # get_order_status must have been used (correct path)
     gw.get_order_status.assert_awaited()
@@ -771,7 +774,7 @@ def test_paper_fill_exit_partial_then_full():
         sell_side = "SELL"
 
     # Must NOT raise GatewayError
-    total_filled = _run(engine.manage_exit(
+    total_filled, avg_price = _run(engine.manage_exit(
         code="US.NVDA",
         qty=300,
         side=sell_side,
@@ -788,6 +791,8 @@ def test_paper_fill_exit_partial_then_full():
     )
     # No double-count: Round 1 dealt 100, Round 2 dealt 200 → total 300 (not 400 or 600)
     # If double-count occurred, total_filled would be 200 (100+100) or exceed 300.
+    # P1-B: avg_price is qty-weighted across both legs: (100*149.85+200*149.80)/300
+    assert avg_price == pytest.approx((100 * 149.85 + 200 * 149.80) / 300)
 
 
 # ============================================================
@@ -846,7 +851,7 @@ def test_manage_exit_bid_price_falls_back_after_gateway_error():
         sell_side = "SELL"
 
     with patch("bot.execution.engine.asyncio.sleep", new=AsyncMock()):
-        total_filled = _run(engine.manage_exit(
+        total_filled, avg_price = _run(engine.manage_exit(
             code="US.NVDA",
             qty=200,
             side=sell_side,
@@ -861,6 +866,7 @@ def test_manage_exit_bid_price_falls_back_after_gateway_error():
     assert len(placed_orders) == 2, (
         f"Expected 2 place_order calls (partial then remainder), got {len(placed_orders)}"
     )
+    assert avg_price == pytest.approx((100 * 149.85 + 100 * 149.80) / 200)
 
 
 # ============================================================
@@ -926,7 +932,7 @@ def test_manage_exit_continues_on_transient_poll_failure():
         sell_side = "SELL"
 
     # Must NOT raise GatewayError — transient poll failure must be absorbed
-    total_filled = _run(engine.manage_exit(
+    total_filled, avg_price = _run(engine.manage_exit(
         code="US.CLOV",
         qty=66,
         side=sell_side,
@@ -939,6 +945,7 @@ def test_manage_exit_continues_on_transient_poll_failure():
         f"manage_exit must detect fill after transient poll GatewayError; "
         f"got total_filled={total_filled}"
     )
+    assert avg_price == pytest.approx(149.85)
     assert call_count["n"] >= 2, (
         "get_order_status must be called at least twice (first raises, second fills)"
     )
@@ -1020,7 +1027,7 @@ def test_manage_exit_requeries_dealt_qty_after_cancel():
     engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
 
     from moomoo import TrdSide
-    total_filled = _run(engine.manage_exit(
+    total_filled, avg_price = _run(engine.manage_exit(
         code="US.AAPL",
         qty=100,
         side=TrdSide.SELL,
@@ -1032,6 +1039,11 @@ def test_manage_exit_requeries_dealt_qty_after_cancel():
     assert total_filled == 100, (
         f"manage_exit must exit all 100 shares; got total_filled={total_filled}"
     )
+    # P1-B: avg_price weighted across the post-cancel re-queried leg (90@150.00)
+    # and the replacement order's leg (10@149.90) -- NOT the stale pre-cancel
+    # snapshot (80@150.00), matching the same re-query-after-cancel discipline
+    # Finding 1.4 already established for quantity.
+    assert avg_price == pytest.approx((90 * 150.00 + 10 * 149.90) / 100)
     assert order_seq["n"] == 2, (
         f"Must place exactly 2 orders (initial + replacement); got {order_seq['n']}"
     )

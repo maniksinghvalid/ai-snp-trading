@@ -120,6 +120,17 @@ class PositionState:
     # Set at the FSM trigger point before the exit fill arrives so the alerter
     # can pass the real reason (not a hardcoded constant) to on_exit_alert (ALERT-02).
     pending_exit_reason: Optional[str] = None
+    # In-memory blended-exit-price accumulator (never persisted — same rationale
+    # as pending_exit_reason). Populated by PositionManager._record_trade_if_closed
+    # as each exit leg (partial + final) fills; exit_notional / exit_filled_qty is
+    # the qty-weighted average exit price used for the ONE trades-table row this
+    # position ever produces (P1-B, strategy-audit finding). A restart between
+    # legs resets these to 0 — the final recorded price then reflects only the
+    # legs filled after the restart, a known and accepted trade-off (see
+    # PositionManager._record_trade_if_closed docstring).
+    exit_filled_qty: int = 0
+    exit_notional: float = 0.0
+    trade_recorded: bool = False
     # Broker-assigned order_id of the live protective stop order (D-01/D-04).
     # None before the first stop is placed; set by arm_stop_protection() after a
     # confirmed entry fill; updated by _sync_broker_stop() on every trail ratchet.
