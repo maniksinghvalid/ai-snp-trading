@@ -846,7 +846,22 @@ class PositionManager:
         pos.updated_at = now_et()
         self._persist_position(pos, event="partial_profit")
 
-        if self._engine is not None:
+        if qty < 1:
+            # P2 (strategy-audit finding): floor(remaining_quantity *
+            # partial_profit_fraction) rounds to 0 for small positions (qty<=2 at
+            # fraction=0.3333) -- skip the engine round-trip for a zero-share
+            # order entirely. The FSM has already transitioned to PARTIAL_TAKEN
+            # above (evaluate_close), which is the correct degradation: the
+            # position now watches for the 1R breakeven trigger next, same as
+            # a real partial would, just without a scale-out that couldn't
+            # have sold a whole share anyway.
+            _logger.info(
+                "partial_skipped_min_qty",
+                code=pos.code,
+                remaining_quantity=pos.remaining_quantity,
+                reason="floor(remaining_quantity * partial_profit_fraction) < 1",
+            )
+        elif self._engine is not None:
             self._exiting.add(pos.code)
             try:
                 filled_qty, exit_price = await self._place_exit_order(pos.code, qty)

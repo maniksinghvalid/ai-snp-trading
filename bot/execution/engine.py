@@ -103,6 +103,23 @@ class ExecutionEngine:
         self._store = store
         self._cfg = cfg
 
+    def _entry_chase_limit_exceeded(self, intent, limit_price: float) -> bool:
+        """P2 (strategy-audit finding): True when limit_price has chased beyond
+        cfg.max_entry_chase_r * (entry_price - stop_price) above the signal's
+        own entry_price. cfg.max_entry_chase_r is None by default (unbounded
+        chase, today's behavior) -- the guard is a no-op unless explicitly
+        configured. Live-only: the backtester's N+1-open fill model has no
+        re-quote loop to bound, so this is never consulted offline.
+        """
+        max_chase_r = getattr(self._cfg, "max_entry_chase_r", None)
+        if max_chase_r is None:
+            return False
+        stop_distance = intent.entry_price - intent.stop_price
+        if stop_distance <= 0:
+            return False  # defensive -- RiskEngine already rejects this upstream
+        cap = intent.entry_price + max_chase_r * stop_distance
+        return limit_price > cap
+
     async def _get_price_with_fallback(
         self, code: str, side: str, fallback: Optional[float] = None,
     ) -> float:
@@ -281,6 +298,19 @@ class ExecutionEngine:
             return None
         limit_price = round(ask_price + self._cfg.entry_limit_buffer_usd, 4)
 
+        # P2 (strategy-audit finding): never place at a price the signal never
+        # justified, even on the very first placement.
+        if self._entry_chase_limit_exceeded(intent, limit_price):
+            self._resolve_intent_expired(intent.intent_id)
+            _logger.warning(
+                "entry_chase_limit_exceeded",
+                code=intent.code,
+                intent_id=intent.intent_id,
+                limit_price=limit_price,
+                max_entry_chase_r=self._cfg.max_entry_chase_r,
+            )
+            return None
+
         trd_side_buy = _get_trd_side_buy()
         order_id = await self._gw.place_order(
             intent.code, intent.quantity, limit_price, trd_side_buy
@@ -373,6 +403,20 @@ class ExecutionEngine:
                     intent.code, "ask", fallback=ask_price,
                 )
                 limit_price = round(ask_price + self._cfg.entry_limit_buffer_usd, 4)
+
+                # P2 (strategy-audit finding): abandon rather than chase the
+                # price past the configured cap on a re-price too.
+                if self._entry_chase_limit_exceeded(intent, limit_price):
+                    self._resolve_intent_expired(intent.intent_id)
+                    _logger.warning(
+                        "entry_chase_limit_exceeded",
+                        code=intent.code,
+                        intent_id=intent.intent_id,
+                        limit_price=limit_price,
+                        max_entry_chase_r=self._cfg.max_entry_chase_r,
+                    )
+                    return None
+
                 order_id = await self._gw.place_order(
                     intent.code, intent.quantity, limit_price, trd_side_buy
                 )

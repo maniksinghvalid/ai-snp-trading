@@ -46,6 +46,7 @@ class _MockCfg:
     exit_escalation_cadence_seconds: float = 0.01
     force_close_escalation_step_usd: float = 0.20
     force_close_escalation_cadence_seconds: float = 0.01
+    max_entry_chase_r: float = None  # P2 (strategy-audit finding): off by default
 
 
 @dataclass
@@ -1047,3 +1048,85 @@ def test_manage_exit_requeries_dealt_qty_after_cancel():
     assert order_seq["n"] == 2, (
         f"Must place exactly 2 orders (initial + replacement); got {order_seq['n']}"
     )
+
+
+# ============================================================
+# P2 (strategy-audit finding): max entry chase cap (live-only, default off)
+# ============================================================
+
+def test_max_entry_chase_r_none_places_order_regardless_of_ask():
+    """Default (max_entry_chase_r=None): the guard never fires, even for an
+    ask far above entry_price -- today's unbounded-chase behavior, unchanged."""
+    from bot.execution.engine import ExecutionEngine
+
+    cfg = _MockCfg()  # max_entry_chase_r=None by default
+    gw = MagicMock()
+    gw.get_ask_price = AsyncMock(return_value=200.00)  # far above entry_price=182.00
+    gw.place_order = AsyncMock(return_value="ORDER-001")
+    gw.get_order_status = AsyncMock(return_value=[
+        {"order_id": "ORDER-001", "dealt_qty": 100, "dealt_avg_price": 200.05},
+    ])
+    gw.cancel_order = AsyncMock()
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    fill_event = _run(engine._manage_entry_order(_MockIntent()))
+
+    assert fill_event is not None
+    gw.place_order.assert_awaited_once()
+
+
+def test_max_entry_chase_r_abandons_before_the_first_placement():
+    """When the very first ask+buffer already exceeds
+    entry_price + max_entry_chase_r * (entry_price - stop_price), the engine
+    must abandon WITHOUT ever calling place_order -- never chase a price the
+    signal never justified."""
+    from bot.execution.engine import ExecutionEngine
+
+    # intent: entry_price=182.00, stop_price=180.18 -> R=1.82
+    # max_entry_chase_r=1.0 -> cap = 182.00 + 1.0*1.82 = 183.82
+    # ask=184.00 + buffer(0.05) = 184.05 > 183.82 -- must abandon immediately
+    cfg = _MockCfg(max_entry_chase_r=1.0)
+    gw = MagicMock()
+    gw.get_ask_price = AsyncMock(return_value=184.00)
+    gw.place_order = AsyncMock(return_value="SHOULD-NOT-BE-CALLED")
+    gw.cancel_order = AsyncMock()
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    fill_event = _run(engine._manage_entry_order(_MockIntent()))
+
+    assert fill_event is None
+    gw.place_order.assert_not_called()
+    store.expire_pending_intent.assert_called_once()
+
+
+def test_max_entry_chase_r_abandons_at_reprice_not_initial_placement():
+    """The initial ask is within the cap (order placed, no fill within TTL);
+    the RE-PRICE ask has moved beyond the cap -- must abandon at that point,
+    having placed exactly ONE order (not a second, over-the-cap one)."""
+    from bot.execution.engine import ExecutionEngine
+
+    # cap = 182.00 + 1.0*1.82 = 183.82
+    cfg = _MockCfg(entry_max_retries=2, max_entry_chase_r=1.0)
+    gw = MagicMock()
+    # First call (initial pricing): 183.00 + 0.05 = 183.05 <= 183.82 -- within cap.
+    # Second call (mid-loop re-price): 184.50 + 0.05 = 184.55 > 183.82 -- abandon.
+    gw.get_ask_price = AsyncMock(side_effect=[183.00, 184.50])
+    gw.place_order = AsyncMock(return_value="ORDER-001")
+    gw.get_order_status = AsyncMock(return_value=[])  # never fills within TTL
+    gw.cancel_order = AsyncMock()
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    fill_event = _run(engine._manage_entry_order(_MockIntent()))
+
+    assert fill_event is None
+    assert gw.place_order.await_count == 1, (
+        f"Expected exactly one placement (before the over-cap re-price), "
+        f"got {gw.place_order.await_count}"
+    )
+    store.expire_pending_intent.assert_called_once()

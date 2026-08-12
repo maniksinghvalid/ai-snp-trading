@@ -589,3 +589,21 @@ class TestInitialStopReferenceConfig:
         with pytest.raises(ConfigError) as exc_info:
             load_strategy_config(str(path))
         assert "moon_minus_1pct" in str(exc_info.value)
+
+
+# ============================================================
+# max_entry_chase_r config test (P2, strategy-audit finding)
+# ============================================================
+
+class TestMaxEntryChaseRConfig:
+    def test_real_rules_json_defaults_to_none(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.max_entry_chase_r is None
+
+    def test_explicit_value_is_read(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["execution"]["max_entry_chase_r"] = 2.0
+        path = tmp_path / "chase.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.max_entry_chase_r == 2.0

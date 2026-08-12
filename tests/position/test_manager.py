@@ -1116,6 +1116,38 @@ class TestOnBarPartialProfit:
             f"Expected CLOSED when remaining hits 0, got {pos.phase}"
         )
 
+    def test_partial_min_qty_guard_skips_engine_call_when_floor_is_zero(
+        self, open_store, mock_strategy
+    ):
+        """P2 (strategy-audit finding): floor(remaining_quantity *
+        partial_profit_fraction) < 1 must skip the engine call entirely (no
+        wasted broker round-trip for a zero-share order) while still letting
+        the FSM proceed to PARTIAL_TAKEN (watching for the 1R breakeven
+        trigger next) -- previously this silently called manage_exit(qty=0),
+        harmless at the engine level but a wasted async round-trip.
+        """
+        engine = MagicMock()
+        engine.manage_exit = AsyncMock(return_value=(0, 0.0))
+
+        cfg = _minimal_cfg()
+        mgr = PositionManager(
+            store=open_store, engine=engine, cfg=cfg, strategy=mock_strategy,
+        )
+        # remaining_quantity=2 -> floor(2 * 0.3333) == 0
+        pos = _make_pos(
+            phase=PositionPhase.ACTIVE, entry_price=100.0, initial_stop=98.0,
+            trail_stop=98.0, full_quantity=2, remaining_quantity=2,
+        )
+        mgr._positions[pos.code] = pos
+        open_store.upsert_position(pos)
+
+        bar = _make_bar(close=101.5)  # >= 0.75R threshold
+        asyncio.run(mgr.on_bar(bar))
+
+        assert pos.phase == PositionPhase.PARTIAL_TAKEN
+        assert pos.remaining_quantity == 2, "no shares should be credited when qty < 1"
+        engine.manage_exit.assert_not_called()
+
 
 # ============================================================
 # Test: POS-05 — Restart reconstruction

@@ -209,6 +209,14 @@ class StrategyConfig:
     # preserves today's exact-entry breakeven behavior.
     breakeven_buffer_r: float = 0.0  # exit.breakeven_buffer_R
 
+    # ---- max entry chase (CFG-01, P2 strategy-audit finding) ----
+    # None (default): unbounded chase, today's behavior. When set, ExecutionEngine
+    # abandons the entry intent (D-05) rather than re-pricing/placing at a limit
+    # that has chased more than max_entry_chase_r * (entry_price - stop_price)
+    # above the signal's own entry_price. Live-only -- the backtester's N+1-open
+    # fill model has no re-quote loop to bound.
+    max_entry_chase_r: Optional[float] = None  # execution.max_entry_chase_r
+
 
 # ============================================================
 # Loader
@@ -329,6 +337,10 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         force_close_escalation_cadence_seconds=float(ex_cfg["force_close_escalation_cadence_seconds"]),
         # Phase 7 execution + intraday_filters additions (CFG-01, D-02)
         use_broker_stop_orders=bool(ex_cfg.get("use_broker_stop_orders", True)),
+        max_entry_chase_r=(
+            float(ex_cfg["max_entry_chase_r"]) if ex_cfg.get("max_entry_chase_r") is not None
+            else None
+        ),
         rvol_tod_lookback_days=int(inf.get("I3_rvol_tod_lookback_days", 14)),
         # service (Phase 5 tunables — CFG-01, D-01/D-03/D-06/D-10)
         premarket_scan_et=str(svc_cfg["premarket_scan_et"]),

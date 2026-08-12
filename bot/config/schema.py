@@ -188,7 +188,10 @@ SCHEMA = {
                 "force_close_escalation_step_usd":        {"type": "number"},
                 "force_close_escalation_cadence_seconds": {"type": "number"},
                 # Phase 7 addition (optional — loader provides default=True)
-                "use_broker_stop_orders":                 {"type": "boolean"}
+                "use_broker_stop_orders":                 {"type": "boolean"},
+                # P2 addition (optional — loader provides default=None/off,
+                # strategy-audit finding): live-only entry-chase cap.
+                "max_entry_chase_r":                      {"type": "number"}
             }
         },
 
