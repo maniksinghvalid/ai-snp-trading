@@ -516,8 +516,14 @@ class SignalEngine:
         # --------------------------------------------------------
         # Gate 2: Intraday filter (SIG-03: I1/I2/I3)
         # --------------------------------------------------------
-        # Fetch rvol from the daily_scan table (RESEARCH Pitfall 2: never recompute RVOL).
-        # rvol = current_volume / rvol_baseline. If rvol_baseline is missing/zero → no signal.
+        # rvol = event.cum_volume / tod_baseline (SIG-RVOL-TOD) — the SOLE RVOL path
+        # (strategy-audit P1-A). The legacy event.volume / rvol_baseline fallback was
+        # DELETED: it compared ONE 5m bar's volume against the mean of 14 prior DAILY
+        # volumes, an effectively unpassable ratio, and it was the ONLY path ever
+        # available to an intraday-rescan-added code (only run_daily_scan wrote TOD
+        # baselines — run_intraday_rescan now does too, for newly-subscribed codes).
+        # A missing tod_baseline here means genuinely missing data, not a structural
+        # gap — fail closed rather than fall back to an unpassable/unit-mismatched ratio.
         #
         # WR-06 date convention: ALL *_date keys in this module use the US ET calendar
         # date (now_et().date()). The Phase 2 scan writer MUST use the same ET-date key
@@ -526,28 +532,18 @@ class SignalEngine:
         # Do NOT use UTC dates for *_date keys (migration 0001's "UTC" note applies to
         # *_time / *_at timestamp fields, not to session-scoped date keys).
         session_date_str = now_et().date().isoformat()
-        rvol_baseline = self._store.get_rvol_baseline(session_date_str, code)
 
-        # I3-TOD: look up the time-of-day bucketed baseline when available.
         # time_key format is "YYYY-MM-DD HH:MM:00" — extract "HH:MM" for bucket lookup.
-        # When tod_baseline > 0, use TOD-normalized primary path (SIG-RVOL-TOD).
-        # When absent (0.0), fall back to the legacy event.volume / rvol_baseline ratio.
-        # TOD is the primary path: do NOT skip the signal when tod_baseline > 0
-        # even if rvol_baseline is missing (CFG-01, Pitfall 4).
         time_bucket = event.time_key[11:16]  # "HH:MM"
         tod_baseline = self._store.get_tod_baseline(session_date_str, code, time_bucket)
-        if tod_baseline > 0.0:
-            rvol = event.cum_volume / tod_baseline   # TOD-normalized (primary path)
-        else:
-            # Legacy fallback: skip only when BOTH baselines are absent
-            if rvol_baseline <= 0.0:
-                _logger.info(
-                    "signal_skipped_no_rvol_baseline",
-                    code=code,
-                    reason="no rvol_baseline in daily_scan for today",
-                )
-                return None
-            rvol = event.volume / rvol_baseline   # legacy fallback
+        if tod_baseline <= 0.0:
+            _logger.info(
+                "signal_skipped_no_tod_baseline",
+                code=code,
+                reason="no tod_baseline in tod_baselines for today's session/bucket",
+            )
+            return None
+        rvol = event.cum_volume / tod_baseline
 
         # Build the single-row DataFrame for passes_intraday_filters (reads iloc[-1]["close"])
         bars_5m = pd.DataFrame([{

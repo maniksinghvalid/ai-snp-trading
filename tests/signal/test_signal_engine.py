@@ -97,8 +97,13 @@ def make_cfg(**overrides) -> StrategyConfig:
     return StrategyConfig(**defaults)
 
 
-def make_bar(code="US.AAPL", close=155.0, hod=154.0, lod=148.0) -> BarEvent:
-    """Build a BarEvent that will satisfy I1/I2/I3 when premarket_high < close."""
+def make_bar(code="US.AAPL", close=155.0, hod=154.0, lod=148.0, cum_volume=1_000_000) -> BarEvent:
+    """Build a BarEvent that will satisfy I1/I2/I3 when premarket_high < close and a
+    tod_baseline is seeded at bucket "10:10" (this bar's fixed time_key bucket) --
+    see seed_rvol_baseline. cum_volume defaults to 1_000_000 so
+    seed_rvol_baseline's default tod_baseline=400_000 gives rvol=2.5, comfortably
+    >= rvol_min=2.0 (the legacy event.volume/rvol_baseline fallback this fixture
+    used to rely on was removed, strategy-audit P1-A -- TOD is now the sole path)."""
     return BarEvent(
         code=code,
         time_key="2026-06-24 10:10:00",
@@ -109,6 +114,7 @@ def make_bar(code="US.AAPL", close=155.0, hod=154.0, lod=148.0) -> BarEvent:
         volume=1_000_000,
         hod=hod,
         lod=lod,
+        cum_volume=cum_volume,
     )
 
 
@@ -123,6 +129,25 @@ def make_store_with_daily_count(filled_count: int, session_date: str = "2026-06-
         )
         store.conn.commit()
     return store
+
+
+def seed_rvol_baseline(store: StateStore, scan_date: str, code: str = "US.AAPL",
+                       time_bucket: str = "10:10", tod_baseline: float = 400_000.0,
+                       rvol_baseline: float = 500_000.0, gap_pct: float = 2.0,
+                       rank: int = 1) -> None:
+    """Seed the daily_scan row (rvol_baseline: scanner metadata, still written) AND
+    the TOD baseline SignalEngine actually reads for I3 -- the sole RVOL path since
+    the legacy event.volume/rvol_baseline fallback was removed (strategy-audit
+    P1-A). Most callers just need Gate 2 out of the way to exercise some OTHER
+    gate; the defaults (tod_baseline=400_000 against make_bar's cum_volume=1M)
+    pass I3 with margin. Pass a higher tod_baseline to deliberately fail I3."""
+    store.conn.execute(
+        """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (scan_date, code, gap_pct, rank, f"{scan_date}T09:30:00", rvol_baseline),
+    )
+    store.conn.commit()
+    store.upsert_tod_baselines(scan_date, code, {time_bucket: tod_baseline})
 
 
 def make_engine(
@@ -165,18 +190,13 @@ class TestSignalEngineGates:
         premarket_high = 150.0
         hod = 154.0  # I2: close must be >= hod
 
-        # base bar that passes all: close=155 > premarket_high=150, close=155 >= hod=154, rvol=3.0
+        # base bar that passes all: close=155 > premarket_high=150, close=155 >= hod=154, rvol=2.5
         base_bar = make_bar(close=155.0, hod=hod)
-        # rvol comes from the daily_scan table — mock it via store
+        # rvol comes from the tod_baselines table — mock it via store
         store = StateStore(db_path=":memory:")
         store.open()
         scan_date = "2026-06-24"
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-        )
-        store.conn.commit()
+        seed_rvol_baseline(store, scan_date, "US.AAPL")
 
         gateway = MagicMock()
         gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
@@ -209,14 +229,9 @@ class TestSignalEngineGates:
             # Fail I3: rvol below min
             store2 = StateStore(db_path=":memory:")
             store2.open()
-            # Insert very small rvol_baseline so rvol = volume/baseline < 2.0
-            # volume=1_000_000, if baseline=600_000 → rvol=1.67 < 2.0
-            store2.conn.execute(
-                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 600_000),
-            )
-            store2.conn.commit()
+            # tod_baseline high enough that cum_volume=1_000_000 / tod_baseline < 2.0
+            # 1_000_000 / 600_000 = 1.67 < rvol_min=2.0
+            seed_rvol_baseline(store2, scan_date, "US.AAPL", tod_baseline=600_000.0)
             engine4 = make_engine(cfg=cfg, gateway=gateway, store=store2,
                                   premarket_highs={"US.AAPL": premarket_high})
             result_i3 = run(engine4.on_bar(base_bar))
@@ -262,12 +277,7 @@ class TestSignalEngineGates:
         store = StateStore(db_path=":memory:")
         store.open()
         scan_date = "2026-06-24"
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-        )
-        store.conn.commit()
+        seed_rvol_baseline(store, scan_date, "US.AAPL")
 
         gateway = MagicMock()
         gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
@@ -288,12 +298,7 @@ class TestSignalEngineGates:
         with patch("bot.signal.signal_engine.now_et", return_value=time_1130):
             store2 = StateStore(db_path=":memory:")
             store2.open()
-            store2.conn.execute(
-                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-            )
-            store2.conn.commit()
+            seed_rvol_baseline(store2, scan_date, "US.AAPL")
             engine2 = make_engine(cfg=cfg_narrow, gateway=gateway, store=store2,
                                   premarket_highs=premarket_highs)
             result2 = run(engine2.on_bar(bar))
@@ -328,12 +333,7 @@ class TestSignalEngineEntryWindow:
         store = StateStore(db_path=":memory:")
         store.open()
         scan_date = "2026-06-24"
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-        )
-        store.conn.commit()
+        seed_rvol_baseline(store, scan_date, "US.AAPL")
 
         gateway = MagicMock()
         gateway.get_positions = AsyncMock(return_value=(0, pd.DataFrame()))
@@ -464,12 +464,7 @@ class TestSignalEngineConcurrentCap:
         def make_positioned_store(n_open: int):
             s = StateStore(db_path=":memory:")
             s.open()
-            s.conn.execute(
-                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-            )
-            s.conn.commit()
+            seed_rvol_baseline(s, scan_date, "US.AAPL")
             for i in range(n_open):
                 _insert_position_row(s, f"pos-{i}", f"US.X{i}", remaining_quantity=100)
             return s
@@ -511,12 +506,7 @@ class TestSignalEngineConcurrentCap:
 
         store = StateStore(db_path=":memory:")
         store.open()
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-        )
-        store.conn.commit()
+        seed_rvol_baseline(store, scan_date, "US.AAPL")
 
         # One qty=0 row (does not count) and one real qty>0 row (counts = 1).
         _insert_position_row(store, "pos-zero", "US.ZERO", remaining_quantity=0)
@@ -556,12 +546,7 @@ class TestSignalEngineDailyCap:
         store = StateStore(db_path=":memory:")
         store.open()
         scan_date = session_date
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-        )
-        store.conn.commit()
+        seed_rvol_baseline(store, scan_date, "US.AAPL")
         if filled_count > 0:
             store.conn.execute(
                 "INSERT INTO daily_trade_count (session_date, filled_count, updated_at) VALUES (?, ?, ?)",
@@ -677,12 +662,7 @@ class TestSignalEngineDailyCap:
         def make_store_with_scan():
             s = StateStore(db_path=":memory:")
             s.open()
-            s.conn.execute(
-                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-            )
-            s.conn.commit()
+            seed_rvol_baseline(s, scan_date, "US.AAPL")
             return s
 
         gateway = MagicMock()
@@ -749,11 +729,7 @@ class TestSignalEngineDailyCap:
         def make_store_with_pending(has_pending: bool):
             s = StateStore(db_path=":memory:")
             s.open()
-            s.conn.execute(
-                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (scan_date, "US.AAPL", 2.0, 1, "2026-06-24T09:30:00", 500_000),
-            )
+            seed_rvol_baseline(s, scan_date, "US.AAPL")
             if has_pending:
                 s.conn.execute(
                     """INSERT INTO pending_intents
@@ -811,12 +787,7 @@ class TestPremarketHighSeededEndToEnd:
         """Open an in-memory StateStore with a daily_scan row for US.AAPL."""
         s = StateStore(db_path=":memory:")
         s.open()
-        s.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_date, "US.AAPL", 2.0, 1, f"{session_date}T09:30:00", 500_000),
-        )
-        s.conn.commit()
+        seed_rvol_baseline(s, session_date, "US.AAPL")
         return s
 
     def test_entry_fires_after_fetch_premarket_highs(self):
@@ -928,13 +899,8 @@ class TestRescanPremarketHighMerge:
         """Open an in-memory StateStore with daily_scan rows for AAPL and NVDA."""
         s = StateStore(db_path=":memory:")
         s.open()
-        for code, rvol in [("US.AAPL", 500_000), ("US.NVDA", 800_000)]:
-            s.conn.execute(
-                """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (session_date, code, 2.0, 1, f"{session_date}T09:30:00", rvol),
-            )
-        s.conn.commit()
+        for code, tod in [("US.AAPL", 400_000.0), ("US.NVDA", 800_000.0)]:
+            seed_rvol_baseline(s, session_date, code, tod_baseline=tod)
         return s
 
     def test_add_premarket_highs_merges_without_clobbering_initial_seed(self):
@@ -1039,7 +1005,7 @@ class TestRescanPremarketHighMerge:
         # After merge: NVDA bar with close > premarket_high must pass Gate 1
         # close=125.0 > premarket_high=120.5 (I1 passes)
         # close=125.0 >= hod=124.0 (I2 passes)
-        # rvol = volume/rvol_baseline = 1_000_000/800_000 = 1.25 — below rvol_min=2.0 → Gate 2 blocks
+        # rvol = cum_volume/tod_baseline = 1_000_000/800_000 = 1.25 — below rvol_min=2.0 → Gate 2 blocks
         # That's expected: Gate 1 no longer blocks. Gate 2 may still block (that's correct behavior).
         # We verify gate_1 no longer emits signal_skipped_no_premarket_high by checking
         # that _premarket_highs now contains the code.
@@ -1153,27 +1119,32 @@ class TestTodNormalizedI3Gate:
             "Old code uses event.volume/rvol_baseline = 0.4 → I3 fails (RED)."
         )
 
-    def test_no_tod_baseline_falls_back_to_legacy(self):
-        """When no TOD baseline exists (get_tod_baseline returns 0.0), fallback to legacy path.
-
-        Legacy: rvol = event.volume / rvol_baseline. Existing behavior must be preserved.
+    def test_no_tod_baseline_fails_closed(self):
+        """When no TOD baseline exists (get_tod_baseline returns 0.0), Gate 2 fails
+        closed (strategy-audit P1-A): the legacy event.volume/rvol_baseline
+        fallback was DELETED — it compared one 5m bar's volume against the mean
+        of 14 prior DAILY volumes, an effectively unpassable ratio (a single 5m
+        bar would need to trade >=2x the average FULL DAY's volume), and it was
+        the ONLY path available to any intraday-rescan-added code (only the
+        premarket scan wrote TOD baselines). A missing tod_baseline now means
+        genuinely missing data, not a structural gap -- so on_bar must return
+        None rather than silently emitting via a fallback ratio that can't be
+        trusted.
         """
         session_date = "2026-07-03"
-        # No TOD baseline stored → get_tod_baseline returns 0.0 → legacy path
-        # event.volume=1_000_000, rvol_baseline=500_000 → rvol=2.0 → I3 passes
         store = self._make_tod_store(
             session_date=session_date,
             rvol_baseline=500_000,
-            tod_baseline=None,    # no TOD baseline → forces legacy path
+            tod_baseline=None,    # no TOD baseline stored -> get_tod_baseline returns 0.0
         )
         bar = BarEvent(
             code="US.AAPL",
             time_key=f"{session_date} 10:10:00",
             open=150.0, high=156.0, low=149.0, close=155.0,
-            volume=1_000_000,     # legacy: 1M/500K = 2.0 → I3 passes
+            volume=1_000_000,
             hod=154.0,
             lod=148.0,
-            cum_volume=100_000,   # irrelevant when no TOD baseline
+            cum_volume=100_000_000,  # irrelevant -- Gate 2 fails before rvol is even computed
         )
         premarket_highs = {"US.AAPL": 150.0}
 
@@ -1188,9 +1159,9 @@ class TestTodNormalizedI3Gate:
         with patch("bot.signal.signal_engine.now_et", return_value=in_window):
             result = run(engine.on_bar(bar))
 
-        assert result is not None, (
-            "Legacy fallback: rvol = event.volume / rvol_baseline = 2.0 must pass I3 "
-            "when no TOD baseline is stored (existing behavior preserved)."
+        assert result is None, (
+            "No tod_baseline must fail Gate 2 closed -- there is no legacy fallback "
+            "to fall back to."
         )
 
     def test_tod_time_bucket_extraction(self):
@@ -1309,13 +1280,8 @@ class TestCircuitBreakerGate:
         """
         store = StateStore(db_path=":memory:")
         store.open()
-        # Seed daily_scan so Gate 2 passes (no rvol_baseline skip)
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_date, "US.AAPL", 2.0, 1, f"{session_date}T09:30:00", 500_000),
-        )
-        store.conn.commit()
+        # Seed daily_scan + tod_baseline so Gate 2 passes (no I3 skip)
+        seed_rvol_baseline(store, session_date, "US.AAPL")
         # Seed a closed trade so get_daily_trade_stats returns realized_pnl.
         # realized_pnl = (exit_price - entry_price) * quantity (store computes it via SQL).
         # Schema: trade_id, position_id, code, entry_price, exit_price, quantity,
@@ -1351,14 +1317,19 @@ class TestCircuitBreakerGate:
                            premarket_highs=premarket_highs)
 
     def _make_passing_bar(self, session_date="2026-07-03") -> BarEvent:
-        """BarEvent that passes all non-breaker gates (I1/I2/I3, premarket_high<close)."""
+        """BarEvent that passes all non-breaker gates (I1/I2/I3, premarket_high<close).
+
+        cum_volume=1_000_000 against _make_breaker_store's seed_rvol_baseline
+        default tod_baseline=400_000 at bucket "10:10" -> rvol=2.5, passes I3.
+        """
         return BarEvent(
             code="US.AAPL",
             time_key=f"{session_date} 10:10:00",
             open=150.0, high=156.0, low=149.0, close=155.0,
-            volume=1_000_000,   # legacy rvol=2.0 → I3 passes
+            volume=1_000_000,
             hod=154.0,
             lod=148.0,
+            cum_volume=1_000_000,
         )
 
     def test_breaker_trips_on_loss_persists_and_blocks(self):
@@ -1535,14 +1506,23 @@ class TestI2ModeTracker:
     regardless of which gate a bar fails, and resets across a session boundary.
     """
 
-    @staticmethod
-    def _seed_rvol(store: StateStore, session_date: str, code: str = "US.AAPL") -> None:
-        store.conn.execute(
-            """INSERT INTO daily_scan (scan_date, code, gap_pct, rank, created_at, rvol_baseline)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_date, code, 2.0, 1, f"{session_date}T09:30:00", 500_000),
-        )
-        store.conn.commit()
+    # Every 5m bucket this class's directly-constructed BarEvents use across its
+    # three tests -- seeding all of them means each test doesn't have to derive
+    # its own passing cum_volume/tod_baseline math per bar.
+    _BUCKETS = ("10:05", "10:10", "15:25")
+
+    @classmethod
+    def _seed_rvol(cls, store: StateStore, session_date: str, code: str = "US.AAPL") -> None:
+        for i, bucket in enumerate(cls._BUCKETS):
+            # gap_pct/rank only matter for the daily_scan row's first insert per
+            # (session_date, code); seed_rvol_baseline's INSERT is idempotent-safe
+            # here because each bucket call targets the SAME row via upsert_tod_baselines
+            # for the tod_baselines table, but daily_scan has no upsert -- only seed
+            # that row once (i == 0) and add tod_baselines for the rest.
+            if i == 0:
+                seed_rvol_baseline(store, session_date, code, time_bucket=bucket, tod_baseline=200_000.0)
+            else:
+                store.upsert_tod_baselines(session_date, code, {bucket: 200_000.0})
 
     def test_tracker_updates_even_when_an_earlier_gate_fails(self):
         """Bar 1 fails Gate 1 (no premarket high yet) and returns None -- the

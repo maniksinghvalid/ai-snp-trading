@@ -2251,7 +2251,9 @@ class TestTodBaselineIntegration:
 
     def test_missing_5m_data_does_not_call_upsert_and_does_not_raise(self, tmp_state_db):
         """If 5m download returns no frame for a candidate, upsert_tod_baselines is NOT called
-        and the scan does not raise (graceful degradation to legacy RVOL path)."""
+        and the scan does not raise (graceful degradation: SignalEngine's Gate 2
+        later fails closed for this code with no tod_baseline -- the legacy
+        event.volume/rvol_baseline fallback was removed, strategy-audit P1-A)."""
         from bot.scanner.scanner import run_daily_scan
         import datetime as _dt
         from zoneinfo import ZoneInfo
@@ -2316,3 +2318,216 @@ class TestTodBaselineIntegration:
             f"upsert_tod_baselines must NOT be called when 5m frame is missing; "
             f"called for: {called_codes}"
         )
+
+
+# ============================================================
+# P1-A (strategy-audit): TOD baselines for intraday-rescan-added codes
+#
+# Only run_daily_scan ever wrote tod_baselines rows before this fix -- an
+# intraday-rescan-discovered code could never fire I3 (it always fell onto the
+# unit-mismatched legacy RVOL fallback in SignalEngine, since deleted). This
+# extracts run_daily_scan's Step 5b into _persist_tod_baselines(exclude_today=)
+# so run_intraday_rescan can call it too, for exactly the newly-subscribed codes.
+# ============================================================
+
+class TestMaskPriorSessions:
+    """Unit tests for scanner._mask_prior_sessions (pure function, no store/network).
+
+    Mirrors backtester.harness.BacktestHarness._prior_sessions_only's own
+    no-look-ahead rationale: a mid-day rescan's TOD-baseline fetch must never
+    include today's own partial session, or the baseline is self-referential.
+    """
+
+    def test_masks_out_rows_on_and_after_scan_date(self):
+        from bot.scanner.scanner import _mask_prior_sessions
+
+        sessions = [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)]
+        frame = _make_5m_frame(sessions=sessions, volume_per_bar=100_000.0)
+
+        masked = _mask_prior_sessions(frame, date(2026, 7, 3))
+
+        masked_dates = sorted({ts.date() for ts in masked.index})
+        assert masked_dates == [date(2026, 7, 1), date(2026, 7, 2)], (
+            "must keep only sessions strictly BEFORE scan_date -- today's own "
+            "partial session must never leak into the baseline"
+        )
+
+    def test_naive_index_is_treated_as_utc_before_masking(self):
+        """Same tz-handling convention as _compute_tod_baselines itself."""
+        from bot.scanner.scanner import _mask_prior_sessions
+
+        sessions = [date(2026, 7, 1), date(2026, 7, 2)]
+        frame = _make_5m_frame(sessions=sessions, volume_per_bar=100_000.0)
+        naive_frame = frame.tz_localize(None)
+
+        masked = _mask_prior_sessions(naive_frame, date(2026, 7, 2))
+        assert len(masked) > 0
+        assert all(ts.date() < date(2026, 7, 2) for ts in masked.index.tz_localize("UTC").tz_convert("America/New_York"))
+
+
+class TestPersistTodBaselines:
+    """Unit tests for scanner._persist_tod_baselines (bypasses the full scan
+    pipeline -- exercises just the extracted Step 5b logic)."""
+
+    def test_empty_codes_list_short_circuits_without_download(self, tmp_state_db):
+        from bot.scanner.scanner import _persist_tod_baselines
+
+        store = StateStore()
+        store.open()
+        cfg = _make_cfg()
+
+        with patch("bot.scanner.scanner.download_intraday_5m") as mock_dl:
+            _persist_tod_baselines(store, cfg, [], date(2026, 7, 3), exclude_today=False)
+            mock_dl.assert_not_called()
+        store.close()
+
+    def test_persists_a_baseline_row_per_code_with_5m_data(self, tmp_state_db):
+        from bot.scanner.scanner import _persist_tod_baselines
+
+        store = StateStore()
+        store.open()
+        cfg = _make_cfg()
+        scan_date = date(2026, 7, 3)
+        sessions = [date(2026, 6, 30), date(2026, 7, 1), date(2026, 7, 2)]
+        frame_5m = _make_5m_frame(sessions=sessions, volume_per_bar=100_000.0)
+
+        with patch("bot.scanner.scanner.download_intraday_5m",
+                  return_value=({"AAPL": frame_5m}, set())):
+            _persist_tod_baselines(store, cfg, ["US.AAPL"], scan_date, exclude_today=False)
+
+        rows = store.conn.execute(
+            "SELECT COUNT(*) FROM tod_baselines WHERE scan_date=? AND code=?",
+            (scan_date.isoformat(), "US.AAPL"),
+        ).fetchone()[0]
+        store.close()
+        assert rows > 0
+
+    def test_exclude_today_masks_the_scan_dates_own_session_before_computing(self, tmp_state_db):
+        """A rescan fetch that ALSO includes scan_date's own partial session must
+        not let those rows influence the persisted baseline -- verified by
+        comparing against calling with exclude_today=False on the SAME frame
+        (which lets today's own bars in and must therefore differ)."""
+        from bot.scanner.scanner import _persist_tod_baselines
+
+        scan_date = date(2026, 7, 3)
+        # Sessions include scan_date ITSELF with a distinctly larger volume, so an
+        # unmasked run's average is measurably pulled toward it.
+        sessions = [date(2026, 6, 30), date(2026, 7, 1), date(2026, 7, 2), scan_date]
+        frame_5m = _make_5m_frame(sessions=sessions[:-1], volume_per_bar=100_000.0)
+        today_rows = _make_5m_frame(sessions=[scan_date], volume_per_bar=10_000_000.0)
+        import pandas as _pd
+        combined = _pd.concat([frame_5m, today_rows])
+
+        # Explicit distinct :memory: stores -- two bare StateStore() calls would
+        # both default to this test's shared tmp_state_db path and collide.
+        store_masked = StateStore(db_path=":memory:")
+        store_masked.open()
+        store_unmasked = StateStore(db_path=":memory:")
+        store_unmasked.open()
+        cfg = _make_cfg()
+
+        with patch("bot.scanner.scanner.download_intraday_5m",
+                  return_value=({"AAPL": combined}, set())):
+            _persist_tod_baselines(store_masked, cfg, ["US.AAPL"], scan_date, exclude_today=True)
+            _persist_tod_baselines(store_unmasked, cfg, ["US.AAPL"], scan_date, exclude_today=False)
+
+        masked_baseline = store_masked.get_tod_baseline(scan_date.isoformat(), "US.AAPL", "09:30")
+        unmasked_baseline = store_unmasked.get_tod_baseline(scan_date.isoformat(), "US.AAPL", "09:30")
+        store_masked.close()
+        store_unmasked.close()
+
+        assert masked_baseline > 0 and unmasked_baseline > 0
+        assert masked_baseline < unmasked_baseline, (
+            "exclude_today=True must exclude scan_date's own (much larger) volume "
+            "from the averaged baseline; exclude_today=False lets it skew the average up"
+        )
+
+
+class TestIntradayRescanTodBaselines:
+    """run_intraday_rescan must persist TOD baselines for newly-subscribed codes only."""
+
+    def test_rescan_persists_tod_baselines_only_for_newly_subscribed_codes(self, tmp_state_db):
+        from bot.scanner.scanner import run_intraday_rescan
+
+        scan_date = date(2026, 6, 23)
+        cfg = _make_cfg(d3_min_gap_pct=0.5)
+        frame = _make_daily_frame(scan_date=scan_date)
+
+        store = StateStore()
+        store.open()
+
+        active_code = "US.ACTIVE"  # already subscribed -- must NOT be treated as "new"
+        new_symbols = ["NEWA", "NEWB"]
+        all_symbols = new_symbols + ["ACTIVE"]
+
+        persisted_calls = []
+
+        def _fake_persist(store_arg, cfg_arg, codes, scan_date_arg, exclude_today):
+            persisted_calls.append((set(codes), exclude_today))
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=all_symbols), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   side_effect=lambda f, net: _make_today_price(f) if f is not None else None), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner._persist_tod_baselines", side_effect=_fake_persist):
+            run_intraday_rescan(
+                store=store, gateway=None, cfg=cfg,
+                active_codes={active_code}, scan_date=scan_date, scan_pass="intraday_1",
+            )
+
+        store.close()
+
+        assert len(persisted_calls) == 1, "must call _persist_tod_baselines exactly once"
+        codes_called, exclude_today = persisted_calls[0]
+        assert codes_called == {"US.NEWA", "US.NEWB"}, (
+            f"must persist for exactly the newly-subscribed codes, got {codes_called}"
+        )
+        assert active_code not in codes_called, (
+            "an already-active code must not be re-persisted (it already has a "
+            "baseline from whenever it was first subscribed)"
+        )
+        assert exclude_today is True, (
+            "a mid-day rescan fetch must mask out today's own partial session "
+            "(design risk: an unmasked fetch would self-contaminate the baseline)"
+        )
+
+    def test_daily_scan_still_persists_with_exclude_today_false(self, tmp_state_db):
+        """run_daily_scan runs at premarket (no RTH bars exist yet for today), so it
+        must keep passing exclude_today=False -- unchanged behavior."""
+        from bot.scanner.scanner import run_daily_scan
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        _ET = ZoneInfo("America/New_York")
+
+        scan_date = date(2026, 7, 3)
+        cfg = _make_cfg(d3_min_gap_pct=3.0)
+        premarket_now_et = _dt.datetime(2026, 7, 3, 8, 30, tzinfo=_ET)
+        frame = _make_daily_frame(
+            n_days=220, prior_close=100.0, prior_high=105.0,
+            today_open=107.0, today_close=108.0, scan_date=scan_date,
+        )
+        from bot.scanner.fetcher import TodayPrice as _TP
+
+        store = StateStore()
+        store.open()
+        persisted_calls = []
+
+        def _fake_persist(store_arg, cfg_arg, codes, scan_date_arg, exclude_today):
+            persisted_calls.append(exclude_today)
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["AAPL"]), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("bot.scanner.scanner.download_intraday_1m", return_value=_INTRADAY_OK), \
+             patch("bot.scanner.scanner.get_ticker_frame", side_effect=lambda d, s: frame), \
+             patch("bot.scanner.scanner.resolve_today_price",
+                   return_value=_TP(today_open=107.0, today_price=107.0, today_high=108.0)), \
+             patch("bot.scanner.scanner.now_et", return_value=premarket_now_et), \
+             patch("bot.scanner.scanner.is_trading_day", return_value=True), \
+             patch("bot.scanner.scanner._persist_tod_baselines", side_effect=_fake_persist):
+            run_daily_scan(store=store, gateway=None, cfg=cfg, scan_date=scan_date)
+
+        store.close()
+        assert persisted_calls == [False]
