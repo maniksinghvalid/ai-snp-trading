@@ -57,31 +57,40 @@ _IMPLEMENTED_I2_MODES = ("close_at_hod", "close_above_prior_hod")
 # Stop-rule parsing (CFG-01 / D-12)
 # ============================================================
 
-# Maps each recognised exit.initial_stop_rule string to the stop distance
-# below the low-of-day, expressed as a percentage. The initial stop is the
-# SOURCE OF TRUTH for stop placement and is deliberately decoupled from
-# risk.max_risk_per_trade_pct (a position-sizing budget). See CR-01.
+# Maps each recognised exit.initial_stop_rule string to (reference, pct): the
+# price the stop is placed below, and the stop distance as a percentage of it.
+# The initial stop is the SOURCE OF TRUTH for stop placement and is
+# deliberately decoupled from risk.max_risk_per_trade_pct (a position-sizing
+# budget). See CR-01.
+#
+# "bar_low_minus_1pct" (P2, strategy-audit finding): the session low-of-day is
+# often just the 09:30 bar's low, while entries fire >=10:05 -- pinning risk to
+# a stale early-session extreme and producing unusually wide stops on gap days.
+# bar_low anchors the stop to the SIGNAL BAR's own low instead.
 _STOP_RULE_PCT = {
-    "lod_minus_1pct": 1.0,
+    "lod_minus_1pct": ("lod", 1.0),
+    "bar_low_minus_1pct": ("bar_low", 1.0),
 }
 
 
-def parse_initial_stop_rule(rule: str) -> float:
-    """Parse exit.initial_stop_rule into a stop percentage below LOD.
+def parse_initial_stop_rule(rule: str) -> tuple:
+    """Parse exit.initial_stop_rule into (reference, stop_pct_below_reference).
 
-    "lod_minus_1pct" -> 1.0 (stop placed 1% below the low-of-day).
+    "lod_minus_1pct" -> ("lod", 1.0): stop 1% below the session low-of-day.
+    "bar_low_minus_1pct" -> ("bar_low", 1.0): stop 1% below the signal bar's own low.
 
     Raises:
         ConfigError: if the rule string is not a recognised stop rule. The
             stop must NEVER silently fall back to the risk budget (CR-01).
     """
-    pct = _STOP_RULE_PCT.get(rule)
-    if pct is None:
+    parsed = _STOP_RULE_PCT.get(rule)
+    if parsed is None:
         raise ConfigError(
             f"exit.initial_stop_rule '{rule}' is not a recognised stop rule "
             f"(expected one of: {', '.join(sorted(_STOP_RULE_PCT))})"
         )
-    return float(pct)
+    reference, pct = parsed
+    return reference, float(pct)
 
 
 # ============================================================
@@ -186,6 +195,20 @@ class StrategyConfig:
     # close). Consumers must read cfg.i2_mode — never hardcode either comparison.
     i2_mode: str = "close_at_hod"  # intraday_filters.I2_mode
 
+    # ---- initial-stop reference (CFG-01, P2 strategy-audit finding) ----
+    # "lod" (default, today's behavior) or "bar_low" — which price
+    # compute_initial_stop's lod argument actually receives (RiskEngine selects
+    # signal.lod vs signal.bar.low). Parsed FROM exit.initial_stop_rule
+    # alongside initial_stop_pct — one dial, not two (see parse_initial_stop_rule).
+    initial_stop_reference: str = "lod"
+
+    # ---- breakeven stop buffer (CFG-01, P2 strategy-audit finding) ----
+    # Additional R-multiple ABOVE entry_price added to the breakeven stop
+    # (bot/position/state.py's BREAKEVEN transition), so a breakeven stop-out
+    # is not a guaranteed net loss after entry/exit buffers. 0.0 (default)
+    # preserves today's exact-entry breakeven behavior.
+    breakeven_buffer_r: float = 0.0  # exit.breakeven_buffer_R
+
 
 # ============================================================
 # Loader
@@ -260,6 +283,10 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
             f"expected one of: {', '.join(_IMPLEMENTED_I2_MODES)}"
         )
 
+    initial_stop_reference, initial_stop_pct_value = parse_initial_stop_rule(
+        str(ex["initial_stop_rule"])
+    )
+
     return StrategyConfig(
         # universe
         min_price_usd=float(uf["min_price_usd"]),
@@ -275,10 +302,12 @@ def load_strategy_config(path: str = "rules.json") -> StrategyConfig:
         # exit
         exit_model=model_raw,
         i2_mode=i2_mode_raw,
-        initial_stop_pct=parse_initial_stop_rule(str(ex["initial_stop_rule"])),
+        initial_stop_reference=initial_stop_reference,
+        initial_stop_pct=initial_stop_pct_value,
         partial_profit_trigger_r=float(ex["partial_profit_trigger_R"]),
         partial_profit_fraction=float(ex["partial_profit_fraction"]),
         breakeven_trigger_r=float(ex["breakeven_trigger_R"]),
+        breakeven_buffer_r=float(ex.get("breakeven_buffer_R", 0.0)),
         # risk
         max_risk_per_trade_pct=float(rk["max_risk_per_trade_pct"]),
         max_position_size_pct=int(rk["max_position_size_pct_of_portfolio"]),

@@ -123,6 +123,7 @@ def _minimal_cfg():
     cfg.partial_profit_trigger_r = 0.75
     cfg.partial_profit_fraction = 0.3333
     cfg.breakeven_trigger_r = 1.0
+    cfg.breakeven_buffer_r = 0.0  # P2 (strategy-audit finding): default preserves exact-entry stop
     cfg.exit_escalation_step_usd = 0.10
     cfg.exit_escalation_cadence_seconds = 10.0
     cfg.exit_ttl_seconds = 15.0

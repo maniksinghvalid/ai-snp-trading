@@ -9,7 +9,7 @@ exit logic for the Trend Join Long strategy:
   AWAITING_FILL — order placed, no confirmed fill yet
   ACTIVE        — entry filled; initial stop active; no profit milestone hit yet
   PARTIAL_TAKEN — 1/3 partial exit taken at 0.75R close (POS-01)
-  BREAKEVEN     — full 1R close hit; stop moved to entry price (POS-02)
+  BREAKEVEN     — full 1R close hit; stop moved to entry + breakeven_buffer_r*R (POS-02)
   TRAILING      — 5m swing-low trail active; stop ratchets up, never down (POS-03, D-11)
   CLOSED        — position fully exited
 
@@ -237,7 +237,11 @@ class PositionState:
                 return (FSM_ACTION_STOP_OUT, self.remaining_quantity)
             # D-03: 1.0R breakeven trigger (POS-02)
             if close >= self.entry_price + cfg.breakeven_trigger_r * R:
-                self.trail_stop = self.entry_price   # stop moves to entry (POS-02)
+                # P2 (strategy-audit finding): breakeven_buffer_r shifts the stop
+                # ABOVE entry (default 0.0 preserves exact-entry POS-02 behavior)
+                # so a breakeven stop-out is not a guaranteed net loss after
+                # entry/exit buffers.
+                self.trail_stop = self.entry_price + cfg.breakeven_buffer_r * R
                 self.phase = PositionPhase.BREAKEVEN
                 return (FSM_ACTION_BREAKEVEN, 0)
 

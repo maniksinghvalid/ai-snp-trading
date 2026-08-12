@@ -681,3 +681,44 @@ class TestSizingEquityUsdBasis:
         gw.get_equity.assert_awaited_once(), (
             "get_equity must be awaited exactly once when sizing_equity_usd is None"
         )
+
+
+# ============================================================
+# P2 (strategy-audit finding): initial_stop_reference — lod vs bar_low
+# ============================================================
+
+class TestInitialStopReference:
+    """cfg.initial_stop_reference selects which price compute_initial_stop
+    receives: signal.lod (default) or signal.bar.low."""
+
+    def test_default_lod_reference_uses_signal_lod(self):
+        """cfg default (initial_stop_reference='lod') — unchanged behavior:
+        stop derived from signal.lod even when bar.low differs."""
+        cfg = _make_cfg()
+        assert cfg.initial_stop_reference == "lod"
+        engine = _make_risk_engine(cfg=cfg)
+        # lod=48.0 (session low), bar.low=45.0 (this bar's own low, lower still)
+        # -- if bar_low were used the stop would differ.
+        signal = _make_signal(close=50.0, lod=48.0, low=45.0)
+
+        intent = asyncio.run(engine.on_signal(signal))
+
+        assert intent is not None
+        assert intent.stop_price == pytest.approx(48.0 * 0.99)
+
+    def test_bar_low_reference_uses_signal_bar_low(self):
+        import dataclasses
+        cfg = dataclasses.replace(_make_cfg(), initial_stop_reference="bar_low")
+        engine = _make_risk_engine(cfg=cfg)
+        # lod=48.0 (session low), bar.low=45.0 (this bar's own low) --
+        # bar_low reference must derive the stop from 45.0, not 48.0.
+        signal = _make_signal(close=50.0, lod=48.0, low=45.0)
+
+        intent = asyncio.run(engine.on_signal(signal))
+
+        assert intent is not None
+        assert intent.stop_price == pytest.approx(45.0 * 0.99)
+        assert intent.stop_price != pytest.approx(48.0 * 0.99), (
+            "bar_low reference must produce a DIFFERENT stop than the lod "
+            "reference when bar.low != signal.lod"
+        )

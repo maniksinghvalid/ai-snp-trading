@@ -526,3 +526,66 @@ class TestI2ModeConfig:
         with pytest.raises(ConfigError) as exc_info:
             load_strategy_config(str(path))
         assert "close_above_prior_hod" in str(exc_info.value)
+
+
+# ============================================================
+# P2 sweep knobs: breakeven buffer + stop reference (strategy-audit finding)
+# ============================================================
+
+class TestBreakevenBufferConfig:
+    """exit.breakeven_buffer_R -> StrategyConfig.breakeven_buffer_r (default-off).
+
+    Addresses weakness #6 in the strategy audit: a breakeven stop set to
+    exactly entry_price is a guaranteed net loss after entry/exit buffers.
+    """
+
+    def test_real_rules_json_breakeven_buffer_defaults_to_zero(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.breakeven_buffer_r == 0.0
+
+    def test_breakeven_buffer_omitted_defaults_to_zero(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"].pop("breakeven_buffer_R", None)  # ensure key is absent
+        path = tmp_path / "no_be_buffer.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.breakeven_buffer_r == 0.0
+
+    def test_breakeven_buffer_explicit_value_is_read(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["breakeven_buffer_R"] = 0.1
+        path = tmp_path / "be_buffer.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.breakeven_buffer_r == 0.1
+
+
+class TestInitialStopReferenceConfig:
+    """exit.initial_stop_rule now also selects StrategyConfig.initial_stop_reference
+    ("lod" | "bar_low"), addressing weakness #6 (wide gap-day stops: the session
+    LOD is often the 09:30 bar low while entries fire >=10:05)."""
+
+    def test_lod_minus_1pct_selects_lod_reference(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.initial_stop_reference == "lod"
+        assert cfg.initial_stop_pct == 1.0
+
+    def test_bar_low_minus_1pct_selects_bar_low_reference(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["initial_stop_rule"] = "bar_low_minus_1pct"
+        path = tmp_path / "bar_low_stop.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.initial_stop_reference == "bar_low"
+        assert cfg.initial_stop_pct == 1.0
+
+    def test_unknown_stop_rule_still_raises_config_error(self, tmp_path):
+        """The (reference, pct) restructuring must not weaken the existing
+        fail-closed guard (CR-01: never silently fall back to the risk budget)."""
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["initial_stop_rule"] = "moon_minus_1pct"
+        path = tmp_path / "unknown_stop_rule.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        assert "moon_minus_1pct" in str(exc_info.value)

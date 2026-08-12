@@ -130,7 +130,10 @@ SCHEMA = {
                 "partial_profit_trigger_R": {"type": "number"},
                 "partial_profit_fraction": {"type": "number"},
                 "breakeven_trigger_R": {"type": "number"},
-                "post_breakeven_trail": {"type": "string"}
+                "post_breakeven_trail": {"type": "string"},
+                # breakeven_buffer_R is optional (defaults to 0.0 in the loader —
+                # today's exact-entry breakeven behavior, P2 strategy-audit finding).
+                "breakeven_buffer_R": {"type": "number"}
             }
         },
 
