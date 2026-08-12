@@ -300,6 +300,9 @@ def test_full_replay_produces_a_closed_trade_filled_at_next_bar_open(monkeypatch
     )
     assert trade["code"] == "US.TEST"
     assert trade["exit_reason"] == "stop_out"
+    assert trade.get("opened_at") is not None, (
+        "trade_log rows must carry opened_at (exposure metrics, trades.csv column)"
+    )
 
     # Pitfall 6: bar_buffer must have been populated during the replay so the swing-low
     # trail (POS-03) has data to compute from.

@@ -76,19 +76,21 @@ _BAR_BUFFER_MAX = 50
 class BacktestHarness:
     """Replay controller: reused live pipeline + simulated feed/execution/gateway."""
 
-    def __init__(self, cfg, feed, store) -> None:
+    def __init__(self, cfg, feed, store, slippage_usd: float = 0.0) -> None:
         """cfg: StrategyConfig (rules.json, same loader as bot/main.py).
         feed: SimulatedBarFeed -- replay()/next_bar()/daily_bars()/etc.
         store: StateStore opened at a SCRATCH db_path (never data/bot_state.db --
                06-RESEARCH Pitfall 4; caller's responsibility, mirrors bot/main.py's
                StateStore(db_path=...).open() call-site discipline).
+        slippage_usd: adverse per-share slippage passed to SimulatedExecution
+               (entries slip up, exits slip down -- T-06-11).
         """
         self._cfg = cfg
         self._feed = feed
         self._store = store
 
         self.strategy = TrendJoinLong(cfg)
-        self.sim_execution = SimulatedExecution(feed)
+        self.sim_execution = SimulatedExecution(feed, slippage_usd=slippage_usd)
         self.sim_gateway = SimulatedGateway(lambda: self.position_manager)
 
         self.signal_engine = SignalEngine(cfg=cfg, gateway=self.sim_gateway, store=store)
@@ -410,6 +412,7 @@ class BacktestHarness:
                 "quantity": pos.full_quantity,
                 "exit_reason": pos.pending_exit_reason,
                 "r_multiple": r_multiple,
+                "opened_at": pos.opened_at,
                 "closed_at": pos.updated_at,
             })
             # T-06-11: persist the SAME row into the scratch trades table so Gate 7's
