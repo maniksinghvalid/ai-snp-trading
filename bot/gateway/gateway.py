@@ -17,6 +17,7 @@ import asyncio
 import os
 import re
 import socket
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -93,6 +94,17 @@ _RATE_LIMIT_BACKOFF_SECONDS: float = 3.0  # asyncio.sleep between retries
 # OptionScreenRequest per stock_id) — 20 pages x 200 rows = 4,000 contracts is
 # far more than one right/DTE/delta slice of a single underlying can return.
 _OPTION_SCREEN_MAX_PAGES: int = 20
+
+# Live RTH probe 2026-08-17 (after the per-underlying fix): get_option_screen
+# returned ret=-1 "Option Screening request failed due to high frequency.
+# Maximum 10 times per 30 seconds." Sleeping only between underlyings was not
+# enough — deep chains (SPY/QQQ) page 2-3 times back-to-back with zero delay,
+# which alone burns most of the 10-per-30s budget. The sleep applies before
+# EVERY get_option_screen call (pages and underlyings alike) except the first.
+# ponytail: fixed blocking sleep, not a real rate limiter — upgrade to shared
+# rate-limit/backoff handling (like _RATE_LIMIT_MARKERS above) if another
+# read path starts hitting this same cap.
+_OPTION_SCREEN_INTER_CALL_SLEEP_SECONDS: float = 3.2
 
 # T-155-01 (SAFE-OG-01): whitelist of OCC-style Moomoo option codes, e.g.
 # US.SPY260320P600000. The paper account is SHARED with a human — the options
@@ -759,11 +771,16 @@ class MoomooGateway:
             # await per page, never await per underlying.
             rows: list = []
             counts_by_stock_id: dict = {}
+            calls_made = 0
             for stock_id in stock_ids:
                 req = _build_req(stock_id)
                 req.page_from = 0
                 stock_rows = 0
                 for _ in range(_OPTION_SCREEN_MAX_PAGES):    # T-155-02: bounded, per underlying
+                    if calls_made:
+                        # ponytail: see _OPTION_SCREEN_INTER_CALL_SLEEP_SECONDS
+                        time.sleep(_OPTION_SCREEN_INTER_CALL_SLEEP_SECONDS)
+                    calls_made += 1
                     ret, data = self._quote_ctx.get_option_screen(req)
                     _check_ret(ret, data, "get_option_screen")
                     last_page, _all_count, df = data

@@ -11,7 +11,7 @@ import asyncio
 
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from bot.gateway.gateway import (
     MoomooGateway,
@@ -140,6 +140,13 @@ class TestGetStockIds:
 # ============================================================
 
 class TestScreenOptions:
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self):
+        """screen_options sleeps between get_option_screen calls to respect the
+        live SDK rate limit (T-ask-02) — patch to 0 so tests run instantly."""
+        with patch("bot.gateway.gateway._OPTION_SCREEN_INTER_CALL_SLEEP_SECONDS", 0.0):
+            yield
+
     def test_single_page_calls_screen_once(self):
         gw = _gw()
         gw._quote_ctx.get_option_screen.return_value = _page([_screen_row()], True)
