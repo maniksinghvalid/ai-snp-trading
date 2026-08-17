@@ -103,10 +103,10 @@ Added 2026-08-17. Offline evidence for the Phase 8 `tasty_credit_spreads` strate
 
 - [x] **OBT-01**: The options backtester imports `bot/options/strategy.py` (`pick_expiry`/`passes_entry_gate`/`pick_strikes`/`size_position`/`manage_decision`) and reads `rules_options.json` unchanged — same import-not-copy pattern as Phase 6 vs `bot/strategy/`
 - [x] **OBT-02**: Massive data layer for option contracts reference (incl. `expired=true`) + `O:…` daily aggregates with an on-disk cache (`backtester/massive.py` pattern) and no look-ahead — entry/strike decisions use only bars ≤ the decision date
-- [ ] **OBT-03**: Black-Scholes IV and delta derived from option close + underlying close + DTE + risk-free rate (no chain-snapshot dependency — that endpoint is 403 on the current entitlement)
-- [ ] **OBT-04**: IVR computed from the backtester's own rolling ATM-IV series (252-trading-day window, matching the live `ivr` semantics)
+- [x] **OBT-03**: Black-Scholes IV and delta derived from option close + underlying close + DTE + risk-free rate (no chain-snapshot dependency — that endpoint is 403 on the current entitlement)
+- [x] **OBT-04**: IVR computed from the backtester's own rolling ATM-IV series (252-trading-day window, matching the live `ivr` semantics)
 - [ ] **OBT-05**: Fill model = mid ± configurable slippage per leg, per-leg commissions, expiry settlement at intrinsic value
-- [ ] **OBT-06**: Hypotheses (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) pre-registered in a committed doc BEFORE the first real-data run, with an evidence floor (min trades) and an out-of-sample window
+- [x] **OBT-06**: Hypotheses (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) pre-registered in a committed doc BEFORE the first real-data run, with an evidence floor (min trades) and an out-of-sample window
 - [ ] **OBT-07**: Output = per-trade log + summary metrics (win rate, PF, avg credit captured, max DD, Sortino) reusing `backtester/report.py` conventions
 
 ## v2 Requirements
@@ -195,10 +195,10 @@ Which phases cover which requirements.
 | EXIT-MODEL | Phase 7 | Config seam planned (07-04); backtest selection gated on Phase 6 (07-06) |
 | OBT-01 | Phase 9 | Complete |
 | OBT-02 | Phase 9 | Complete |
-| OBT-03 | Phase 9 | Pending |
-| OBT-04 | Phase 9 | Pending |
+| OBT-03 | Phase 9 | Complete |
+| OBT-04 | Phase 9 | Complete |
 | OBT-05 | Phase 9 | Pending |
-| OBT-06 | Phase 9 | Pending |
+| OBT-06 | Phase 9 | Complete |
 | OBT-07 | Phase 9 | Pending |
 
 **Coverage:**

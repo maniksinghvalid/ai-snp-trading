@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: "Completed 09-01-PLAN.md (options data layer: MassiveDataSource contracts+option bars, OptionChainSource no-look-ahead chain view)"
-last_updated: "2026-08-17T17:20:56.520Z"
+last_updated: "2026-08-17T17:33:44.285Z"
 last_activity: 2026-08-17 -- Phase 9 execution started
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 47
-  completed_plans: 45
+  completed_plans: 46
   percent: 82
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 9 (Options backtester) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-08-17 -- Phase 9 execution started
 
@@ -70,6 +70,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 06.2 P02 | 24 | 8 tasks | 13 files |
 | Phase 06.2 P03 | 12min | 2 tasks | 5 files |
 | Phase 09 P01 | 30min | 3 tasks | 6 files |
+| Phase 09 P02 | ~35 minutes | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -148,6 +149,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 06.2-03: daily_bars_cache is a caller-owned dict threaded through run_intraday_rescan -> _compute_candidates and owned by TradingBot._daily_bar_cache, not a module-level singleton; run_daily_scan never passes it since premarket runs once per day
 - [Phase 09]: 09-01: OptionChainSource.load() keeps all DTE/strike-band candidates (monthly+non-monthly); pick_expiry applies the monthly preference itself, since a 30..60 dte window is not always wide enough to contain a monthly expiry (Rule 1 bug found via test)
 - [Phase 09]: 09-01: Massive option daily-aggregates history boundary pinned to August 2024 (rolling ~24mo window from today); missing bars are absent rows, never v=0 (A2 confirmed)
+- [Phase ?]: IS window 2024-11-18..2025-07-31, OOS window 2025-08-01..2026-06-15, both inside the Aug-2024..today Massive entitlement; 67-trading-day IVR warm-up precedes IS start (09-02)
+- [Phase ?]: implied_vol's fail-closed floor is discounted (present-value) intrinsic, not naive spot-strike -- deep-ITM European puts legitimately price below naive intrinsic (09-02)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -184,6 +187,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T17:20:56.516Z
+Last session: 2026-08-17T17:33:25.406Z
 Stopped at: Completed 09-01-PLAN.md (options data layer: MassiveDataSource contracts+option bars, OptionChainSource no-look-ahead chain view)
 Resume file: None

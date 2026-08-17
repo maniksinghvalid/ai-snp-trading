@@ -276,7 +276,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 6. Backtester | 12/12 | Complete    | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
-| 9. Options Backtester | 1/4 | In Progress|  |
+| 9. Options Backtester | 2/4 | In Progress|  |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -355,7 +355,7 @@ Plans:
   5. Result doc reports each hypothesis as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with the numbers; `rules_options.json` is changed only if a hypothesis is SUPPORTED with OOS confirmation
   6. Full test suite green
 
-**Plans:** 1/4 plans executed
+**Plans:** 2/4 plans executed
 
 Plans:
 **Wave 1**
@@ -364,7 +364,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 09-02-PLAN.md — Black-Scholes IV/delta (stdlib only), min-max IVR series, and the pre-registered hypotheses doc committed before any real-data run (OBT-03, OBT-04, OBT-06) [Wave 2]
+- [x] 09-02-PLAN.md — Black-Scholes IV/delta (stdlib only), min-max IVR series, and the pre-registered hypotheses doc committed before any real-data run (OBT-03, OBT-04, OBT-06) [Wave 2]
 
 **Wave 3** *(blocked on Wave 2)*
 
