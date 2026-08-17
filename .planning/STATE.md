@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Completed 06.2-03-PLAN.md (Phase 06.2 code-review-remediation COMPLETE -- all 16 findings closed)
-last_updated: "2026-07-07T23:18:45.612Z"
-last_activity: 2026-07-07 -- Phase 06.2 execution started
+last_updated: "2026-08-17T17:01:39.623Z"
+last_activity: "2026-08-17 - Completed quick task 260817-ask: screen_options per-underlying (1000-row cap fix) + throttle, 965 tests, live RTH probe re-verified; --live-1lot paper UAT still pending operator"
 progress:
   total_phases: 9
   completed_phases: 9
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 Phase: 06.2 (code-review-remediation) — COMPLETE
 Plan: 3 of 3 (all plans complete)
-Status: Phase complete — all 16 code-review findings closed (Tier 1/2/3)
+Status: Ready to execute
 Last activity: 2026-08-17 - Completed quick task 260817-ask: screen_options per-underlying (1000-row cap fix) + throttle, 965 tests, live RTH probe re-verified; --live-1lot paper UAT still pending operator
 
 Progress: [██████████] 9/9 phases (100%)
