@@ -272,16 +272,104 @@ def _migration_0005(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {decl}")
 
 
+# ============================================================
+# Migration 0006 — Phase 8 options tables (tasty_credit_spreads)
+# ============================================================
+#
+# New tables (used only by the options bot's own SQLite DB — the equity bot
+# never reads them; both share this migration runner so a single schema level
+# covers either DB file, D-06):
+#   option_positions — one row per multi-leg credit spread (iron condor or
+#                      put credit spread). max_loss_usd = (width - credit) * 100 * qty.
+#   option_legs      — one row per single-leg option order making up a position.
+#                      Moomoo has no combo/multi-leg order API, so legs are placed
+#                      and tracked individually.
+#
+# Status vocabularies (plain TEXT, NOT CHECK constraints — the existing
+# positions.phase column is likewise unconstrained; validation lives in Python):
+#   option_positions.status : OPENING | OPEN | CLOSING | CLOSED | ABORTED | NEEDS_ATTENTION
+#   option_legs.status      : PENDING | WORKING | FILLED | CLOSING | CLOSED | FAILED
+#   option_legs."right"     : C | P
+#   option_legs.side        : BUY | SELL
+#
+# Timestamp/date conventions follow the 0001 header: all *_at fields are
+# ISO-8601 strings in UTC; expiry is an ISO date string (YYYY-MM-DD).
+#
+# The `right` column is quoted as "right" in the DDL because RIGHT is a join
+# keyword in SQLite 3.39+; unquoted it is a parse hazard. Readers must use
+# row["right"] (sqlite3.Row) — the column name itself is plain `right`.
+#
+# WR-03: callable (not SQL string) so the DDL commits atomically with the
+# PRAGMA user_version bump in run_migrations(). Uses conn.execute() — NOT
+# executescript() — for the same reason as 0003/0005 (see note at lines 143-152).
+# CREATE TABLE/INDEX IF NOT EXISTS is idempotent without column-level guards.
+
+
+def _migration_0006(conn: sqlite3.Connection) -> None:
+    """Add Phase 8 option_positions + option_legs tables and the legs index.
+
+    Idempotent: every statement uses IF NOT EXISTS, so re-running after a
+    partial failure is a no-op rather than "table already exists". No DROP —
+    rows written between two run_migrations calls survive.
+
+    Uses conn.execute() (not executescript) so the DDL stays in the caller's
+    open transaction and commits atomically with the PRAGMA user_version bump
+    (WR-03, see note at lines 143-152).
+
+    Note for readers: the leg option right is stored in a column named `right`,
+    quoted in the DDL as "right" (SQLite 3.39+ join keyword). Read it as
+    row["right"].
+
+    D-08: never edit shipped migrations 0001-0005 — new objects always in 0006.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS option_positions (
+        position_id       TEXT PRIMARY KEY,
+        underlying        TEXT NOT NULL,
+        structure         TEXT NOT NULL,
+        expiry            TEXT NOT NULL,
+        dte_at_entry      INTEGER,
+        ivr_at_entry      REAL,
+        credit_per_spread REAL,
+        width             REAL,
+        qty               INTEGER,
+        max_loss_usd      REAL,
+        status            TEXT NOT NULL,
+        opened_at         TEXT,
+        closed_at         TEXT,
+        close_reason      TEXT,
+        realized_pnl_usd  REAL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS option_legs (
+        leg_id          TEXT PRIMARY KEY,
+        position_id     TEXT NOT NULL,
+        code            TEXT NOT NULL,
+        "right"         TEXT NOT NULL,
+        strike          REAL NOT NULL,
+        side            TEXT NOT NULL,
+        qty             INTEGER NOT NULL,
+        entry_order_id  TEXT,
+        entry_price     REAL,
+        exit_order_id   TEXT,
+        exit_price      REAL,
+        status          TEXT NOT NULL
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_option_legs_position_id "
+        "ON option_legs(position_id)"
+    )
+
+
 MIGRATIONS = [
     _MIGRATION_0001,
     _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
     _migration_0003,   # adds daily_trade_count + pending_intents (Phase 3, D-08/D-12)
     _migration_0004,   # adds entry_order_id, exit_order_id, avg_fill_price (Phase 4)
     _migration_0005,   # Phase 7: tod_baselines table + broker_stop_order_id on positions
+    _migration_0006,   # Phase 8: option_positions + option_legs (+ legs index)
 ]
 
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 
 # ============================================================
