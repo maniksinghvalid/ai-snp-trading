@@ -21,6 +21,7 @@ Exports: OptionsBot, main
 import asyncio
 import html
 import os
+import sys
 from datetime import date, datetime, time as _time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -29,7 +30,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from bot.config.loader import ConfigError
+from bot.gateway.gateway import MoomooGateway, get_gateway_config
+from bot.options.config import load_options_config
 from bot.options.execution import LegExecutor
+from bot.options.store import OptionsStore
 from bot.options.strategy import (
     manage_decision,
     mark_spread,
@@ -41,9 +46,12 @@ from bot.options.strategy import (
 )
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
-from bot.safety.logger import get_logger
+from bot.safety.kill_switch import KillSwitch
+from bot.safety.logger import configure_logging, get_logger
 from bot.scanner.calendar import get_market_close_et, is_trading_day
+from bot.service.alerter import TelegramAlerter
 from bot.service.report import write_reports
+from bot.service.watchdog import OpenDWatchdog
 
 
 # ============================================================
@@ -910,3 +918,60 @@ class OptionsBot:
                 except Exception:
                     pass
             await self._shutdown()
+
+
+# ============================================================
+# Process entry point
+# ============================================================
+
+def main(rules_path: str) -> None:
+    """Compose the options bot and run it under asyncio.run.
+
+    Construction order:
+      1. configure_logging() — first, before any component logs
+      2. load_options_config(rules_path) — ConfigError → stderr + sys.exit(1)
+      3. MoomooGateway(get_gateway_config()) — no initial_stop_pct (equity-only knob)
+      4. OptionsStore(cfg.state_db).open() — its OWN db file (D6)
+      5. TelegramAlerter from env (never log the token — Pitfall 4)
+      6. KillSwitch on cfg.kill_file — the options bot's OWN sentinel (D6)
+      7. OptionsBot, then OpenDWatchdog (needs the bot ref) injected after
+      8. asyncio.run(bot.run())
+    """
+    configure_logging()
+    _log = get_logger(__name__)
+
+    try:
+        cfg = load_options_config(rules_path)
+    except ConfigError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    gateway = MoomooGateway(get_gateway_config())
+
+    os.makedirs(os.path.dirname(cfg.state_db) or ".", exist_ok=True)
+    store = OptionsStore(cfg.state_db).open()
+
+    alerter = TelegramAlerter(
+        token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
+        logger=_log,
+    )
+
+    kill_switch = KillSwitch(sentinel_path=cfg.kill_file)
+
+    bot = OptionsBot(
+        cfg=cfg,
+        gateway=gateway,
+        store=store,
+        kill_switch=kill_switch,
+        alerter=alerter,
+        watchdog=None,   # set below — the watchdog needs the bot reference
+    )
+    bot._watchdog = OpenDWatchdog(
+        gateway=gateway,
+        bot=bot,
+        alerter=alerter,
+        cfg=cfg,
+    )
+
+    asyncio.run(bot.run())
