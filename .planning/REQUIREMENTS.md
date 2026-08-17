@@ -101,8 +101,8 @@ Formalized 2026-07-03 from the quant-feedback phase. All four are config-driven 
 
 Added 2026-08-17. Offline evidence for the Phase 8 `tasty_credit_spreads` strategy before any `rules_options.json` change.
 
-- [ ] **OBT-01**: The options backtester imports `bot/options/strategy.py` (`pick_expiry`/`passes_entry_gate`/`pick_strikes`/`size_position`/`manage_decision`) and reads `rules_options.json` unchanged — same import-not-copy pattern as Phase 6 vs `bot/strategy/`
-- [ ] **OBT-02**: Massive data layer for option contracts reference (incl. `expired=true`) + `O:…` daily aggregates with an on-disk cache (`backtester/massive.py` pattern) and no look-ahead — entry/strike decisions use only bars ≤ the decision date
+- [x] **OBT-01**: The options backtester imports `bot/options/strategy.py` (`pick_expiry`/`passes_entry_gate`/`pick_strikes`/`size_position`/`manage_decision`) and reads `rules_options.json` unchanged — same import-not-copy pattern as Phase 6 vs `bot/strategy/`
+- [x] **OBT-02**: Massive data layer for option contracts reference (incl. `expired=true`) + `O:…` daily aggregates with an on-disk cache (`backtester/massive.py` pattern) and no look-ahead — entry/strike decisions use only bars ≤ the decision date
 - [ ] **OBT-03**: Black-Scholes IV and delta derived from option close + underlying close + DTE + risk-free rate (no chain-snapshot dependency — that endpoint is 403 on the current entitlement)
 - [ ] **OBT-04**: IVR computed from the backtester's own rolling ATM-IV series (252-trading-day window, matching the live `ivr` semantics)
 - [ ] **OBT-05**: Fill model = mid ± configurable slippage per leg, per-leg commissions, expiry settlement at intrinsic value
@@ -193,8 +193,8 @@ Which phases cover which requirements.
 | RISK-TICK-STOP | Phase 7 | Built (07-01, 07-03) but dead in production — wiring gap tracked as Phase 07.1 |
 | RISK-CIRCUIT | Phase 7 | Planned (07-01, 07-05) |
 | EXIT-MODEL | Phase 7 | Config seam planned (07-04); backtest selection gated on Phase 6 (07-06) |
-| OBT-01 | Phase 9 | Pending |
-| OBT-02 | Phase 9 | Pending |
+| OBT-01 | Phase 9 | Complete |
+| OBT-02 | Phase 9 | Complete |
 | OBT-03 | Phase 9 | Pending |
 | OBT-04 | Phase 9 | Pending |
 | OBT-05 | Phase 9 | Pending |

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06.2-03-PLAN.md (Phase 06.2 code-review-remediation COMPLETE -- all 16 findings closed)
-last_updated: "2026-08-17T17:01:39.623Z"
-last_activity: "2026-08-17 - Completed quick task 260817-ask: screen_options per-underlying (1000-row cap fix) + throttle, 965 tests, live RTH probe re-verified; --live-1lot paper UAT still pending operator"
+stopped_at: "Completed 09-01-PLAN.md (options data layer: MassiveDataSource contracts+option bars, OptionChainSource no-look-ahead chain view)"
+last_updated: "2026-08-17T17:20:56.520Z"
+last_activity: 2026-08-17 -- Phase 9 execution started
 progress:
-  total_phases: 9
+  total_phases: 11
   completed_phases: 9
-  total_plans: 43
-  completed_plans: 43
-  percent: 100
+  total_plans: 47
+  completed_plans: 45
+  percent: 82
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 06.2 — code-review-remediation
+**Current focus:** Phase 9 — Options backtester
 
 ## Current Position
 
-Phase: 06.2 (code-review-remediation) — COMPLETE
-Plan: 3 of 3 (all plans complete)
+Phase: 9 (Options backtester) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-08-17 - Completed quick task 260817-ask: screen_options per-underlying (1000-row cap fix) + throttle, 965 tests, live RTH probe re-verified; --live-1lot paper UAT still pending operator
+Last activity: 2026-08-17 -- Phase 9 execution started
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -69,6 +69,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 06-backtester P06 | 20 | 2 tasks | 2 files |
 | Phase 06.2 P02 | 24 | 8 tasks | 13 files |
 | Phase 06.2 P03 | 12min | 2 tasks | 5 files |
+| Phase 09 P01 | 30min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -145,6 +146,8 @@ Recent decisions affecting current work:
 - [Phase 06.2]: 06.2-02: gateway bid/ask price fetch retries then falls back to the last known good price within the same order loop (not bar-close data) on GatewayError; entry path now abandons gracefully instead of propagating an unhandled exception
 - [Phase ?]: 06.2-03: _reconcile_core unifies reconcile_once (manager._positions-driven, alerts) and startup_reconcile (store.get_open_positions()-driven, alerter=None) via an is_startup=alerter-is-None branch, preserving both call sites pre-refactor behavior exactly (verified against test_restart_reconciliation cold-boot assertions with manager=None)
 - [Phase ?]: 06.2-03: daily_bars_cache is a caller-owned dict threaded through run_intraday_rescan -> _compute_candidates and owned by TradingBot._daily_bar_cache, not a module-level singleton; run_daily_scan never passes it since premarket runs once per day
+- [Phase 09]: 09-01: OptionChainSource.load() keeps all DTE/strike-band candidates (monthly+non-monthly); pick_expiry applies the monthly preference itself, since a 30..60 dte window is not always wide enough to contain a monthly expiry (Rule 1 bug found via test)
+- [Phase 09]: 09-01: Massive option daily-aggregates history boundary pinned to August 2024 (rolling ~24mo window from today); missing bars are absent rows, never v=0 (A2 confirmed)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -181,6 +184,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T23:17:36.603Z
-Stopped at: Completed 06.2-03-PLAN.md (Phase 06.2 code-review-remediation COMPLETE -- all 16 findings closed)
+Last session: 2026-08-17T17:20:56.516Z
+Stopped at: Completed 09-01-PLAN.md (options data layer: MassiveDataSource contracts+option bars, OptionChainSource no-look-ahead chain view)
 Resume file: None
