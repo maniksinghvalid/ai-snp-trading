@@ -23,11 +23,14 @@ HTTP 429 responses are retried with a Retry-After-aware backoff.
 Imports nothing from the broker gateway layer — pure data source.
 
 Also exposes the two Phase 9 options endpoints (D-05): `/v3/reference/
-options/contracts` (`fetch_contracts`/`cached_contracts`, JSON read-through
-cache since the payload is a record list, not a bar frame) and per-contract
-`O:…` daily aggregates (`cached_option_bars`, CSV read-through cache via the
-existing `fetch_bars`/`cached_bars` machinery — the `O:` prefix passes
-through `_massive_ticker` unchanged, it only rewrites `-` to `.`).
+options/contracts` (`fetch_contracts`/`cached_contracts`, unions `expired=
+true` and `expired=false` since `expired` is a filter not an include-flag,
+JSON read-through cache since the payload is a record list, not a bar frame)
+and per-contract `O:…` daily aggregates (`cached_option_bars`, CSV
+read-through cache keyed by TICKER ONLY — not the request window — via the
+existing `fetch_bars` machinery, with negative caching: an empty result is
+written to disk too, so a thin/illiquid contract is never re-requested,
+T-09-13/WR-04).
 
 Exports: MassiveDataSource, MassiveApiError, load_massive_api_key
 """
@@ -184,27 +187,32 @@ class MassiveDataSource:
         expiration in [expiry_gte, expiry_lte], deduped by ticker and sorted
         by (expiration_date, contract_type, strike_price).
 
-        Follows next_url pagination exactly like fetch_bars (auth stays in
-        the header — never appended to the URL).
+        `expired` is a FILTER on this endpoint, not an "include" flag —
+        `expired=true` alone silently drops every series still live as of
+        the request (WR-03). Issues BOTH `expired=true` and `expired=false`
+        passes (each independently paginated via next_url, auth stays in
+        the header) and unions the results by ticker, so a window whose
+        expiry range reaches into "still live" territory loses no series.
         """
-        url = (
-            f"{BASE_URL}/v3/reference/options/contracts"
-            f"?underlying_ticker={underlying}&expired=true"
-            f"&expiration_date.gte={expiry_gte}&expiration_date.lte={expiry_lte}"
-            f"&limit=1000"
-        )
         rows = []
-        while url:
-            payload = self._get_json(url)
-            rows.extend(payload.get("results") or [])
-            url = payload.get("next_url")
+        for expired_flag in ("true", "false"):
+            url = (
+                f"{BASE_URL}/v3/reference/options/contracts"
+                f"?underlying_ticker={underlying}&expired={expired_flag}"
+                f"&expiration_date.gte={expiry_gte}&expiration_date.lte={expiry_lte}"
+                f"&limit=1000"
+            )
+            while url:
+                payload = self._get_json(url)
+                rows.extend(payload.get("results") or [])
+                url = payload.get("next_url")
         deduped = {r["ticker"]: r for r in rows if r.get("ticker")}
         return sorted(
             deduped.values(),
             key=lambda r: (
                 r.get("expiration_date", ""),
                 r.get("contract_type", ""),
-                r.get("strike_price", 0),
+                r.get("strike_price") or 0,
             ),
         )
 
@@ -226,8 +234,44 @@ class MassiveDataSource:
             json.dump(results, f)
         return results
 
+    @staticmethod
+    def _expiry_from_occ_ticker(occ_ticker: str) -> str:
+        """ISO expiry date embedded in an `O:` OCC-style ticker (already
+        validated by `_OPTION_TICKER_RE`) — a local regex parse rather than
+        importing `backtester.options.data.parse_massive_ticker` (a higher
+        layer than this module)."""
+        m = re.match(r"O:[A-Z]+(\d{2})(\d{2})(\d{2})[CP]\d{8}", occ_ticker)
+        yy, mm, dd = m.groups()
+        return f"20{yy}-{mm}-{dd}"
+
+    def option_bar_cache_path(self, occ_ticker) -> str:
+        """Cache filename for `occ_ticker`, exposed so callers (e.g.
+        `OptionChainSource._ensure_bars`) can check cache-hit/miss without
+        duplicating this format string."""
+        return os.path.join(self.cache_dir, f"{occ_ticker.replace(':', '_')}_1d.csv")
+
     def cached_option_bars(self, occ_ticker, start, end) -> pd.DataFrame:
         """Read-through CSV cache around fetch_bars for a single `O:` ticker.
+
+        Cache filename is keyed on TICKER ONLY (D-06/WR-04) — a contract's
+        whole life is at most a few hundred bars, so fetching once and
+        slicing in memory means extending `--end` in a later run never
+        re-fetches, and overlapping IS/OOS windows share the same file.
+        `fetch_end` is capped at the contract's own expiry (parsed from the
+        ticker) so a run whose `--end` reaches past expiry never asks the
+        API for bars that cannot exist.
+
+        Negative caching (WR-04): the cache file is ALWAYS written, even for
+        an empty result (header-only CSV) — a thin/illiquid contract that
+        legitimately has zero bars in its life is remembered forever, not
+        re-requested on every re-run.
+
+        # ponytail: the cache is keyed by ticker, so run windows in
+        # chronological order (earliest --start first); a later run that
+        # requests an earlier --start than what's already cached will NOT
+        # backfill the missing early bars — it will just return the
+        # narrower cached range. Widen with `rm` on the specific cache file
+        # if an earlier start is genuinely needed.
 
         Same Title-Case ET-indexed frame shape as cached_bars — fetch_bars
         already handles the `O:` prefix unchanged (_massive_ticker only
@@ -235,14 +279,14 @@ class MassiveDataSource:
         """
         if not _OPTION_TICKER_RE.fullmatch(occ_ticker):
             raise ValueError(f"invalid option ticker {occ_ticker!r} for cache filename (T-06-03)")
-        path = os.path.join(
-            self.cache_dir, f"{occ_ticker.replace(':', '_')}_1d_{start}_{end}.csv"
-        )
+        path = self.option_bar_cache_path(occ_ticker)
         if os.path.exists(path):
             frame = pd.read_csv(path, index_col=0, parse_dates=True)
+            if frame.empty:
+                return frame
             frame.index = pd.to_datetime(frame.index, utc=True).tz_convert(ET)
-            return frame
-        frame = self.fetch_bars(occ_ticker, 1, "day", start, end)
-        if not frame.empty:
-            frame.to_csv(path)
-        return frame
+            return frame.loc[start:end]
+        fetch_end = min(end, self._expiry_from_occ_ticker(occ_ticker))
+        frame = self.fetch_bars(occ_ticker, 1, "day", start, fetch_end)
+        frame.to_csv(path)  # ALWAYS write — negative caching (WR-04)
+        return frame.loc[start:end] if not frame.empty else frame

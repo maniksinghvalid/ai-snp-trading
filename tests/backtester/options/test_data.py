@@ -63,23 +63,50 @@ def _option_bar(t_ms, c=10.5, v=100):
 
 
 def test_fetch_contracts_paginates_dedupes_sorts(tmp_path):
+    """expired=true is paginated in full, THEN expired=false is fetched
+    (WR-03 union) -- three total requests: true page 1, true page 2
+    (next-page, c1 repeated), false page 1 (empty)."""
     src = MassiveDataSource("k", cache_dir=str(tmp_path))
     c1 = _contract("O:SPY250620C00600000", "2025-06-20", "C", 600)
     c2 = _contract("O:SPY250620P00500000", "2025-06-20", "P", 500)
+    responses = iter([
+        {"results": [c1], "next_url": "next-page"},
+        {"results": [c2, c1]},  # c1 repeated across pages
+        {"results": []},        # expired=false pass
+    ])
     calls = []
 
     def fake_get(url):
         calls.append(url)
-        if url == "next-page":
-            return {"results": [c2, c1]}  # c1 repeated across pages
-        return {"results": [c1], "next_url": "next-page"}
+        return next(responses)
 
     src._get_json = fake_get
     results = src.fetch_contracts("SPY", "2025-01-01", "2025-03-31")
-    assert len(calls) == 2
+    assert len(calls) == 3
     # same expiration_date; sorted by (expiration_date, contract_type, strike) ->
     # "call" < "put" alphabetically, so the call sorts first regardless of strike.
     assert [r["ticker"] for r in results] == ["O:SPY250620C00600000", "O:SPY250620P00500000"]
+
+
+def test_fetch_contracts_unions_expired_true_and_false(tmp_path):
+    """WR-03: a series still live as of the request must not be silently
+    dropped -- expired=true and expired=false are both queried and unioned."""
+    src = MassiveDataSource("k", cache_dir=str(tmp_path))
+    expired_c = _contract("O:SPY250620C00600000", "2025-06-20", "C", 600)
+    live_c = _contract("O:SPY261231P00500000", "2026-12-31", "P", 500)
+    seen_urls = []
+
+    def fake_get(url):
+        seen_urls.append(url)
+        if "expired=true" in url:
+            return {"results": [expired_c]}
+        return {"results": [live_c]}
+
+    src._get_json = fake_get
+    results = src.fetch_contracts("SPY", "2025-01-01", "2026-12-31")
+    assert any("expired=true" in u for u in seen_urls)
+    assert any("expired=false" in u for u in seen_urls)
+    assert {r["ticker"] for r in results} == {expired_c["ticker"], live_c["ticker"]}
 
 
 def test_cached_contracts_round_trip_never_refetches(tmp_path):
@@ -126,6 +153,53 @@ def test_cached_option_bars_rejects_bad_ticker(tmp_path):
         src.cached_option_bars("../../etc/passwd", "2025-06-01", "2025-06-20")
     with pytest.raises(ValueError):
         src.cached_option_bars("US.SPY250620C00600000", "2025-06-01", "2025-06-20")
+
+
+def test_cached_option_bars_caches_empty_result_no_refetch(tmp_path):
+    """WR-04 negative caching: a thin/illiquid contract with zero bars for
+    its whole life must be remembered (header-only CSV), never re-requested."""
+    src = MassiveDataSource("k", cache_dir=str(tmp_path))
+    calls = []
+
+    def fake_get(url):
+        calls.append(url)
+        return {"results": []}
+
+    src._get_json = fake_get
+    first = src.cached_option_bars("O:SPY250620C00600000", "2025-06-01", "2025-06-20")
+    assert first.empty
+    assert len(calls) == 1
+
+    def boom(url):
+        raise AssertionError("negative cache hit must not refetch")
+
+    src._get_json = boom
+    second = src.cached_option_bars("O:SPY250620C00600000", "2025-06-01", "2025-06-20")
+    assert second.empty
+
+
+def test_cached_option_bars_keyed_by_ticker_extending_end_never_refetches(tmp_path):
+    """WR-04: cache is keyed on the ticker only -- a later call with a wider
+    --end (but the same ticker) is served entirely from the cached file."""
+    src = MassiveDataSource("k", cache_dir=str(tmp_path))
+    t = int(datetime(2025, 6, 10, 9, 30, tzinfo=ET).timestamp() * 1000)
+    calls = []
+
+    def fake_get(url):
+        calls.append(url)
+        return {"results": [_option_bar(t)]}
+
+    src._get_json = fake_get
+    first = src.cached_option_bars("O:SPY250620C00600000", "2025-06-01", "2025-06-15")
+    assert len(calls) == 1
+    assert not first.empty
+
+    def boom(url):
+        raise AssertionError("cache hit (wider end, same ticker) must not refetch")
+
+    src._get_json = boom
+    second = src.cached_option_bars("O:SPY250620C00600000", "2025-06-01", "2025-06-20")
+    assert second.iloc[0]["Close"] == first.iloc[0]["Close"]
 
 
 def test_option_bars_429_retries_then_succeeds(monkeypatch, tmp_path):
@@ -203,6 +277,11 @@ class _FakeSource:
             ticker, pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
         )
 
+    def option_bar_cache_path(self, ticker):
+        """Never a real on-disk path -- every fetch counts as a "request",
+        never a "cache_hits", in fetch_stats (fine, unasserted by default)."""
+        return f"/nonexistent-fake-cache/{ticker}"
+
     def cached_bars(self, symbol, interval_tag, multiplier, timespan, start, end):
         return self._underlying_bars
 
@@ -217,28 +296,26 @@ _NON_MONTHLY_EXPIRY = date(2025, 7, 25)  # fourth Friday of July 2025
 assert not is_monthly_expiry(_NON_MONTHLY_EXPIRY)
 
 
-def test_no_lookahead_contracts_for_day():
+def test_no_lookahead_rows_for():
     """A leak contract carries a wildly different t+1 close (1.00 vs 99.00);
-    a future-only and a past-only contract must both be absent on day t."""
+    a future-only contract (no bar on day t) must be absent from rows_for's
+    result even though it IS inside the OTM band."""
     leak_ticker = "O:SPY250718C00100000"
     future_only_ticker = "O:SPY250718C00105000"
-    past_only_ticker = "O:SPY250718C00095000"
     contracts = [
         _raw_contract(leak_ticker, "2025-07-18", "C", 100),
         _raw_contract(future_only_ticker, "2025-07-18", "C", 105),
-        _raw_contract(past_only_ticker, "2025-07-18", "C", 95),
     ]
     option_bars = {
         leak_ticker: _bars_frame({"2025-06-10": 1.00, "2025-06-11": 99.00}),
         future_only_ticker: _bars_frame({"2025-06-11": 50.00}),
-        past_only_ticker: _bars_frame({"2025-06-09": 50.00}),
     }
     underlying = _bars_frame({"2025-06-09": 100.0, "2025-06-10": 100.0, "2025-06-11": 100.0})
     source = _FakeSource(contracts, option_bars, underlying)
     chain = data.OptionChainSource(source, "SPY", "2025-06-01", "2025-06-30")
     chain.load(min_dte=30, max_dte=60)
 
-    rows = chain.contracts_for_day("2025-06-10", 30, 60)
+    rows = chain.rows_for("2025-06-10", _MONTHLY_EXPIRY, 100.0, band_pct=10.0)
     tickers = {r["ticker"] for r in rows}
     assert tickers == {leak_ticker}
     leak_row = rows[0]
@@ -250,39 +327,31 @@ def test_no_lookahead_contracts_for_day():
     assert leak_row["volume"] == 100.0
 
 
-def test_dte_window_excludes_out_of_range_contracts():
+def test_load_narrows_contracts_to_dte_relevant_expiry_range():
+    """load() narrows self._contracts to expiries in
+    [start+min_dte, end+max_dte] -- a far-out contract's whole expiry is
+    dropped at load() time, before any bar is ever fetched (T-09-13)."""
     near_ticker = "O:SPY250718C00100000"
     far_ticker = "O:SPY251219C00100000"
     contracts = [
         _raw_contract(near_ticker, "2025-07-18", "C", 100),
         _raw_contract(far_ticker, "2025-12-19", "C", 100),
     ]
-    option_bars = {
-        near_ticker: _bars_frame({"2025-06-10": 5.0}),
-        far_ticker: _bars_frame({"2025-06-10": 30.0}),
-    }
     underlying = _bars_frame({"2025-06-10": 100.0})
-    source = _FakeSource(contracts, option_bars, underlying)
+    source = _FakeSource(contracts, {}, underlying)
     chain = data.OptionChainSource(source, "SPY", "2025-06-01", "2025-06-30")
     chain.load(min_dte=30, max_dte=60)
 
-    rows = chain.contracts_for_day("2025-06-10", 30, 60)
-    assert {r["ticker"] for r in rows} == {near_ticker}  # far_ticker's dte (~192d) excluded
+    assert source.option_bars_calls == []  # load() never fetches a per-contract bar
+    expiries = chain.expiries_for_day("2025-06-10")
+    assert {e for e, _ in expiries} == {_MONTHLY_EXPIRY}  # far_ticker's expiry excluded
 
 
 def test_expiries_for_day_feeds_pick_expiry():
     near_ticker = "O:SPY250718C00100000"
-    far_ticker = "O:SPY251219C00100000"
-    contracts = [
-        _raw_contract(near_ticker, "2025-07-18", "C", 100),
-        _raw_contract(far_ticker, "2025-12-19", "C", 100),
-    ]
-    option_bars = {
-        near_ticker: _bars_frame({"2025-06-10": 5.0}),
-        far_ticker: _bars_frame({"2025-06-10": 30.0}),
-    }
+    contracts = [_raw_contract(near_ticker, "2025-07-18", "C", 100)]
     underlying = _bars_frame({"2025-06-10": 100.0})
-    source = _FakeSource(contracts, option_bars, underlying)
+    source = _FakeSource(contracts, {}, underlying)  # no bar fetch needed for existence
     chain = data.OptionChainSource(source, "SPY", "2025-06-01", "2025-06-30")
     chain.load(min_dte=30, max_dte=60)
 
@@ -293,6 +362,48 @@ def test_expiries_for_day_feeds_pick_expiry():
     cfg = load_options_config()
     picked = pick_expiry(expiries, date(2025, 6, 10), cfg)
     assert picked == _MONTHLY_EXPIRY  # only in-window expiry within [30, 60] dte
+
+
+def test_rows_for_fetches_only_target_expiry_in_band_and_memoises():
+    """Lazy fetch proof (VERIFICATION gap 3, D-18): a synthetic reference
+    with 3 expiries x a wide strike ladder -- rows_for(exp2) must fetch bars
+    ONLY for exp2's in-band tickers, never exp1's/exp3's, and never an
+    out-of-band exp2 strike. A second rows_for call on the same
+    expiry/band issues ZERO new fetches (in-memory memoisation)."""
+    day = "2025-06-10"
+    spot = 100.0
+    exp1, exp2, exp3 = date(2025, 7, 18), date(2025, 8, 15), date(2025, 9, 19)
+    strikes = [80, 90, 95, 100, 105, 110, 120]  # in a 10% call band: only 100/105/110
+
+    contracts, option_bars = [], {}
+    for exp in (exp1, exp2, exp3):
+        for strike in strikes:
+            ticker = data.format_massive_ticker("SPY", exp, "C", strike)
+            contracts.append(_raw_contract(ticker, exp.isoformat(), "C", strike))
+            option_bars[ticker] = _bars_frame({day: 1.0})
+
+    underlying = _bars_frame({day: spot})
+    source = _FakeSource(contracts, option_bars, underlying)
+    chain = data.OptionChainSource(source, "SPY", "2025-06-01", "2025-06-30")
+    chain.load(min_dte=1, max_dte=200)
+
+    expiries = chain.expiries_for_day(day)
+    assert {e for e, _ in expiries} == {exp1, exp2, exp3}
+
+    rows = chain.rows_for(day, exp2, spot, band_pct=10.0)
+    exp2_in_band_tickers = {
+        data.format_massive_ticker("SPY", exp2, "C", s)
+        for s in strikes if spot * 0.995 <= s <= spot * 1.10
+    }
+    assert exp2_in_band_tickers == {
+        data.format_massive_ticker("SPY", exp2, "C", s) for s in (100, 105, 110)
+    }
+    assert {r["ticker"] for r in rows} == exp2_in_band_tickers
+    assert set(source.option_bars_calls) == exp2_in_band_tickers  # ONLY exp2's in-band tickers
+
+    calls_before = len(source.option_bars_calls)
+    chain.rows_for(day, exp2, spot, band_pct=10.0)  # second call, same expiry/band
+    assert len(source.option_bars_calls) == calls_before  # zero new fetches (memoised)
 
 
 def test_underlying_close_present_and_absent():
@@ -346,28 +457,27 @@ def test_monthly_narrowing_covers_dte_window():
     assert picked == in_window_expiry  # pick_expiry falls back correctly, unmodified
 
 
-def test_load_fetches_contracts_once_and_all_dte_matching_expiries():
+def test_load_fetches_contracts_reference_once_no_bar_fetch():
     """load() keeps both monthly and non-monthly candidates within the
-    strike band -- the plan's original 'monthly-only at load()' narrowing
-    was dropped as a Rule 1 bug fix (see class docstring DEVIATION note)."""
+    DTE-relevant expiry range (the plan's original 'monthly-only at load()'
+    narrowing was dropped as a Rule 1 bug fix, T-09-03), and fetches ZERO
+    per-contract bars at load() time -- bars are fetched later, per decision
+    day, by rows_for (lazy design, T-09-13)."""
     monthly_ticker = "O:SPY250718C00100000"
     non_monthly_ticker = "O:SPY250725C00100000"
     contracts = [
         _raw_contract(monthly_ticker, "2025-07-18", "C", 100),
         _raw_contract(non_monthly_ticker, "2025-07-25", "C", 100),
     ]
-    option_bars = {
-        monthly_ticker: _bars_frame({"2025-06-10": 5.0}),
-        non_monthly_ticker: _bars_frame({"2025-06-10": 5.0}),
-    }
     underlying = _bars_frame({"2025-06-10": 100.0})
-    source = _FakeSource(contracts, option_bars, underlying)
+    source = _FakeSource(contracts, {}, underlying)
     chain = data.OptionChainSource(source, "SPY", "2025-06-01", "2025-06-30")
     chain.load(min_dte=30, max_dte=60, prefer_monthly=True)
 
     assert source.contracts_calls == 1  # ONE contracts-reference call per underlying
-    assert monthly_ticker in source.option_bars_calls
-    assert non_monthly_ticker in source.option_bars_calls  # kept, not discarded
+    assert source.option_bars_calls == []  # load() never fetches a single per-contract bar
+    tickers = {c["ticker"] for c in chain._contracts}
+    assert tickers == {monthly_ticker, non_monthly_ticker}  # both kept, not discarded
 
 
 def test_last_known_close_walks_backward_for_manage_only():
@@ -378,6 +488,7 @@ def test_last_known_close_walks_backward_for_manage_only():
     source = _FakeSource(contracts, option_bars, underlying)
     chain = data.OptionChainSource(source, "SPY", "2025-06-01", "2025-06-30")
     chain.load(min_dte=30, max_dte=60)
+    chain._ensure_bars([ticker])  # populate bars for MANAGE-time lookups (lazy design)
 
     assert chain.bar_close(ticker, "2025-06-10") is None  # exact-key: no bar on t
     assert chain.last_known_close(ticker, "2025-06-10") == 3.0  # carries forward from t-1
