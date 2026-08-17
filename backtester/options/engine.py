@@ -181,27 +181,26 @@ class OptionsBacktestEngine:
 
     def update_iv(self, day: str) -> None:
         """Update each chain's daily ATM-IV observation (T-09-13 lazy fetch,
-        VERIFICATION gap 3): picks the IV-TRACKING expiry (closest to
-        cfg.target_dte within [min_dte, max_dte], ties -> earlier date) from
-        the reference via `expiries_for_day`, then fetches only a tight
-        +/-1% ATM band for that one expiry via `rows_for` — never the whole
-        chain. The single source of truth for the IV-update half of a
-        decision day: called from `run_day` (below) AND from
-        `options_run._prime_iv_series`'s warm-up loop, so there is no
-        duplicated copy of this logic (REVIEW.md IN-07-adjacent concern).
+        VERIFICATION gap 3): the IV-TRACKING expiry is the SAME expiry the
+        imported `pick_expiry` would trade today (monthly preference, closest
+        to cfg.target_dte), so the +/-1% ATM band fetched here is a subset of
+        the entry-scan band and costs no extra requests on entry days.
+        # ponytail: nearest-to-target among ALL listed (weeklies) changed the
+        # IV expiry every 2-3 days -> ~150 extra expiries x ~25 contracts on
+        # the 5 req/min tier; pick_expiry keeps it to the ~55 traded expiries.
+        The single source of truth for the IV-update half of a decision day:
+        called from `run_day` (below) AND from `options_run._prime_iv_series`'s
+        warm-up loop, so there is no duplicated copy of this logic.
         """
         cfg = self.cfg
+        today = date.fromisoformat(day)
         for code, chain in sorted(self.chains.items()):
             underlying_px = chain.underlying_close(day)
             if underlying_px is None:
                 continue
-            candidates = [
-                (exp, dte) for exp, dte in chain.expiries_for_day(day)
-                if cfg.min_dte <= dte <= cfg.max_dte
-            ]
-            if not candidates:
+            exp = pick_expiry(chain.expiries_for_day(day), today, cfg)
+            if exp is None:
                 continue
-            exp, _ = min(candidates, key=lambda e: (abs(e[1] - cfg.target_dte), e[0]))
             rows = chain.rows_for(day, exp, underlying_px, band_pct=1.0)
             iv = atm_iv(rows, underlying_px, day, self.r, cfg.target_dte)
             if iv is not None:
