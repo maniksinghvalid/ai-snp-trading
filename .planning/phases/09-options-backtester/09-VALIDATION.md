@@ -3,7 +3,7 @@ phase: 9
 slug: options-backtester
 status: planned
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-08-17
 updated: 2026-08-17
 ---
@@ -39,9 +39,9 @@ updated: 2026-08-17
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| T-09-01 | 09-01 | 1 | OBT-01, OBT-02 | T-09-E1 | data.py imports no broker/gateway symbol | unit | `pytest tests/backtester/options/test_data.py -x -q` | ❌ created by task | ⬜ pending |
-| T-09-02 | 09-01 | 1 | OBT-02 | T-09-I1, T-09-T1, T-09-D1 | API key Bearer-header only, never in URL; cache filenames regex-guarded against traversal; 429 backoff + read-through cache | unit | `pytest tests/backtester/options/test_data.py tests/backtester/test_massive.py -x -q` | ❌ created by task | ⬜ pending |
-| T-09-03 | 09-01 | 1 | OBT-02 | — | N/A (no-look-ahead correctness, not security) | unit | `pytest tests/backtester/options/test_data.py::test_no_lookahead_contracts_for_day -x -q` | ❌ created by task | ⬜ pending |
+| T-09-01 | 09-01 | 1 | OBT-01, OBT-02 | T-09-E1 | data.py imports no broker/gateway symbol | unit | `pytest tests/backtester/options/test_data.py -x -q` | ✅ backtester/options/data.py | ✅ green |
+| T-09-02 | 09-01 | 1 | OBT-02 | T-09-I1, T-09-T1, T-09-D1 | API key Bearer-header only, never in URL; cache filenames regex-guarded against traversal; 429 backoff + read-through cache | unit | `pytest tests/backtester/options/test_data.py tests/backtester/test_massive.py -x -q` | ✅ backtester/massive.py | ✅ green |
+| T-09-03 | 09-01 | 1 | OBT-02 | — | N/A (no-look-ahead correctness, not security) | unit | `pytest tests/backtester/options/test_data.py::test_no_lookahead_contracts_for_day -x -q` | ✅ backtester/options/data.py | ✅ green |
 | T-09-04 | 09-02 | 2 | OBT-03 | T-09-D1 | bounded bisection (`max_iter=100`) cannot spin | unit | `pytest tests/backtester/options/test_greeks.py::test_iv_roundtrip tests/backtester/options/test_greeks.py::test_delta_monotonic -x -q` | ❌ created by task | ⬜ pending |
 | T-09-05 | 09-02 | 2 | OBT-04 | — | N/A | unit | `pytest tests/backtester/options/test_greeks.py::test_ivr_fixture -x -q` | ❌ created by task | ⬜ pending |
 | T-09-06 | 09-02 | 2 | OBT-06 | T-09-R1 | pre-registration provable from git history, not back-datable | manual (git history) | `git log --diff-filter=A --format=%h -- 'docs/research/*options-backtest-hypotheses.md' \| grep -q .` | ❌ created by task | ⬜ pending |
@@ -65,8 +65,8 @@ shared fixtures and the first test module before any other Phase 9 test lands. R
 are created by the task whose behaviour they cover (each task's `<verify><automated>` names the file
 it creates), so no task ships without a runnable check.
 
-- [ ] `tests/backtester/options/__init__.py`, `conftest.py` (chain-grid fixture adapted from `tests/options/test_strategy.py::_grid`; `fake_massive` `_get_json` monkeypatch fixture from `tests/backtester/test_massive.py`) — **T-09-01**
-- [ ] `tests/backtester/options/test_data.py` — **T-09-01** (extended by T-09-02, T-09-03)
+- [x] `tests/backtester/options/__init__.py`, `conftest.py` (chain-grid fixture adapted from `tests/options/test_strategy.py::_grid`; `fake_massive` `_get_json` monkeypatch fixture from `tests/backtester/test_massive.py`) — **T-09-01**
+- [x] `tests/backtester/options/test_data.py` — **T-09-01** (extended by T-09-02, T-09-03)
 - [ ] `tests/backtester/options/test_greeks.py` — **T-09-04** (extended by T-09-05)
 - [ ] `tests/backtester/options/test_engine.py` — **T-09-07** (extended by T-09-08)
 - [ ] `tests/backtester/options/test_report.py` — **T-09-09**
