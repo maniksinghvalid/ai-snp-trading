@@ -371,6 +371,46 @@ def test_entry_scan_skips_entirely_when_breaker_tripped(make_bot, store, gateway
     assert store.get_option_positions(("OPENING", "OPEN")) == []
 
 
+def test_entry_scan_trips_breaker_on_realized_loss_with_empty_book(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    """A bad morning that closed everything at a loss must block the afternoon
+    scan even though no manage tick ran with an OPEN position (or the bot
+    restarted): the scan guard evaluates realized P&L itself."""
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    store.insert_option_position(_pos(
+        "OLD", status="CLOSED", underlying="US.QQQ",
+        closed_at=f"{TODAY.isoformat()}T11:00:00-04:00",
+        close_reason="stop_loss", realized_pnl_usd=-2500.0,
+    ))
+
+    _run(bot._job_entry_scan())
+
+    assert store.get_meta("options_breaker_date") == TODAY.isoformat()
+    gateway.screen_options.assert_not_awaited()
+    assert alerter.send.await_count == 1
+    assert "daily loss limit" in alerter.send.await_args[0][0]
+
+
+def test_manage_arms_breaker_with_empty_book(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    store.insert_option_position(_pos(
+        "OLD", status="CLOSED", underlying="US.QQQ",
+        closed_at=f"{TODAY.isoformat()}T11:00:00-04:00",
+        close_reason="stop_loss", realized_pnl_usd=-2500.0,
+    ))
+    gateway.get_option_positions = AsyncMock(return_value={})
+    bot = make_bot()
+
+    _run(bot._job_manage())
+
+    assert store.get_meta("options_breaker_date") == TODAY.isoformat()
+    gateway.get_market_snapshot.assert_not_awaited()
+
+
 def test_entry_scan_blocked_by_kill_switch(make_bot, store, gateway, monkeypatch):
     bot = make_bot()
     _wire_scan(bot, gateway, monkeypatch)

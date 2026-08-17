@@ -447,6 +447,8 @@ class OptionsBot:
             if self._kill_switch.triggered:
                 _logger.info("options_entry_scan_skipped", reason="kill_switch")
                 return
+            # Realized-only check first so a restart (manage never ran) still trips it.
+            await self._check_daily_breaker(today, 0.0)
             if self._store.get_meta(_BREAKER_META_KEY) == today.isoformat():
                 _logger.info("options_entry_scan_skipped", reason="daily_loss_breaker")
                 return
@@ -671,6 +673,9 @@ class OptionsBot:
 
         positions = self._store.get_option_positions(("OPEN",))
         if not positions:
+            # Empty book: still arm the breaker on realized-only losses so a bad
+            # morning cannot be followed by a fresh afternoon entry.
+            await self._check_daily_breaker(today, 0.0)
             return
 
         codes = sorted({leg["code"] for p in positions for leg in p["legs"]})
