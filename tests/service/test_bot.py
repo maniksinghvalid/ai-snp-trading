@@ -468,11 +468,14 @@ async def test_premarket_scan_reschedules_force_close_for_half_day():
     # Patch get_force_close_time_et to simulate a half-day (12:51 ET close)
     mock_close_time = _time(12, 51)
 
+    from zoneinfo import ZoneInfo as _ZI
+    today = _date(2026, 7, 3)  # Example half-day (July 3)
+    # 13:00 ET is past the half-day close, so _register_jobs' startup arm is a
+    # no-op here and only _job_premarket_scan can produce the 12:51 reschedule.
     with patch("bot.service.bot.get_force_close_time_et", return_value=mock_close_time), \
          patch("bot.service.bot.is_trading_day", return_value=True), \
-         patch("bot.service.bot.now_et") as mock_now:
-        today = _date(2026, 7, 3)  # Example half-day (July 3)
-        mock_now.return_value.date.return_value = today
+         patch("bot.service.bot.now_et",
+               return_value=_datetime.datetime(2026, 7, 3, 13, 0, tzinfo=_ZI("America/New_York"))):
         # Also register_jobs before running premarket scan so force_close job exists
         bot._register_jobs()
 
@@ -505,6 +508,35 @@ async def test_premarket_scan_reschedules_force_close_for_half_day():
             f"force_close job must be scheduled at 12:51 ET on half-day; "
             f"got {next_run_et.strftime('%H:%M')} ET"
         )
+
+
+def test_register_jobs_arms_force_close_when_started_after_premarket_scan():
+    """Regression: a bot (re)started AFTER premarket_scan_et on a trading day must still
+    force-close today.
+
+    Observed 2026-08-17: process killed 14:10Z, restarted 14:17Z (10:17 ET). Only
+    _job_premarket_scan (08:30 ET) rescheduled the force_close DateTrigger off its
+    2099-01-01 placeholder, so the restarted bot would never have force-closed at 15:51.
+    _register_jobs (called by run() before scheduler.start()) must arm today's
+    calendar-aware close itself. Uses the real calendar: 2026-08-17 is a normal
+    Monday session → 15:51 ET.
+    """
+    import datetime as _datetime
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+
+    bot, _, _ = _make_bot_with_mocks()
+    started_at = _datetime.datetime(2026, 8, 17, 10, 17, tzinfo=ET)  # after 08:30, before 15:51
+
+    with patch("bot.service.bot.now_et", return_value=started_at):
+        bot._register_jobs()
+
+    job = bot._scheduler.get_job("force_close")
+    next_run = getattr(job, "next_run_time", None)  # pending jobs have no attr until (re)scheduled
+    assert next_run is not None, "force_close job must be armed at startup"
+    assert next_run.astimezone(ET) == _datetime.datetime(2026, 8, 17, 15, 51, tzinfo=ET), (
+        f"force_close must be armed for today's 15:51 ET; got {next_run}"
+    )
 
 
 # ============================================================
