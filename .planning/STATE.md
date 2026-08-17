@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 06.2 (code-review-remediation) — COMPLETE
 Plan: 3 of 3 (all plans complete)
 Status: Phase complete — all 16 code-review findings closed (Tier 1/2/3)
-Last activity: 2026-08-17 - Completed quick task 260817-155: Phase 8 options strategy Wave 2-3 (gateway/store/executor)
+Last activity: 2026-08-17 - Completed quick task 260817-1ie: Phase 8 options strategy Wave 4 (OptionsBot service + dispatch)
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -167,6 +167,7 @@ None yet.
 | 260702-ick | Shared SIMULATE account isolation: get_external_codes() scan-time exclusion + risk.sizing_equity_usd fixed sizing basis (spec: docs/superpowers/specs/2026-07-02-shared-simulate-account-isolation-design.md) | 2026-07-02 | aed0430 | [260702-ick-implement-shared-simulate-account-isolat](./quick/260702-ick-implement-shared-simulate-account-isolat/) |
 | 260817-0ph | Phase 8 options strategy (tasty_credit_spreads) Wave 1: migration 0006, bot/options pure core (schema/config/strategy), rules_options.json, tests (design: ~/.claude/plans/scrape-highly-rated-options-velvety-naur.md; research: docs/research/2026-08-17-tastylive-options-research.md) | 2026-08-17 | 47a47dd | [260817-0ph-phase-8-options-strategy-tasty-credit-sp](./quick/260817-0ph-phase-8-options-strategy-tasty-credit-sp/) |
 | 260817-155 | Phase 8 options strategy Wave 2-3: gateway option methods (get_stock_ids/screen_options/get_option_positions), OptionsStore, LegExecutor + tests | 2026-08-17 | 7624ea9 | [260817-155-phase-8-options-strategy-wave-2-3-gatewa](./quick/260817-155-phase-8-options-strategy-wave-2-3-gatewa/) |
+| 260817-1ie | Phase 8 options strategy Wave 4: OptionsBot service (entry scan/manage/eod jobs, reconcile, alerts, report), bot/main.py strategy_name dispatch + --rules, tests | 2026-08-17 | 35194ed | [260817-1ie-phase-8-options-strategy-wave-4-optionsb](./quick/260817-1ie-phase-8-options-strategy-wave-4-optionsb/) |
 
 ## Deferred Items
 
