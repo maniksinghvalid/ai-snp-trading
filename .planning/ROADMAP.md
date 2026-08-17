@@ -276,7 +276,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 6. Backtester | 12/12 | Complete    | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
-| 9. Options Backtester | 3/4 | In Progress|  |
+| 9. Options Backtester | 4/4 | Complete   | 2026-08-17 |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -301,7 +301,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 - [x] 260817-1ie — Wave 4: OptionsBot service (entry/manage/eod jobs, reconcile, alerts, report), main dispatch + --rules (ce3edb7, bb059f1, 96ad6ac, e34e252, 35194ed)
 - [x] Wave 5: research doc, scripts/uat_options_probe.py, live read-only UAT fixes (ad41cd5), ROADMAP/README/CLAUDE.md
 - [ ] Live paper UAT (`--live-1lot`) + first RTH probe review of liquidity thresholds — operator
-- [ ] Phase 9 (see block below): options backtester on Massive option daily aggregates (entitlement verified 2026-08-17)
+- [x] Phase 9 (see block below): options backtester on Massive option daily aggregates (entitlement verified 2026-08-17) (completed 2026-08-17)
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
 
@@ -355,7 +355,7 @@ Plans:
   5. Result doc reports each hypothesis as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with the numbers; `rules_options.json` is changed only if a hypothesis is SUPPORTED with OOS confirmation
   6. Full test suite green
 
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -372,4 +372,4 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 09-04-PLAN.md — `backtester.options_run` CLI with `--set` overrides, real-data runs for every hypothesis arm, results doc + conditional `rules_options.json` change (OBT-01, OBT-06, OBT-07) [Wave 4]
+- [x] 09-04-PLAN.md — `backtester.options_run` CLI with `--set` overrides, real-data runs for every hypothesis arm, results doc + conditional `rules_options.json` change (OBT-01, OBT-06, OBT-07) [Wave 4]

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: "Completed 09-03-PLAN.md (daily replay engine + options report glue: OptionsBacktestEngine, live cap-gate-order mirroring, fill/settlement arithmetic, trades.csv/summary.json via reused ratio math)"
-last_updated: "2026-08-17T17:49:36.885Z"
+status: verifying
+stopped_at: "Completed 09-04-PLAN.md (options backtester CLI + real-data attempt: all 3 hypotheses INSUFFICIENT-EVIDENCE due to Massive per-contract-bar architecture vs SPY chain density; Phase 9 complete)"
+last_updated: "2026-08-17T19:23:40.215Z"
 last_activity: 2026-08-17 -- Phase 9 execution started
 progress:
   total_phases: 11
-  completed_phases: 9
+  completed_phases: 10
   total_plans: 47
-  completed_plans: 47
-  percent: 82
+  completed_plans: 48
+  percent: 91
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 Phase: 9 (Options backtester) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-17 -- Phase 9 execution started
 
 Progress: [██████████] 9/9 phases (100%)
@@ -72,6 +72,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 09 P01 | 30min | 3 tasks | 6 files |
 | Phase 09 P02 | ~35 minutes | 3 tasks | 3 files |
 | Phase 09-options-backtester P03 | ~50 minutes | 3 tasks | 4 files |
+| Phase 09 P04 | 90 minutes | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -154,6 +155,8 @@ Recent decisions affecting current work:
 - [Phase ?]: implied_vol's fail-closed floor is discounted (present-value) intrinsic, not naive spot-strike -- deep-ITM European puts legitimately price below naive intrinsic (09-02)
 - [Phase 09-03]: 09-03: credit_per_spread on the position dict is the fill-adjusted (post-slippage) credit, not pick_strikes' pre-fill sel[credit] -- more realistic downstream max_loss/manage-time math
 - [Phase 09-03]: 09-03: expiry settlement checked before manage_decision in _manage_day -- an expiring position always settles at intrinsic, never races a manage_decision exit reason on its own expiry day
+- [Phase ?]: 09-04: warm-up priming via a dedicated CLI-side loop (_prime_iv_series) feeding engine._iv_series directly, not engine.run(warmup_days) -- OptionsBacktestEngine.run_day has no public warm-up-only API and is frozen
+- [Phase ?]: 09-04: all 3 hypotheses (H1/H2/H3) verdicted INSUFFICIENT-EVIDENCE -- SPY's option chain density x measured Massive fetch rate (5.3-5.8 req/min) projects ~183hr for one arm's one window, ~90x the plan's 2hr stop-and-report budget; grouped-daily escape hatch probed live, HTTP 400; rules_options.json unchanged
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -190,6 +193,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T17:49:36.880Z
-Stopped at: Completed 09-03-PLAN.md (daily replay engine + options report glue: OptionsBacktestEngine, live cap-gate-order mirroring, fill/settlement arithmetic, trades.csv/summary.json via reused ratio math)
+Last session: 2026-08-17T19:23:40.210Z
+Stopped at: Completed 09-04-PLAN.md (options backtester CLI + real-data attempt: all 3 hypotheses INSUFFICIENT-EVIDENCE due to Massive per-contract-bar architecture vs SPY chain density; Phase 9 complete)
 Resume file: None
