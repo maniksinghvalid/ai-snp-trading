@@ -38,8 +38,8 @@ class _FakeChain:
     """Minimal OptionChainSource stand-in: no-op for every method the CLI/engine
     warm-up priming path calls."""
 
-    def __init__(self, source, underlying, start, end):
-        pass
+    def __init__(self, source, underlying, start, end, workers=1):
+        self.fetch_stats = {"requests": 0, "cache_hits": 0}
 
     def load(self, *a, **k):
         return self
@@ -47,7 +47,10 @@ class _FakeChain:
     def underlying_close(self, day):
         return None
 
-    def contracts_for_day(self, *a, **k):
+    def expiries_for_day(self, day):
+        return []
+
+    def rows_for(self, *a, **k):
         return []
 
 
@@ -70,8 +73,15 @@ class _FakeEngine:
         self.cfg = cfg
         self.chains = chains
         self.trade_log = [dict(_FAKE_TRADE)]
+        self.open_positions_at_end = 0
+
+    def update_iv(self, day):
+        pass
 
     def run(self, days):
+        pass
+
+    def close_open_at_end(self, day):
         pass
 
 
@@ -86,16 +96,19 @@ def _patch_offline(monkeypatch):
 # ============================================================
 
 def test_set_override_writes_effective_config(monkeypatch, tmp_path):
-    monkeypatch.setattr(run_mod, "load_massive_api_key", lambda: (_ for _ in ()).throw(
-        run_mod.MassiveApiError("no key in offline test")
-    ))
+    """--set overrides land in the run dir's config.json; rules_options.json
+    on disk is never rewritten (D-15). Requires the whole offline pipeline to
+    succeed (WR-05: config + API key both validated before out_dir exists,
+    so config.json only appears once everything up to that point passed)."""
+    _patch_offline(monkeypatch)
+    monkeypatch.setattr(run_mod, "OptionsBacktestEngine", _FakeEngine)
 
     with open(RULES_JSON_PATH, encoding="utf-8") as f:
         before = f.read()
 
     exit_code = run_mod.main(_base_args(tmp_path) + ["--set", "entry.ivr_min=20"])
 
-    assert exit_code == 1  # fails later at the (monkeypatched) API-key step
+    assert exit_code == 0
     config_path = tmp_path / "config.json"
     assert config_path.exists()
     effective = json.loads(config_path.read_text())
@@ -161,8 +174,9 @@ def test_missing_api_key_exits_1(monkeypatch, tmp_path, capsys):
     assert exit_code == 1
     assert "[ERROR]" in captured.err
     assert "MASSIVE_API_KEY" in captured.err
-    # config.json IS written before the API-key step (D-15/D-16 ordering).
-    assert (tmp_path / "config.json").exists()
+    # No run dir for a failed API-key check -- config + API key must BOTH
+    # succeed before out_dir is created (WR-05).
+    assert not (tmp_path / "config.json").exists()
 
 
 # ============================================================
@@ -187,10 +201,35 @@ def test_cli_smoke_offline(monkeypatch, tmp_path):
     assert len(trades_csv) >= 2  # header + one trade row
 
 
+def test_replay_exception_exits_1(monkeypatch, tmp_path, capsys):
+    """WR-05: any unexpected exception during chain load/replay/report is
+    caught by the single exception boundary and reported as [ERROR], never
+    a raw stack trace."""
+    _patch_offline(monkeypatch)
+
+    class _BoomEngine:
+        def __init__(self, cfg, chains, **kwargs):
+            pass
+
+        def update_iv(self, day):
+            pass
+
+        def run(self, days):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(run_mod, "OptionsBacktestEngine", _BoomEngine)
+
+    exit_code = run_mod.main(_base_args(tmp_path))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[ERROR] boom" in captured.err
+
+
 def test_help_exits_0(capsys):
     with pytest.raises(SystemExit) as exc_info:
         run_mod.main(["--help"])
     assert exc_info.value.code == 0
     out = capsys.readouterr().out
-    for flag in ("--rules", "--symbols", "--start", "--end", "--set", "--out"):
+    for flag in ("--rules", "--symbols", "--start", "--end", "--set", "--out", "--workers"):
         assert flag in out

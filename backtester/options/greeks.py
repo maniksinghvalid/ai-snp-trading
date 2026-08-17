@@ -93,8 +93,16 @@ def implied_vol(price, spot, strike, t_years, r, right, q=0.0,
     few cents below the naive intrinsic purely from discounting the strike
     -- using the naive floor here would wrongly fail-close a genuine BS
     price (found via this module's own round-trip test).
+
+    WR-01 fail-closed guard: a NaN/inf `price` or `spot` makes every
+    comparison below silently False (NaN compares unequal to everything),
+    so the bisection loop would drift to ~4.9999997 instead of returning
+    None -- one such value reaching `atm_iv` poisons the IV-rank series for
+    up to 252 subsequent days (REVIEW.md WR-01). Checked BEFORE the
+    intrinsic-floor math below.
     """
-    if t_years <= 0:
+    if (t_years <= 0 or not math.isfinite(price) or not math.isfinite(spot)
+            or spot <= 0 or strike <= 0):
         return None
     disc_r, disc_q = math.exp(-r * t_years), math.exp(-q * t_years)
     floor = (max(spot * disc_q - strike * disc_r, 0.0) if right == "C"

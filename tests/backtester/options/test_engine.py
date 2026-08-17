@@ -40,17 +40,19 @@ class _FakeChain:
         self._underlying_by_day = underlying_by_day
         self._contracts = contracts
         self._bars = bars
+        self.fetch_calls = []  # tickers passed to rows_for, in call order (T-09-13 laziness proof)
 
-    def contracts_for_day(self, day, min_dte, max_dte):
+    def rows_for(self, day, expiry, underlying_px, band_pct):
         today = date.fromisoformat(day)
         rows = []
         for c in self._contracts:
+            if c["expiry"] != expiry:
+                continue
             bar = self._bars.get(c["ticker"], {}).get(day)
             if bar is None:
                 continue
+            self.fetch_calls.append(c["ticker"])
             dte = option_dte(c["expiry"], today)
-            if not (min_dte <= dte <= max_dte):
-                continue
             rows.append({
                 "ticker": c["ticker"], "right": c["right"], "strike": c["strike"],
                 "expiry": c["expiry"], "dte": dte,
@@ -59,12 +61,13 @@ class _FakeChain:
         return rows
 
     def expiries_for_day(self, day):
+        """Reference-based (T-09-13): no bar requirement, dte >= 0 only."""
         today = date.fromisoformat(day)
         seen = {}
         for c in self._contracts:
-            if day not in self._bars.get(c["ticker"], {}):
-                continue
-            seen[c["expiry"]] = option_dte(c["expiry"], today)
+            dte = option_dte(c["expiry"], today)
+            if dte >= 0:
+                seen[c["expiry"]] = dte
         return sorted(seen.items())
 
     def bar_close(self, ticker, day):
@@ -221,6 +224,46 @@ def test_daily_loss_breaker_blocks_entries(base_cfg):
     assert day in engine._breaker_days
 
 
+def test_daily_loss_breaker_trips_on_unrealized_alone(base_cfg):
+    """WR-02: mirrors service.py's _job_manage trip point -- an unrealized
+    loss alone (zero realized loss today) breaches the limit and blocks
+    entries, exactly like live's second breaker check."""
+    day = "2025-01-02"
+    cfg = base_cfg
+    engine = OptionsBacktestEngine(cfg, {"US.AAA": _put_chain(day)})
+    engine._iv_series["US.AAA"] = list(_QUALIFYING_IV_SERIES)
+    engine._unrealized_today = -(cfg.daily_loss_limit_pct / 100 * cfg.sizing_equity_usd) - 1.0
+
+    engine._entry_scan(day, date.fromisoformat(day), {"US.AAA": None})
+
+    assert engine._open == {}
+    assert day in engine._breaker_days
+
+
+def test_manage_day_accumulates_unrealized_for_still_open_positions(base_cfg):
+    """_manage_day populates self._unrealized_today from every position it
+    does NOT close today (mark - credit, matching service.py's
+    _manage_position return-value convention)."""
+    day = "2025-02-01"
+    expiry = date.fromisoformat(day) + timedelta(days=45)
+    engine = OptionsBacktestEngine(base_cfg, {}, slippage_usd=0.02, commission_per_leg=0.65)
+    engine._open["US.AAA"] = _spread_position(day, expiry, qty=2, credit=1.00, width=5.0)
+    # mark stays comfortably inside manage_decision's hold band (no close).
+    engine.chains["US.AAA"] = _FakeChain(
+        {day: 100.0}, contracts=[],
+        bars={
+            "O:SHORT": {day: {"close": 0.90, "volume": 1000.0}},
+            "O:LONG": {day: {"close": 0.10, "volume": 1000.0}},
+        },
+    )
+
+    engine._manage_day(day)
+
+    assert "US.AAA" in engine._open  # still open -- no close recorded
+    mark = 0.90 - 0.10  # mark_spread: short mid minus long mid
+    assert engine._unrealized_today == pytest.approx((1.00 - mark) * 100 * 2)
+
+
 def test_manage_runs_before_entry_scan(base_cfg, monkeypatch):
     day = "2025-01-02"
     engine = OptionsBacktestEngine(base_cfg, {"US.AAA": _put_chain(day)})
@@ -366,3 +409,84 @@ def test_carried_mark_on_missing_bar(base_cfg):
 
     assert len(engine.trade_log) == 1
     assert engine.trade_log[0]["carried_mark"] is True
+
+
+# ============================================================
+# T-09-14: CR-01 end-of-window settlement
+# ============================================================
+
+def test_close_open_at_end_settles_residual_position(base_cfg):
+    """A position still open when the replay window ends is marked and
+    recorded with exit_reason='end_of_window' -- never silently dropped
+    from the trade log (CR-01)."""
+    day = "2025-02-01"
+    expiry = date.fromisoformat(day) + timedelta(days=45)  # well past `day` -- not expiring
+    engine = OptionsBacktestEngine(base_cfg, {}, slippage_usd=0.02, commission_per_leg=0.65)
+    engine._open["US.AAA"] = _spread_position(day, expiry)
+    engine.chains["US.AAA"] = _FakeChain(
+        {day: 100.0}, contracts=[],
+        bars={
+            "O:SHORT": {day: {"close": 0.50, "volume": 1000.0}},
+            "O:LONG": {day: {"close": 0.10, "volume": 1000.0}},
+        },
+    )
+
+    engine.close_open_at_end(day)
+
+    assert "US.AAA" not in engine._open
+    assert engine.open_positions_at_end == 0
+    assert len(engine.trade_log) == 1
+    assert engine.trade_log[0]["exit_reason"] == "end_of_window"
+    assert engine.trade_log[0]["pnl_usd"] == pytest.approx(106.80)  # same arithmetic as a normal close
+
+
+def test_close_open_at_end_leaves_unmarkable_position_open():
+    """A leg with no bar at all (not even a carry-forward candidate) cannot
+    be marked -- close_open_at_end leaves it open and reports it via
+    open_positions_at_end so the residue is visible, never silently lost."""
+    cfg = load_options_config("rules_options.json")
+    cfg.structure_type = "put_credit_spread"
+    day = "2025-02-01"
+    expiry = date.fromisoformat(day) + timedelta(days=45)
+    engine = OptionsBacktestEngine(cfg, {})
+    engine._open["US.AAA"] = _spread_position(day, expiry)
+    engine.chains["US.AAA"] = _FakeChain({day: 100.0}, contracts=[], bars={})  # no bars at all
+
+    engine.close_open_at_end(day)
+
+    assert "US.AAA" in engine._open  # left open -- genuinely unmarkable
+    assert engine.open_positions_at_end == 1
+    assert engine.trade_log == []
+
+
+# ============================================================
+# T-09-13: lazy per-decision-day fetch proof (VERIFICATION gap 3, D-18)
+# ============================================================
+
+def test_update_iv_and_entry_scan_fetch_only_one_expiry_per_day(base_cfg):
+    """A chain with 3 expiries -- update_iv (IV-tracking expiry, closest to
+    target_dte) and _entry_scan (pick_expiry's chosen expiry) must each
+    fetch bars for exactly ONE of the three expiries on a given day, never
+    all three (the eager-design defect this plan fixes)."""
+    day = "2025-01-02"
+    today = date.fromisoformat(day)
+    cfg = base_cfg
+    cfg.target_dte = 45
+
+    contracts, bars = [], {}
+    for dte_offset in (30, 45, 60):  # three expiries, all inside [min_dte, max_dte]
+        expiry = today + timedelta(days=dte_offset)
+        for strike in range(90, 100):  # put ladder, near-ATM
+            ticker = f"O:TST{expiry:%y%m%d}P{int(strike * 1000):08d}"
+            contracts.append({"ticker": ticker, "right": "P", "strike": float(strike), "expiry": expiry})
+            price = bs_price(100.0, strike, dte_offset / 365.25, 0.045, 0.45, "P")
+            bars[ticker] = {day: {"close": price, "volume": 100_000.0}}
+    chain = _FakeChain({day: 100.0}, contracts, bars)
+
+    engine = OptionsBacktestEngine(cfg, {"US.AAA": chain})
+    engine.update_iv(day)
+
+    fetched_expiries = {
+        next(c["expiry"] for c in contracts if c["ticker"] == t) for t in chain.fetch_calls
+    }
+    assert fetched_expiries == {today + timedelta(days=45)}  # closest to target_dte=45 -- ONE expiry only

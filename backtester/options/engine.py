@@ -23,11 +23,19 @@ Documented divergences from live (Claude's Discretion / RESEARCH Pitfall 3):
      `O:` daily aggregates carry no bid/ask (D-11) — so `leg_is_liquid`'s
      spread gate is never the binding constraint offline; only the OI gate is.
   4. D-08's no-look-ahead rule applies to ENTRY selection only (exact-day bar
-     required, `OptionChainSource.contracts_for_day`). Marking an OPEN
-     position on a day with no bar for one of its legs uses
-     `last_known_close` (carry-forward) — the Claude's Discretion "missing-bar
-     handling for a leg on a manage day" call, chosen and documented here.
-     Entry selection never uses this fallback.
+     required, `OptionChainSource.rows_for`). Marking an OPEN position on a
+     day with no bar for one of its legs uses `last_known_close`
+     (carry-forward) — the Claude's Discretion "missing-bar handling for a
+     leg on a manage day" call, chosen and documented here. Entry selection
+     never uses this fallback.
+
+T-09-13/T-09-14 (VERIFICATION gap closure): `update_iv`/`_entry_scan` fetch
+bars LAZILY through `chain.rows_for` (one expiry, an OTM-side band) instead
+of the old eager `contracts_for_day`. `close_open_at_end` settles every
+position still open at the replay window's end (CR-01 — never silently
+dropped from reported metrics). The daily-loss breaker (`_check_daily_
+breaker`) evaluates realized + unrealized P&L, mirroring live's two trip
+points (WR-02).
 
 Never imports the live gateway module, the options execution/order layer, the
 options service process, or the broker SDK package — this module is provably
@@ -143,7 +151,7 @@ class OptionsBacktestEngine:
 
     def __init__(self, cfg, chains: dict, r: float = 0.045, slippage_usd: float = 0.02,
                  commission_per_leg: float = 0.65, spread_pct: float = 2.0,
-                 oi_source: str = "volume"):
+                 oi_source: str = "volume", strike_band_pct: float = 10.0):
         self.cfg = cfg
         self.chains = chains
         self.r = r
@@ -151,6 +159,7 @@ class OptionsBacktestEngine:
         self.commission_per_leg = commission_per_leg
         self.spread_pct = spread_pct
         self.oi_source = oi_source
+        self.strike_band_pct = strike_band_pct
 
         self.trade_log: list = []
         self._open: dict = {}            # code -> position dict
@@ -158,6 +167,8 @@ class OptionsBacktestEngine:
         self._opened_on: dict = {}       # code -> "YYYY-MM-DD" of the open position
         self._breaker_days: set = set()  # "YYYY-MM-DD" days the breaker has tripped
         self._prior_close: dict = {}     # code -> yesterday's underlying close
+        self._unrealized_today: float = 0.0  # WR-02: populated by _manage_day
+        self.open_positions_at_end: int = 0  # CR-01: populated by close_open_at_end
 
     # --------------------------------------------------------
     # Replay loop
@@ -167,6 +178,34 @@ class OptionsBacktestEngine:
         """Replay every trading day in `days`, in order."""
         for day in days:
             self.run_day(day)
+
+    def update_iv(self, day: str) -> None:
+        """Update each chain's daily ATM-IV observation (T-09-13 lazy fetch,
+        VERIFICATION gap 3): picks the IV-TRACKING expiry (closest to
+        cfg.target_dte within [min_dte, max_dte], ties -> earlier date) from
+        the reference via `expiries_for_day`, then fetches only a tight
+        +/-1% ATM band for that one expiry via `rows_for` — never the whole
+        chain. The single source of truth for the IV-update half of a
+        decision day: called from `run_day` (below) AND from
+        `options_run._prime_iv_series`'s warm-up loop, so there is no
+        duplicated copy of this logic (REVIEW.md IN-07-adjacent concern).
+        """
+        cfg = self.cfg
+        for code, chain in sorted(self.chains.items()):
+            underlying_px = chain.underlying_close(day)
+            if underlying_px is None:
+                continue
+            candidates = [
+                (exp, dte) for exp, dte in chain.expiries_for_day(day)
+                if cfg.min_dte <= dte <= cfg.max_dte
+            ]
+            if not candidates:
+                continue
+            exp, _ = min(candidates, key=lambda e: (abs(e[1] - cfg.target_dte), e[0]))
+            rows = chain.rows_for(day, exp, underlying_px, band_pct=1.0)
+            iv = atm_iv(rows, underlying_px, day, self.r, cfg.target_dte)
+            if iv is not None:
+                self._iv_series.setdefault(code, []).append(iv)
 
     def run_day(self, day: str) -> None:
         """One decision point (D-03): update IV series, manage/settle, then enter.
@@ -188,11 +227,7 @@ class OptionsBacktestEngine:
             change_pct[code] = ((underlying_px - prior) / prior * 100.0) if prior else None
             self._prior_close[code] = underlying_px
 
-            rows = chain.contracts_for_day(day, self.cfg.min_dte, self.cfg.max_dte)
-            iv = atm_iv(rows, underlying_px, day, self.r, self.cfg.target_dte)
-            if iv is not None:
-                self._iv_series.setdefault(code, []).append(iv)
-
+        self.update_iv(day)
         self._manage_day(day)
         self._entry_scan(day, today, change_pct)
 
@@ -206,9 +241,16 @@ class OptionsBacktestEngine:
         `manage_decision` says to close. A leg with no bar on `day` falls back
         to `last_known_close` for MARKING only (never entry selection) and the
         trade-log row records that a carried mark was used.
+
+        Also accumulates `self._unrealized_today` — the mark-to-market P&L of
+        every position that stays open today — mirroring
+        `bot/options/service.py`'s `_manage_position` return value /
+        `_job_manage`'s `unrealized_total` sum (service.py:705-718), so the
+        daily-loss breaker sees unrealized P&L exactly as live does (WR-02).
         """
         cfg = self.cfg
         today = date.fromisoformat(day)
+        unrealized = 0.0
 
         for code, pos in list(self._open.items()):
             chain = self.chains[code]
@@ -244,6 +286,8 @@ class OptionsBacktestEngine:
             credit = float(pos["credit_per_spread"])
             reason = manage_decision(mark, credit, dte, cfg)
             if reason is None:
+                # Still open -- accumulate its unrealized P&L for the breaker.
+                unrealized += (credit - mark) * _CONTRACT_MULTIPLIER * pos["qty"]
                 continue
 
             net_exit = 0.0
@@ -256,6 +300,50 @@ class OptionsBacktestEngine:
 
             close_commission = self.commission_per_leg * len(pos["legs"]) * pos["qty"]
             self._record_close(code, pos, day, reason, net_exit, close_commission, carried)
+
+        self._unrealized_today = unrealized
+
+    def close_open_at_end(self, day: str) -> None:
+        """Mark-to-market every position still in `self._open` on `day` (the
+        last replay day) and record it with `exit_reason="end_of_window"`
+        (CR-01 fix, REVIEW.md) — the same fill/commission arithmetic as a
+        normal `_manage_day` close, so no position opened during the window
+        is silently dropped from every reported metric. Not called
+        automatically by `run()` (keeps `run()` pure/side-effect-scoped);
+        `options_run.main` calls it once, right after `engine.run(...)`.
+        Sets `self.open_positions_at_end` to whatever remains un-markable
+        (e.g. no bar at all for a leg) so that residue is still visible.
+        """
+        for code, pos in list(self._open.items()):
+            chain = self.chains[code]
+            quotes = {}
+            carried = False
+            missing = False
+            for leg in pos["legs"]:
+                close = chain.bar_close(leg["code"], day)
+                if close is None:
+                    close = chain.last_known_close(leg["code"], day)
+                    carried = True
+                if close is None:
+                    missing = True
+                    break
+                bid, ask = synthesize_bid_ask(close, self.spread_pct)
+                quotes[leg["code"]] = {"bid": bid, "ask": ask}
+            if missing:
+                continue  # cannot mark this position at all -- leave it open
+
+            net_exit = 0.0
+            for leg in pos["legs"]:
+                q = quotes[leg["code"]]
+                mid = (q["bid"] + q["ask"]) / 2
+                close_side = "BUY" if leg["side"] == "SELL" else "SELL"
+                fill = leg_fill_price(mid, close_side, self.slippage_usd)
+                net_exit += fill if leg["side"] == "SELL" else -fill
+
+            close_commission = self.commission_per_leg * len(pos["legs"]) * pos["qty"]
+            self._record_close(code, pos, day, "end_of_window", net_exit, close_commission, carried)
+
+        self.open_positions_at_end = len(self._open)
 
     def _record_close(self, code, pos, day, exit_reason, net_exit,
                       close_commission, carried_mark) -> None:
@@ -311,15 +399,21 @@ class OptionsBacktestEngine:
     # --------------------------------------------------------
 
     def _check_daily_breaker(self, day: str) -> None:
-        """Trip the breaker for `day` when today's REALIZED-ONLY P&L already
-        breaches the daily loss limit (mirrors `_check_daily_breaker`'s
-        `unrealized_total=0.0` call from `_job_entry_scan`)."""
+        """Trip the breaker for `day` when today's REALIZED + UNREALIZED P&L
+        breaches the daily loss limit -- mirrors live's two trip points:
+        `_job_entry_scan`'s realized-only call AND `_job_manage`'s
+        realized+unrealized call (`bot/options/service.py:690,718`; WR-02).
+        `_manage_day` (called before `_entry_scan` in `run_day`) has already
+        populated `self._unrealized_today` for `day` by the time this runs;
+        it defaults to 0.0 when `_entry_scan` is exercised directly without
+        a preceding `_manage_day` call (e.g. in a unit test).
+        """
         cfg = self.cfg
         realized_today = sum(
             t["pnl_usd"] for t in self.trade_log if t["closed_date"] == day
         )
         limit = -cfg.daily_loss_limit_pct / 100 * cfg.sizing_equity_usd
-        if realized_today > limit:
+        if realized_today + self._unrealized_today > limit:
             return
         self._breaker_days.add(day)
 
@@ -366,8 +460,7 @@ class OptionsBacktestEngine:
             if exp is None:
                 continue
 
-            chain_rows = chain.contracts_for_day(day, cfg.min_dte, cfg.max_dte)
-            exp_rows_raw = [r for r in chain_rows if r["expiry"] == exp]
+            exp_rows_raw = chain.rows_for(day, exp, underlying_px, self.strike_band_pct)
             rows = build_rows(exp_rows_raw, underlying_px, day, self.r,
                               self.spread_pct, self.oi_source, cfg.min_open_interest)
 

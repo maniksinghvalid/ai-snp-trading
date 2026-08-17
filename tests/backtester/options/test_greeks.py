@@ -79,6 +79,18 @@ def test_iv_fails_closed_below_intrinsic():
     assert greeks.implied_vol(999.0, 100.0, 100.0, 45 / 365.25, _R, "C") is None
 
 
+def test_iv_nan_inputs_fail_closed():
+    # WR-01: a NaN price/spot must never drift the bisection loop to ~5.0 --
+    # every comparison against NaN is False, so this fails closed to None
+    # BEFORE the intrinsic-floor math (math.isfinite guard).
+    nan = float("nan")
+    assert greeks.implied_vol(nan, 100.0, 100.0, 45 / 365.25, _R, "C") is None
+    assert greeks.implied_vol(5.0, nan, 100.0, 45 / 365.25, _R, "C") is None
+    assert greeks.implied_vol(float("inf"), 100.0, 100.0, 45 / 365.25, _R, "C") is None
+    assert greeks.implied_vol(5.0, 100.0, 0.0, 45 / 365.25, _R, "C") is None  # strike <= 0
+    assert greeks.implied_vol(5.0, 0.0, 100.0, 45 / 365.25, _R, "C") is None  # spot <= 0
+
+
 def test_bs_price_intrinsic_at_expiry():
     assert greeks.bs_price(110.0, 100.0, 0.0, _R, 0.25, "C") == 10.0
     assert greeks.bs_price(90.0, 100.0, 0.0, _R, 0.25, "C") == 0.0

@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import uuid
 from datetime import date, datetime, timedelta
 
@@ -36,7 +37,6 @@ from bot.options.config import load_options_config
 from backtester.massive import MassiveApiError, MassiveDataSource, load_massive_api_key
 from backtester.options.data import OptionChainSource, trading_days
 from backtester.options.engine import OptionsBacktestEngine
-from backtester.options.greeks import atm_iv
 from backtester.options.report import write_options_report
 
 _DATE_FMT = "%Y-%m-%d"
@@ -63,7 +63,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commission-per-leg", type=float, default=0.65)
     parser.add_argument("--spread-pct", type=float, default=2.0)
     parser.add_argument("--iv-warmup-days", type=int, default=60)
-    parser.add_argument("--strike-band-pct", type=float, default=20.0)
+    parser.add_argument(
+        "--strike-band-pct", type=float, default=10.0,
+        help="OTM-side strike band for the lazy per-decision-day fetch (default 10.0)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Parallel contract-bar fetch workers (default 1 -- the free Massive tier "
+             "is a hard 5 req/min cap, keep 1; a paid tier can use up to 8)",
+    )
     parser.add_argument("--oi-source", choices=["volume", "neutral"], default="volume")
     parser.add_argument("--label", default=None, help="Free-text run label recorded in summary.json assumptions")
     return parser
@@ -131,6 +139,8 @@ def _validate_numeric_flags(args) -> None:
         raise ValueError("--iv-warmup-days must be >= 1")
     if args.strike_band_pct <= 0:
         raise ValueError("--strike-band-pct must be > 0")
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
 
 
 def _run_id(start: str, end: str, symbols: list) -> str:
@@ -152,23 +162,15 @@ def _warmup_start(start: str, warmup_days: int) -> str:
     return days[-warmup_days]
 
 
-def _prime_iv_series(engine, warmup_days: list, target_dte: int) -> None:
-    """Feed each underlying's ATM-IV series for warm-up days ONLY — mirrors
-    OptionsBacktestEngine.run_day's own IV-update loop but never runs manage/entry,
-    so a warm-up day can never open a position (module docstring). Reaches
-    `engine._iv_series`/`engine.chains` directly: OptionsBacktestEngine (Plan 09-03,
-    frozen for this plan) exposes no public warm-up-only API, and splitting
-    run_day's combined IV-update+manage+entry loop is out of this plan's scope.
+def _prime_iv_series(engine, warmup_days: list) -> None:
+    """Feed each underlying's ATM-IV series for warm-up days ONLY, via
+    `engine.update_iv()` — the single source of truth for the IV-update half
+    of a decision day (T-09-13; no duplicated copy of that loop here). Never
+    runs manage/entry, so a warm-up day can never open a position (module
+    docstring).
     """
     for day in warmup_days:
-        for code, chain in sorted(engine.chains.items()):
-            underlying_px = chain.underlying_close(day)
-            if underlying_px is None:
-                continue
-            rows = chain.contracts_for_day(day, engine.cfg.min_dte, engine.cfg.max_dte)
-            iv = atm_iv(rows, underlying_px, day, engine.r, target_dte)
-            if iv is not None:
-                engine._iv_series.setdefault(code, []).append(iv)
+        engine.update_iv(day)
 
 
 def main(argv=None) -> int:
@@ -176,6 +178,15 @@ def main(argv=None) -> int:
 
     Returns a process-style exit code (0 success, 1 on any validation/config/network
     failure) rather than calling sys.exit directly, so it is trivially testable.
+
+    Ordering (WR-05): every argument, the effective config (schema-validated
+    via a throwaway temp file), and the Massive API key are all checked
+    BEFORE the run directory is created — a rejected `--set` override or a
+    missing API key must never leave a half-populated
+    `backtester/results/options/<run-id>/` behind. Chain load, replay and
+    report writing are wrapped in one exception boundary so a malformed
+    cached CSV or any other unexpected failure exits 1 with `[ERROR]` rather
+    than a raw stack trace.
     """
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -188,18 +199,11 @@ def main(argv=None) -> int:
             raise ValueError(f"--start ({args.start}) must be <= --end ({args.end})")
         symbols = _parse_symbols(args.symbols)
         _validate_numeric_flags(args)
-    except ValueError as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
-        return 1
 
-    run_id = _run_id(args.start, args.end, symbols)
-    out_dir = args.out or os.path.join("backtester", "results", "options", run_id)
-
-    try:
         with open(args.rules, "r", encoding="utf-8") as f:
             raw = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"[ERROR] failed to read --rules {args.rules!r}: {exc}", file=sys.stderr)
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
     try:
@@ -208,16 +212,17 @@ def main(argv=None) -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
-    # Effective config is written to the run dir (D-15/D-16) THEN loaded through the
-    # real schema validator -- an out-of-range override fails here, not silently
-    # mid-run. rules_options.json on disk is never touched.
-    os.makedirs(out_dir, exist_ok=True)
-    config_path = os.path.join(out_dir, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(effective, f, indent=2)
-
+    # Schema-validate the EFFECTIVE config through a throwaway temp file --
+    # BEFORE any run dir exists (WR-05) -- so a rejected override never
+    # leaves a half-populated directory behind.
     try:
-        cfg = load_options_config(config_path)
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(effective, f)
+            cfg = load_options_config(tmp_path)
+        finally:
+            os.unlink(tmp_path)
     except ConfigError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
@@ -228,45 +233,66 @@ def main(argv=None) -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
+    # Config + API key both succeeded -- only now is it safe to create the run dir.
+    run_id = _run_id(args.start, args.end, symbols)
+    out_dir = args.out or os.path.join("backtester", "results", "options", run_id)
+    os.makedirs(out_dir, exist_ok=True)
+    config_path = os.path.join(out_dir, "config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(effective, f, indent=2)
+
     try:
         warmup_start = _warmup_start(args.start, args.iv_warmup_days)
         chains = {}
         for sym in symbols:
             root = sym.split(".", 1)[1] if "." in sym else sym
-            chains[sym] = OptionChainSource(massive, root, warmup_start, args.end).load(
-                cfg.min_dte, cfg.max_dte, cfg.prefer_monthly, args.strike_band_pct
-            )
-    except (ValueError, MassiveApiError) as exc:
+            chains[sym] = OptionChainSource(
+                massive, root, warmup_start, args.end, workers=args.workers
+            ).load(cfg.min_dte, cfg.max_dte, cfg.prefer_monthly)
+
+        engine = OptionsBacktestEngine(
+            cfg, chains, r=args.risk_free_rate, slippage_usd=args.slippage_usd,
+            commission_per_leg=args.commission_per_leg, spread_pct=args.spread_pct,
+            oi_source=args.oi_source, strike_band_pct=args.strike_band_pct,
+        )
+
+        warmup_days = trading_days(warmup_start, args.start)[:-1]
+        _prime_iv_series(engine, warmup_days)
+        decision_days = trading_days(args.start, args.end)
+        engine.run(decision_days)
+        engine.close_open_at_end(decision_days[-1])  # CR-01: settle every residual open position
+
+        for sym, chain in chains.items():
+            print(f"[fetch_stats] {sym}: {chain.fetch_stats}", file=sys.stderr)
+
+        end_of_window_pnl_usd = sum(
+            t["pnl_usd"] for t in engine.trade_log if t["exit_reason"] == "end_of_window"
+        )
+        metrics = write_options_report(
+            engine.trade_log, out_dir, starting_capital=cfg.sizing_equity_usd,
+            start=args.start, end=args.end,
+            extra_assumptions={
+                "rules_json": args.rules,
+                "label": args.label,
+                "risk_free_rate": args.risk_free_rate,
+                "slippage_usd": args.slippage_usd,
+                "commission_per_leg_usd": args.commission_per_leg,
+                "spread_pct": args.spread_pct,
+                "iv_warmup_days": args.iv_warmup_days,
+                "strike_band_pct": args.strike_band_pct,
+                "workers": args.workers,
+                "oi_source": args.oi_source,
+                "warmup_start": warmup_start,
+                "run_id": run_id,
+                "open_positions_at_end": engine.open_positions_at_end,
+                "end_of_window_pnl_usd": end_of_window_pnl_usd,
+                "fetch_stats": {sym: chain.fetch_stats for sym, chain in chains.items()},
+            },
+        )
+    except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
-    engine = OptionsBacktestEngine(
-        cfg, chains, r=args.risk_free_rate, slippage_usd=args.slippage_usd,
-        commission_per_leg=args.commission_per_leg, spread_pct=args.spread_pct,
-        oi_source=args.oi_source,
-    )
-
-    warmup_days = trading_days(warmup_start, args.start)[:-1]
-    _prime_iv_series(engine, warmup_days, cfg.target_dte)
-    engine.run(trading_days(args.start, args.end))
-
-    metrics = write_options_report(
-        engine.trade_log, out_dir, starting_capital=cfg.sizing_equity_usd,
-        start=args.start, end=args.end,
-        extra_assumptions={
-            "rules_json": args.rules,
-            "label": args.label,
-            "risk_free_rate": args.risk_free_rate,
-            "slippage_usd": args.slippage_usd,
-            "commission_per_leg_usd": args.commission_per_leg,
-            "spread_pct": args.spread_pct,
-            "iv_warmup_days": args.iv_warmup_days,
-            "strike_band_pct": args.strike_band_pct,
-            "oi_source": args.oi_source,
-            "warmup_start": warmup_start,
-            "run_id": run_id,
-        },
-    )
     print(json.dumps(metrics, indent=2, default=str))
     return 0
 
