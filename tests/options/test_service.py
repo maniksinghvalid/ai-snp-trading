@@ -371,6 +371,28 @@ def test_entry_scan_skips_entirely_when_breaker_tripped(make_bot, store, gateway
     assert store.get_option_positions(("OPENING", "OPEN")) == []
 
 
+def test_entry_scan_blocked_by_kill_switch(make_bot, store, gateway, monkeypatch):
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._kill_switch.triggered = True
+
+    _run(bot._job_entry_scan())
+
+    gateway.screen_options.assert_not_awaited()
+    assert store.get_option_positions(("OPENING", "OPEN")) == []
+
+
+def test_entry_scan_blocked_before_readiness_gate(make_bot, store, gateway, monkeypatch):
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._entries_enabled = False       # readiness gate has not passed yet
+
+    _run(bot._job_entry_scan())
+
+    gateway.screen_options.assert_not_awaited()
+    assert store.get_option_positions(("OPENING", "OPEN")) == []
+
+
 def test_entry_scan_returns_immediately_off_a_trading_day(make_bot, gateway, monkeypatch):
     bot = make_bot()
     _wire_scan(bot, gateway, monkeypatch)
