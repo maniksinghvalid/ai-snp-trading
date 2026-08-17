@@ -33,7 +33,7 @@ or `rules_options.json` inside the phase except a hypothesis-driven change AFTER
 
 ### Greeks / IV (OBT-03, OBT-04)
 - D-09 Black-Scholes European, q=0 default, r configurable (default 0.045); IV by bracketed root-find in stdlib `math` (no scipy); delta from that IV; rows to `pick_strikes` use the SAME dict keys as live `screen_options` rows (check `bot/gateway/gateway.py`, `strategy.py::_leg/_mid`)
-- D-10 IVR: per-underlying daily ATM-IV series (nearest target-DTE expiry, nearest-ATM strike, mean call+put IV); IVR = rank within trailing 252 trading days ×100 (live fraction→percent convention); delivered to `passes_entry_gate` in the live `u` dict shape; IVP skipped (`ivp_min` null)
+- D-10 IVR: per-underlying daily ATM-IV series (nearest target-DTE expiry, nearest-ATM strike, mean call+put IV); IVR = min-max normalization over the trailing 252 trading days, `(iv − min)/(max − min) × 100` (the tastylive/moomoo IV Rank definition — NOT percentile rank; percentile = IVP, skipped because `ivp_min` is null); delivered to `passes_entry_gate` in the live `u` dict shape (percent, 0–100)
 
 ### Fill model / P&L (OBT-05)
 - D-11 Mid = close (OHLC only); fill = mid ± `slippage_usd` per leg (default 0.02, overridable), per-leg commission (default $0.65+fees, configurable), ×100 multiplier; synthesize bid/ask as close ± spread_pct/2 for `leg_is_liquid`; OI/volume from aggregates `v` when present else pass — documented limitation
