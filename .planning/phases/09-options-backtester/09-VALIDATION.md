@@ -45,9 +45,9 @@ updated: 2026-08-17
 | T-09-04 | 09-02 | 2 | OBT-03 | T-09-D1 | bounded bisection (`max_iter=100`) cannot spin | unit | `pytest tests/backtester/options/test_greeks.py::test_iv_roundtrip tests/backtester/options/test_greeks.py::test_delta_monotonic -x -q` | ✅ backtester/options/greeks.py | ✅ green |
 | T-09-05 | 09-02 | 2 | OBT-04 | — | N/A | unit | `pytest tests/backtester/options/test_greeks.py::test_ivr_fixture -x -q` | ✅ backtester/options/greeks.py | ✅ green |
 | T-09-06 | 09-02 | 2 | OBT-06 | T-09-R1 | pre-registration provable from git history, not back-datable | manual (git history) | `git log --diff-filter=A --format=%h -- 'docs/research/*options-backtest-hypotheses.md' \| grep -q .` | ✅ docs/research/2026-08-17-options-backtest-hypotheses.md | ✅ green |
-| T-09-07 | 09-03 | 3 | OBT-01 | T-09-E1 | engine imports no `bot.gateway`/`moomoo`/`place_order` | unit | `pytest tests/backtester/options/test_engine.py::test_imports_not_copies tests/backtester/options/test_engine.py::test_no_broker_imports -x -q` | ❌ created by task | ⬜ pending |
-| T-09-08 | 09-03 | 3 | OBT-05 | — | N/A | unit | `pytest tests/backtester/options/test_engine.py::test_fill_and_settlement -x -q` | ❌ created by task | ⬜ pending |
-| T-09-09 | 09-03 | 3 | OBT-07 | T-09-T1 | stock-shaped P&L pipeline provably not in the call path | unit | `pytest tests/backtester/options/test_report.py -x -q` | ❌ created by task | ⬜ pending |
+| T-09-07 | 09-03 | 3 | OBT-01 | T-09-E1 | engine imports no `bot.gateway`/`moomoo`/`place_order` | unit | `pytest tests/backtester/options/test_engine.py::test_imports_not_copies tests/backtester/options/test_engine.py::test_no_broker_imports -x -q` | ✅ backtester/options/engine.py | ✅ green |
+| T-09-08 | 09-03 | 3 | OBT-05 | — | N/A | unit | `pytest tests/backtester/options/test_engine.py::test_fill_and_settlement -x -q` | ✅ backtester/options/engine.py | ✅ green |
+| T-09-09 | 09-03 | 3 | OBT-07 | T-09-T1 | stock-shaped P&L pipeline provably not in the call path | unit | `pytest tests/backtester/options/test_report.py -x -q` | ✅ backtester/options/report.py | ✅ green |
 | T-09-10 | 09-04 | 4 | OBT-01, OBT-07 | T-09-T2, T-09-E1 | `--set` never rewrites `rules_options.json`; CLI constructs no gateway/StateStore | unit | `pytest tests/backtester/options/test_options_run.py -x -q` | ❌ created by task | ⬜ pending |
 | T-09-11 | 09-04 | 4 | OBT-06 | T-09-R1, T-09-D1 | hypotheses commit precedes every result artifact; backfill has a wall-clock stop budget | manual (git order) + artifact check | `python3 -c "import glob,json,sys; d=glob.glob('backtester/results/options/*/summary.json'); sys.exit(0 if len(d)>=6 and all(json.load(open(p)).get('total_trades') is not None for p in d) else 1)"` | ❌ created by task | ⬜ pending |
 | T-09-12 | 09-04 | 4 | OBT-07 | T-09-T2 | `rules_options.json` changes only for a SUPPORTED verdict, one key max | integration + doc | `grep -Ec 'H[123].*(SUPPORTED\|REJECTED\|INSUFFICIENT-EVIDENCE)' docs/research/*-options-backtest-results.md && pytest -q` | ❌ created by task | ⬜ pending |
@@ -68,10 +68,10 @@ it creates), so no task ships without a runnable check.
 - [x] `tests/backtester/options/__init__.py`, `conftest.py` (chain-grid fixture adapted from `tests/options/test_strategy.py::_grid`; `fake_massive` `_get_json` monkeypatch fixture from `tests/backtester/test_massive.py`) — **T-09-01**
 - [x] `tests/backtester/options/test_data.py` — **T-09-01** (extended by T-09-02, T-09-03)
 - [x] `tests/backtester/options/test_greeks.py` — **T-09-04** (extended by T-09-05)
-- [ ] `tests/backtester/options/test_engine.py` — **T-09-07** (extended by T-09-08)
-- [ ] `tests/backtester/options/test_report.py` — **T-09-09**
+- [x] `tests/backtester/options/test_engine.py` — **T-09-07** (extended by T-09-08)
+- [x] `tests/backtester/options/test_report.py` — **T-09-09**
 - [ ] `tests/backtester/options/test_options_run.py` — **T-09-10**
-- [ ] `backtester/options/{__init__,data,greeks,engine,report}.py`, `backtester/options_run.py` — modules under test (Plans 09-01 → 09-04)
+- [x] `backtester/options/{__init__,data,greeks,engine,report}.py` — [ ] `backtester/options_run.py` — modules under test (Plans 09-01 → 09-04)
 
 ---
 
