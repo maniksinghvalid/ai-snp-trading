@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 06.2 (code-review-remediation) — COMPLETE
 Plan: 3 of 3 (all plans complete)
 Status: Phase complete — all 16 code-review findings closed (Tier 1/2/3)
-Last activity: 2026-08-17 - Completed quick task 260817-1ie: Phase 8 options strategy Wave 4 (OptionsBot service + dispatch)
+Last activity: 2026-08-17 - Phase 8 options strategy BUILT (Waves 1-5, 961 tests, ad41cd5); live paper UAT (--live-1lot) pending operator
 
 Progress: [██████████] 9/9 phases (100%)
 

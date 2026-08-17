@@ -145,6 +145,7 @@ The strategy is the product. It is fully specified and authoritative:
 - **Timezone**: All strategy timing is US Eastern (ET); the bot must handle ET/market-session correctness regardless of host timezone.
 - **Market hours**: Operates only on US market trading days; must respect holidays/half-days.
 - **Position sizing basis**: Assume $100,000 starting paper equity for risk math.
+- **Options bot (Phase 8)**: `rules_options.json` is the options strategy's source of truth (same CFG-01 discipline); the options bot only manages legs recorded in its own `option_legs` table (never adopts/closes other option positions on the shared account); LIMIT orders only, no multi-leg/combo orders (SIMULATE has none), legs opened long-wing-first and closed shorts-first; multi-day holds are inherent to premium selling — the equity bot's no-overnight rule applies to the equity bot only.
 
 ## Key Decisions
 
@@ -161,6 +162,7 @@ The strategy is the product. It is fully specified and authoritative:
 | Intraday re-scan (every 30 min, ~7 passes) | A single premarket snapshot misses stocks that gap/break out after the open; periodic re-scan through midday catches later setups (free, via yfinance) | — Pending |
 | Daily entry cap (max_trades_per_day) | Over-trading guard distinct from the 5-concurrent cap; bounds daily churn even as positions close and free up slots | — Pending |
 | HTML performance dashboard (optional) | Offline, no-JS R-multiple histogram + open/closed trade tables for at-a-glance edge validation; complements (does not replace) Telegram summary | — Pending |
+| Options successor strategy `tasty_credit_spreads` (Phase 8, 2026-08-17) | Trend Join Long validated no-edge (2026-08-13, 226 trades, −0.019R). tastylive research (65 videos, Apify) → defined-risk iron condor / put credit spread on liquid ETFs: 45 DTE monthlies, IVR≥30 gate (fear knob 20), 20Δ shorts, ≥25% credit/width, 50% profit target, 21-DTE exit, 1% risk/trade, 25% BP cap. Self-contained `bot/options/` (own DB/kill-file/reports) reusing gateway/watchdog/alerter/kill-switch; `python -m bot --rules rules_options.json` dispatches on `strategy_name`; equity path unchanged; both bots can coexist on the shared paper account | Built (961 tests); live paper UAT pending |
 
 ## Evolution
 

@@ -29,6 +29,14 @@ If everything else is stripped away, a correct and safe automated trade loop is 
 
 <!-- GSD:project-end -->
 
+## Phase 8 — Options bot (`tasty_credit_spreads`)
+
+- Run: `PAPER_TRADING=true FUTU_TRD_ENV=SIMULATE FUTU_ACC_ID=1727266 python3 -m bot --rules rules_options.json` (equity bot: `python3 -m bot`, unchanged). ONE options-bot instance at a time; may run alongside the equity bot.
+- Config: `rules_options.json` (single source of truth; schema in `bot/options/schema.py`). Code: `bot/options/{strategy,execution,store,service}.py`; gateway option reads in `bot/gateway/gateway.py` (`get_stock_ids`, `screen_options`, `get_option_positions`).
+- Live UAT probe: `python3 scripts/uat_options_probe.py` (read-only; run during RTH) and `--live-1lot --confirm` (operator-run, places one paper spread).
+- Research provenance: `docs/research/2026-08-17-tastylive-options-research.md`; design: `~/.claude/plans/scrape-highly-rated-options-velvety-naur.md`; phase summary: `.planning/phases/08-options-premium-selling/08-SUMMARY.md`.
+- Invariants: LIMIT orders only; long wings before shorts on open, shorts first on close; the options bot never touches broker option codes not in its own `option_legs`; separate DB/kill-file/report-dir from the equity bot.
+
 <!-- GSD:stack-start source:codebase/STACK.md -->
 
 ## Technology Stack
