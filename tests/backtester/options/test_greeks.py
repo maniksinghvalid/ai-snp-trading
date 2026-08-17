@@ -34,6 +34,13 @@ def test_iv_roundtrip():
 
 
 def test_delta_monotonic():
+    # NOTE (Rule 1 deviation from the plan's literal <behavior> wording): the
+    # plan describes put delta as "strictly increasing (toward 0) in strike",
+    # but the standard BS put-delta formula (N(d1)-1, verified numerically
+    # here: strike 80 -> -0.004, strike 120 -> -0.976) is strictly
+    # DECREASING (more negative, away from 0) as strike rises -- a higher
+    # strike put is deeper in-the-money, so |delta| grows toward 1. This
+    # test asserts the mathematically verified direction.
     sigma, t_years = 0.25, 45 / 365.25
     call_deltas = [
         greeks.bs_delta(_SPOT, k, t_years, _R, sigma, "C") for k in _STRIKES
@@ -42,19 +49,24 @@ def test_delta_monotonic():
         greeks.bs_delta(_SPOT, k, t_years, _R, sigma, "P") for k in _STRIKES
     ]
     assert call_deltas == sorted(call_deltas, reverse=True)  # strictly decreasing in strike
-    assert put_deltas == sorted(put_deltas)  # strictly increasing (toward 0) in strike
+    assert put_deltas == sorted(put_deltas, reverse=True)  # strictly decreasing (away from 0)
     assert len(set(call_deltas)) == len(call_deltas)
     assert len(set(put_deltas)) == len(put_deltas)
 
 
 def test_delta_bounds():
+    # NOTE (Rule 1 deviation): the plan's <behavior> states an OPEN interval
+    # (0,1)/(-1,0). At the deep-ITM/OTM + short-DTE + low-sigma corner of
+    # this grid (e.g. strike=80, t=7d, sigma=0.1), norm_cdf(d1) saturates to
+    # exactly 0.0 or 1.0 at float64 precision (verified numerically) -- a
+    # real, correct outcome of the formula, not a bug. Bounds are closed.
     for strike in _STRIKES:
         for t_years in _T_YEARS:
             for sigma in _SIGMAS:
                 call_delta = greeks.bs_delta(_SPOT, strike, t_years, _R, sigma, "C")
                 put_delta = greeks.bs_delta(_SPOT, strike, t_years, _R, sigma, "P")
-                assert 0.0 < call_delta < 1.0, (strike, t_years, sigma)
-                assert -1.0 < put_delta < 0.0, (strike, t_years, sigma)
+                assert 0.0 <= call_delta <= 1.0, (strike, t_years, sigma)
+                assert -1.0 <= put_delta <= 0.0, (strike, t_years, sigma)
 
 
 def test_iv_fails_closed_below_intrinsic():
