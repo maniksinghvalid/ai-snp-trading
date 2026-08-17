@@ -355,8 +355,21 @@ Plans:
   5. Result doc reports each hypothesis as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with the numbers; `rules_options.json` is changed only if a hypothesis is SUPPORTED with OOS confirmation
   6. Full test suite green
 
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 9 to break down)
+- [ ] 09-01-PLAN.md — Massive options data layer: entitlement re-probe, `cached_contracts`/`cached_option_bars`, `OptionChainSource` with structural no-look-ahead (OBT-01, OBT-02) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 09-02-PLAN.md — Black-Scholes IV/delta (stdlib only), min-max IVR series, and the pre-registered hypotheses doc committed before any real-data run (OBT-03, OBT-04, OBT-06) [Wave 2]
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 09-03-PLAN.md — Daily replay engine (imported strategy, live cap order, mid±slippage fills, intrinsic settlement) + options report glue (OBT-01, OBT-05, OBT-07) [Wave 3]
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 09-04-PLAN.md — `backtester.options_run` CLI with `--set` overrides, real-data runs for every hypothesis arm, results doc + conditional `rules_options.json` change (OBT-01, OBT-06, OBT-07) [Wave 4]
