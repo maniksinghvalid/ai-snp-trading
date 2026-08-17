@@ -20,16 +20,30 @@ Exports: OptionsBot, main
 """
 import asyncio
 import html
-from datetime import datetime, time as _time, timedelta
+import os
+from datetime import date, datetime, time as _time, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.options.execution import LegExecutor
+from bot.options.strategy import (
+    manage_decision,
+    mark_spread,
+    option_dte,
+    passes_entry_gate,
+    pick_expiry,
+    pick_strikes,
+    size_position,
+)
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 from bot.scanner.calendar import get_market_close_et, is_trading_day
+from bot.service.report import write_reports
 
 
 # ============================================================
@@ -86,6 +100,23 @@ def _group_rows_by_underlying(rows) -> dict:
             continue
         out.setdefault(sid, []).append(row)
     return out
+
+
+def _rows(data):
+    """Normalise a gateway payload (DataFrame or list of dicts) to a list."""
+    return data.to_dict("records") if hasattr(data, "to_dict") else list(data or [])
+
+
+def _chunks(seq, size):
+    """Yield successive slices of `seq` of at most `size` items."""
+    for start in range(0, len(seq), size):
+        yield seq[start:start + size]
+
+
+def _parse_hhmm(value: str):
+    """Split an "HH:MM" config string into (hour, minute) ints."""
+    hour, minute = str(value).split(":")
+    return int(hour), int(minute)
 
 
 def _esc(value) -> str:
@@ -336,11 +367,477 @@ class OptionsBot:
         today = now.date()
         if not is_trading_day(today):
             return False
-        hour, minute = (int(part) for part in get_market_close_et(today).split(":"))
+        hour, minute = _parse_hhmm(get_market_close_et(today))
         cutoff = datetime.combine(
             today, _time(hour, minute), tzinfo=_ET,
         ) - timedelta(minutes=_MANAGE_CLOSE_BUFFER_MIN)
         return _MANAGE_START_ET <= now.time() and now < cutoff
+
+    # --------------------------------------------------------
+    # Job registration
+    # --------------------------------------------------------
+
+    def _register_jobs(self) -> None:
+        """Register the entry-scan (x1 or x2), manage and EOD jobs.
+
+        Job ids (exact): options_entry_scan, options_entry_scan_2 (only when
+        cfg.second_entry_scan_et is set), options_manage, options_eod. Every
+        timing value comes from rules_options.json (CFG-01).
+        """
+        cfg = self._cfg
+        common = dict(coalesce=True, max_instances=1, misfire_grace_time=_MISFIRE_GRACE_S)
+
+        hour, minute = _parse_hhmm(cfg.entry_scan_et)
+        self._scheduler.add_job(
+            self._job_entry_scan,
+            CronTrigger(hour=hour, minute=minute, timezone=_ET),
+            id="options_entry_scan", **common,
+        )
+
+        if cfg.second_entry_scan_et is not None:
+            hour, minute = _parse_hhmm(cfg.second_entry_scan_et)
+            self._scheduler.add_job(
+                self._job_entry_scan,
+                CronTrigger(hour=hour, minute=minute, timezone=_ET),
+                id="options_entry_scan_2", **common,
+            )
+
+        self._scheduler.add_job(
+            self._job_manage,
+            IntervalTrigger(minutes=cfg.manage_interval_min, timezone=_ET),
+            id="options_manage", **common,
+        )
+
+        hour, minute = _parse_hhmm(cfg.eod_report_et)
+        self._scheduler.add_job(
+            self._job_eod,
+            CronTrigger(hour=hour, minute=minute, timezone=_ET),
+            id="options_eod", **common,
+        )
+
+        _logger.info(
+            "options_jobs_registered",
+            job_ids=[j.id for j in self._scheduler.get_jobs()],
+        )
+
+    # --------------------------------------------------------
+    # Entry scan
+    # --------------------------------------------------------
+
+    async def _job_entry_scan(self) -> None:
+        """Screen the chain once per right and open at most one spread per underlying."""
+        try:
+            cfg = self._cfg
+            today = now_et().date()
+
+            if not is_trading_day(today):
+                _logger.info("options_entry_scan_skipped", reason="not_trading_day")
+                return
+            if not self._entries_enabled:
+                _logger.info("options_entry_scan_skipped", reason="entries_disabled")
+                return
+            if self._kill_switch.triggered:
+                _logger.info("options_entry_scan_skipped", reason="kill_switch")
+                return
+            if self._store.get_meta(_BREAKER_META_KEY) == today.isoformat():
+                _logger.info("options_entry_scan_skipped", reason="daily_loss_breaker")
+                return
+
+            opened_today = self._store.count_opened_on(today.isoformat())
+            if opened_today >= cfg.max_new_positions_per_day:
+                _logger.info("options_entry_scan_skipped", reason="per_day_cap")
+                return
+
+            async with self._lock:
+                await self._scan_and_open(today, opened_today)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("options_entry_scan_error", exc_info=True)
+
+    async def _scan_and_open(self, today, opened_today: int) -> None:
+        """Screen, select and open — the locked body of the entry scan."""
+        cfg = self._cfg
+
+        if not self._stock_ids:
+            self._stock_ids = await self._gateway.get_stock_ids(list(cfg.universe))
+        if not self._stock_ids:
+            _logger.warning("options_entry_scan_no_stock_ids")
+            return
+        by_id = {sid: code for code, sid in self._stock_ids.items()}
+        ids = list(self._stock_ids.values())
+
+        # The delta bounds here are screen BREADTH, not a strategy threshold —
+        # the real knob is cfg.short_delta, which pick_strikes applies to
+        # whatever the screen returns.
+        rows = await self._gateway.screen_options(
+            ids, "P", cfg.min_dte, cfg.max_dte, -0.35, -0.03,
+        )
+        if cfg.structure_type == "iron_condor":
+            rows = list(rows or []) + list(await self._gateway.screen_options(
+                ids, "C", cfg.min_dte, cfg.max_dte, 0.03, 0.35,
+            ) or [])
+
+        active = self._store.get_option_positions(_ACTIVE_STATUSES)
+        busy = {p["underlying"] for p in active}
+        open_max_loss_total = sum(
+            float(p["max_loss_usd"] or 0) for p in active if p["status"] in _OPEN_STATUSES
+        )
+        open_count = sum(1 for p in active if p["status"] in _OPEN_STATUSES)
+
+        for sid, u_rows in sorted(_group_rows_by_underlying(_rows(rows)).items()):
+            code = by_id.get(sid)
+            if code is None:
+                continue
+            if (opened_today >= cfg.max_new_positions_per_day
+                    or open_count >= cfg.max_concurrent_positions):
+                break
+            if code in busy:
+                continue
+
+            try:
+                pos = await self._try_open(code, u_rows, today, open_max_loss_total)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One malformed chain must never abort the rest of the scan.
+                _logger.error(
+                    "options_entry_underlying_error", underlying=code, exc_info=True,
+                )
+                continue
+
+            busy.add(code)
+            if pos is not None:
+                opened_today += 1
+                open_count += 1
+                open_max_loss_total += float(pos["max_loss_usd"])
+
+    async def _try_open(self, code, u_rows, today, open_max_loss_total):
+        """Evaluate one underlying and, if it qualifies, open the spread.
+
+        Returns the inserted position dict on a filled open, else None.
+        """
+        cfg = self._cfg
+        head = u_rows[0]
+
+        u = {
+            "ivr_pct": _ivr_pct(head),
+            "ivp_pct": _ivp_pct(head),
+            # ASSUMPTION: u_change_ratio is already a percent. UNVERIFIED against
+            # a live payload — scripts/uat_options_probe.py is the check. If it
+            # turns out to be a fraction, the x100 belongs right here, next to
+            # the IVR conversion above.
+            "change_pct": head.get("u_change_ratio"),
+        }
+        if not passes_entry_gate(u, cfg):
+            return None
+
+        expiries = sorted({
+            (date.fromisoformat(r["expiry"]), int(r["dte"]))
+            for r in u_rows if r.get("expiry") and r.get("dte") is not None
+        })
+        exp = pick_expiry(expiries, today, cfg)
+        if exp is None:
+            return None
+
+        chain = [r for r in u_rows if r.get("expiry") == exp.isoformat()]
+        u_price = head.get("u_price")
+        if not u_price:
+            return None
+
+        sel = pick_strikes(chain, float(u_price), cfg.structure_type, cfg)
+        if sel is None:
+            return None
+
+        qty = size_position(sel["width"], sel["credit"], cfg, open_max_loss_total)
+        if qty < 1:
+            return None
+
+        position_id = uuid4().hex
+        pos = {
+            "position_id": position_id,
+            "underlying": code,
+            "structure": cfg.structure_type,
+            "expiry": exp.isoformat(),
+            "dte_at_entry": option_dte(exp, today),
+            "ivr_at_entry": u["ivr_pct"],
+            "credit_per_spread": sel["credit"],
+            "width": sel["width"],
+            "qty": qty,
+            "max_loss_usd": (sel["width"] - sel["credit"]) * _CONTRACT_MULTIPLIER * qty,
+            "status": "OPENING",
+            "opened_at": now_et().isoformat(),
+        }
+        self._store.insert_option_position(pos)
+
+        leg_ids = {}
+        for leg in sel["legs"]:
+            leg_id = uuid4().hex
+            leg_ids[leg["code"]] = leg_id
+            self._store.insert_option_leg({
+                "leg_id": leg_id,
+                "position_id": position_id,
+                "code": leg["code"],
+                "right": leg["right"],
+                "strike": leg["strike"],
+                "side": leg["side"],
+                "qty": qty,
+                "status": "PENDING",
+            })
+
+        quotes = {r["code"]: {"bid": r["bid"], "ask": r["ask"]} for r in chain}
+
+        async def _on_placed(leg, order_id):
+            self._store.set_leg_entry(
+                leg_ids[leg["code"]], order_id=order_id, status="WORKING",
+            )
+
+        async def _on_filled(leg, order_id, price, filled_qty):
+            self._store.set_leg_entry(
+                leg_ids[leg["code"]], price=price, status="FILLED",
+            )
+
+        filled = await self._executor.open_position(
+            sel["legs"], qty, quotes,
+            on_leg_placed=_on_placed, on_leg_filled=_on_filled,
+        )
+
+        if filled is None:
+            # The executor already unwound whatever filled; the ABORTED row is
+            # the operator's signal, so the leg rows are left as it left them.
+            self._store.set_position_status(
+                position_id, "ABORTED",
+                closed_at=now_et().isoformat(), close_reason="open_failed",
+            )
+            await self._alerter.send(
+                f"<b>Options entry failed</b> {_esc(code)} — legs unwound, "
+                f"position aborted."
+            )
+            append_audit({
+                "event": "options_position_aborted",
+                "position_id": position_id, "underlying": code,
+            })
+            return None
+
+        self._store.set_position_status(position_id, "OPEN")
+        await self._alerter.send(_fmt_entry(pos, sel["legs"]))
+        append_audit({
+            "event": "options_position_opened",
+            "position_id": position_id,
+            "underlying": code,
+            "structure": pos["structure"],
+            "expiry": pos["expiry"],
+            "qty": qty,
+            "credit_per_spread": sel["credit"],
+            "max_loss_usd": pos["max_loss_usd"],
+        })
+        return pos
+
+    # --------------------------------------------------------
+    # Manage
+    # --------------------------------------------------------
+
+    async def _job_manage(self) -> None:
+        """Mark every open spread from one snapshot and act on the strategy's call."""
+        try:
+            today = now_et().date()
+            if not is_trading_day(today):
+                _logger.info("options_manage_skipped", reason="not_trading_day")
+                return
+            if not self._is_rth_now():
+                _logger.info("options_manage_skipped", reason="outside_manage_window")
+                return
+
+            async with self._lock:
+                await self._manage_once(today)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("options_manage_error", exc_info=True)
+
+    async def _manage_once(self, today) -> None:
+        """Reconcile, snapshot, then mark/close each open position (locked body)."""
+        await self.reconcile()
+
+        positions = self._store.get_option_positions(("OPEN",))
+        if not positions:
+            return
+
+        codes = sorted({leg["code"] for p in positions for leg in p["legs"]})
+        quotes = {}
+        for chunk in _chunks(codes, _SNAPSHOT_CHUNK):
+            ret, data = await self._gateway.get_market_snapshot(chunk)
+            if ret != _RET_OK:
+                _logger.warning("options_snapshot_failed", codes=len(chunk))
+                continue
+            for row in _rows(data):
+                quotes[row["code"]] = {
+                    "bid": row.get("bid_price"), "ask": row.get("ask_price"),
+                }
+
+        unrealized_total = 0.0
+        for pos in positions:
+            try:
+                unrealized_total += await self._manage_position(pos, quotes, today)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.error(
+                    "options_manage_position_error",
+                    position_id=pos.get("position_id"), exc_info=True,
+                )
+                continue
+
+        await self._check_daily_breaker(today, unrealized_total)
+
+    async def _manage_position(self, pos, quotes, today) -> float:
+        """Mark one position and close it if the strategy says so.
+
+        Returns its unrealized P&L in dollars (0.0 once a close is attempted).
+        """
+        cfg = self._cfg
+        pid = pos["position_id"]
+        legs = pos["legs"]
+
+        if any(leg["code"] not in quotes for leg in legs):
+            # mark_spread would KeyError; a stale mark is worse than no action.
+            _logger.warning("options_manage_missing_quote", position_id=pid)
+            return 0.0
+
+        mark = mark_spread(legs, quotes)
+        dte = option_dte(date.fromisoformat(pos["expiry"]), today)
+        credit = float(pos["credit_per_spread"])
+        qty = int(pos["qty"])
+
+        dec = manage_decision(mark, credit, dte, cfg)
+        if dec is None:
+            return (credit - mark) * _CONTRACT_MULTIPLIER * qty
+
+        self._store.set_position_status(pid, "CLOSING")
+        exits = {}
+
+        async def _on_exit_placed(leg, order_id):
+            self._store.set_leg_exit(leg["leg_id"], order_id=order_id, status="CLOSING")
+
+        async def _on_exit_filled(leg, order_id, price, filled_qty):
+            exits[leg["code"]] = price
+            self._store.set_leg_exit(leg["leg_id"], price=price, status="CLOSED")
+
+        ok = await self._executor.close_legs(
+            legs, quotes, aggressive=(dec == "assignment_guard"),
+            on_leg_placed=_on_exit_placed, on_leg_filled=_on_exit_filled,
+        )
+
+        if not ok:
+            self._store.set_position_status(pid, "NEEDS_ATTENTION")
+            await self._alerter.send(
+                f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
+                f"close incomplete — check the account."
+            )
+            append_audit({
+                "event": "options_close_incomplete",
+                "position_id": pid, "underlying": pos.get("underlying"), "reason": dec,
+            })
+            return 0.0
+
+        # Cost to buy back the shorts minus what the wings recovered.
+        net_exit = (
+            sum(exits.get(leg["code"], 0.0) for leg in legs if leg["side"] == "SELL")
+            - sum(exits.get(leg["code"], 0.0) for leg in legs if leg["side"] != "SELL")
+        )
+        realized_per_spread = credit - net_exit
+        realized_usd = realized_per_spread * _CONTRACT_MULTIPLIER * qty
+
+        self._store.set_position_status(
+            pid, "CLOSED",
+            closed_at=now_et().isoformat(), close_reason=dec,
+            realized_pnl_usd=realized_usd,
+        )
+        await self._alerter.send(_fmt_exit(
+            pos, dec, realized_usd,
+            realized_per_spread / credit * 100 if credit else 0.0,
+        ))
+        append_audit({
+            "event": "options_position_closed",
+            "position_id": pid,
+            "underlying": pos.get("underlying"),
+            "reason": dec,
+            "realized_pnl_usd": realized_usd,
+        })
+        return 0.0
+
+    async def _check_daily_breaker(self, today, unrealized_total: float) -> None:
+        """Trip the daily-loss breaker once per day (the meta key IS the guard).
+
+        Persisted in meta, not on the instance, so a restart cannot re-arm
+        entries on a day the limit was already hit.
+        """
+        cfg = self._cfg
+        realized_today = self._store.get_realized_pnl_on(today.isoformat())
+        limit = -cfg.daily_loss_limit_pct / 100 * cfg.sizing_equity_usd
+
+        if realized_today + unrealized_total > limit:
+            return
+        if self._store.get_meta(_BREAKER_META_KEY) == today.isoformat():
+            return
+
+        self._store.set_meta(_BREAKER_META_KEY, today.isoformat())
+        await self._alerter.send(
+            "<b>Options daily loss limit hit</b> — no new entries today"
+        )
+        append_audit({
+            "event": "options_daily_breaker",
+            "date": today.isoformat(),
+            "realized_usd": realized_today,
+            "unrealized_usd": unrealized_total,
+        })
+        _logger.warning(
+            "options_daily_breaker",
+            realized=realized_today, unrealized=unrealized_total, limit=limit,
+        )
+
+    # --------------------------------------------------------
+    # EOD
+    # --------------------------------------------------------
+
+    async def _job_eod(self) -> None:
+        """Telegram summary + HTML report for the session."""
+        try:
+            today = now_et().date()
+            if not is_trading_day(today):
+                _logger.info("options_eod_skipped", reason="not_trading_day")
+                return
+
+            open_positions = self._store.get_option_positions(("OPEN",))
+            # ponytail: Python-side filter on the closed_at prefix instead of a
+            # new SQL helper. Ceiling: the CLOSED table is read whole — add a
+            # get_closed_on() to OptionsStore if it ever passes a few thousand rows.
+            closed_today = [
+                p for p in self._store.get_option_positions(("CLOSED",))
+                if str(p.get("closed_at") or "").startswith(today.isoformat())
+            ]
+            realized = self._store.get_realized_pnl_on(today.isoformat())
+
+            await self._alerter.send(
+                _fmt_summary(open_positions, closed_today, realized)
+            )
+
+            # write_reports' own mkdir is not recursive, so a nested report_dir
+            # ("reports/options") has to exist before the call.
+            os.makedirs(self._cfg.report_dir, exist_ok=True)
+            write_reports(
+                _options_html(open_positions, closed_today, today.isoformat()),
+                today.isoformat(),
+                report_dir=self._cfg.report_dir,
+            )
+            _logger.info("options_eod_done", date=today.isoformat())
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("options_eod_error", exc_info=True)
 
     # --------------------------------------------------------
     # Shutdown + run loop
