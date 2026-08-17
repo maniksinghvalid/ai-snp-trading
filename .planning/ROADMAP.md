@@ -276,6 +276,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 6. Backtester | 12/12 | Complete    | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
+| 9. Options Backtester | 0/0 | Not planned | - |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -300,7 +301,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 - [x] 260817-1ie — Wave 4: OptionsBot service (entry/manage/eod jobs, reconcile, alerts, report), main dispatch + --rules (ce3edb7, bb059f1, 96ad6ac, e34e252, 35194ed)
 - [x] Wave 5: research doc, scripts/uat_options_probe.py, live read-only UAT fixes (ad41cd5), ROADMAP/README/CLAUDE.md
 - [ ] Live paper UAT (`--live-1lot`) + first RTH probe review of liquidity thresholds — operator
-- [ ] Phase 9 (follow-up, not started): options backtester on Massive option daily aggregates (entitlement verified 2026-08-17)
+- [ ] Phase 9 (see block below): options backtester on Massive option daily aggregates (entitlement verified 2026-08-17)
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
 
@@ -338,3 +339,24 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 06.2-03-PLAN.md — Tier 3 hygiene (findings 3.1–3.2): shared reconcile core (after 1.2), trading-day-keyed daily-bar cache [Wave 3]
+
+### Phase 9: Options backtester
+
+**Goal:** Produce offline evidence for/against the `tasty_credit_spreads` strategy before it earns real capital: replay `bot/options/strategy.py`'s pure functions (`pick_expiry`/`passes_entry_gate`/`pick_strikes`/`size_position`/`manage_decision`) unchanged over Massive historical option data (contracts reference incl. `expired=true` + `O:…` daily aggregates), with Black-Scholes IV/delta derived from closes and IVR from an own daily ATM-IV series, and answer a pre-registered hypothesis set (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) so any change to `rules_options.json` is data-driven rather than default.
+**Requirements**: OBT-01 the backtester imports `bot/options/strategy.py` and reads `rules_options.json` unchanged (same pattern as Phase 6 vs `bot/strategy/`); OBT-02 Massive data layer for option contracts + daily bars with on-disk cache (`backtester/massive.py` pattern) and no look-ahead (entry decisions use only bars ≤ decision date); OBT-03 Black-Scholes IV/delta from close + underlying close + DTE + risk-free (no chain-snapshot dependency; snapshot endpoint is 403); OBT-04 IVR computed from the backtester's own rolling ATM-IV series (252-day window matching `ivr` semantics used live); OBT-05 fill model = mid ± configurable slippage, commissions per leg, expiry settlement at intrinsic; OBT-06 hypotheses pre-registered in a doc BEFORE the first run, with an evidence floor (min trades) and OOS window; OBT-07 output per-trade log + summary metrics (win rate, PF, avg credit captured, max DD, Sortino) reusing `backtester/report.py` conventions
+**Depends on:** Phase 8 (strategy pure functions, `rules_options.json` schema), Phase 6 (backtester harness/report/massive patterns)
+**Design:** ~/.claude/plans/scrape-highly-rated-options-velvety-naur.md §Follow-ups (Massive entitlement: contracts reference + option daily aggregates = 200; chain snapshot = 403, verified 2026-08-17)
+**Success Criteria** (what must be TRUE):
+
+  1. `python3 -m backtester.options_run --rules rules_options.json --start … --end …` runs end-to-end on ≥1 underlying (SPY) with no modification to `bot/options/strategy.py`, and a test proves the strategy module is imported, not copied
+  2. A look-ahead test (ahead-only fixture, Phase 6 BT-02 pattern) proves entry/strike decisions never see bars after the decision date
+  3. Black-Scholes IV/delta round-trip test (price→IV→price within tolerance) and delta monotonicity test pass; IVR series test matches hand-computed rank on a fixture
+  4. `docs/research/2026-MM-DD-options-backtest-hypotheses.md` exists with the pre-registered hypotheses, evidence floor and OOS window, committed BEFORE the first real-data run (git history proves ordering)
+  5. Result doc reports each hypothesis as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with the numbers; `rules_options.json` is changed only if a hypothesis is SUPPORTED with OOS confirmation
+  6. Full test suite green
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 9 to break down)
