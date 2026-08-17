@@ -42,3 +42,6 @@ build/
 # Backtester scratch (CSV cache + per-run scratch StateStore DBs)
 backtester/cache/
 backtester/runs/
+
+# Backtester run artifacts (reproducible outputs, not source — Phase 9 T-09-11)
+backtester/results/
