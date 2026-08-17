@@ -193,6 +193,67 @@ class TestScreenOptions:
         _run(gw.screen_options([202805], "P", 30, 60, 0.10, 0.25))
         assert seen == [0, 2]
 
+    def test_each_underlying_gets_its_own_request(self):
+        """1000-row cap regression: each underlying must get its own request
+        with a single-id STOCK_LIST filter, not a shared multi-id request."""
+        gw = _gw()
+        requested_ids = []
+
+        def _screen(req):
+            value_list = req._filter_groups[0]["underlying"][0]["value_list"]
+            requested_ids.append(list(value_list))
+            stock_id = value_list[0]
+            return _page(
+                [_screen_row(underlying=dict(_screen_row()["underlying"], stock_id=stock_id))],
+                True,
+            )
+
+        gw._quote_ctx.get_option_screen.side_effect = _screen
+        rows = _run(gw.screen_options([202805, 202806], "P", 30, 60, 0.10, 0.25))
+        assert gw._quote_ctx.get_option_screen.call_count == 2
+        assert requested_ids == [[202805], [202806]]
+        assert [r["u_stock_id"] for r in rows] == [202805, 202806]
+
+    def test_paging_cap_is_per_underlying(self):
+        gw = _gw()
+        gw._quote_ctx.get_option_screen.side_effect = (
+            lambda req: _page([_screen_row()], False)
+        )
+        _run(gw.screen_options([202805, 202806], "P", 30, 60, 0.10, 0.25))
+        assert gw._quote_ctx.get_option_screen.call_count == 2 * _OPTION_SCREEN_MAX_PAGES
+
+    def test_page_from_resets_per_underlying(self):
+        gw = _gw()
+        seen = []
+        first_underlying_calls = []
+
+        def _screen(req):
+            seen.append(req.page_from)
+            value_list = req._filter_groups[0]["underlying"][0]["value_list"]
+            if value_list[0] == 202805:
+                first_underlying_calls.append(1)
+                if len(first_underlying_calls) == 1:
+                    return _page([_screen_row(), _screen_row()], False)
+                return _page([_screen_row()], True)
+            return _page([_screen_row()], True)
+
+        gw._quote_ctx.get_option_screen.side_effect = _screen
+        _run(gw.screen_options([202805, 202806], "P", 30, 60, 0.10, 0.25))
+        assert seen == [0, 2, 0]
+
+    def test_sdk_failure_on_second_underlying_raises(self):
+        gw = _gw()
+
+        def _screen(req):
+            value_list = req._filter_groups[0]["underlying"][0]["value_list"]
+            if value_list[0] == 202805:
+                return _page([_screen_row()], True)
+            return (-1, "boom")
+
+        gw._quote_ctx.get_option_screen.side_effect = _screen
+        with pytest.raises(GatewayError):
+            _run(gw.screen_options([202805, 202806], "P", 30, 60, 0.10, 0.25))
+
     def test_underlying_dict_is_flattened(self):
         gw = _gw()
         gw._quote_ctx.get_option_screen.return_value = _page([_screen_row()], True)

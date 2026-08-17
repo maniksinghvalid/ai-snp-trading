@@ -89,8 +89,9 @@ _RATE_LIMIT_BACKOFF_SECONDS: float = 3.0  # asyncio.sleep between retries
 # Phase 8 — option read constants
 # ============================================================
 # T-155-02: the screen paging loop runs inside an executor thread; a server that
-# never sets last_page would spin forever. 20 pages x 200 rows = 4,000 contracts,
-# far more than one right/DTE/delta slice of 15 ETFs can return.
+# never sets last_page would spin forever. The cap applies PER UNDERLYING (one
+# OptionScreenRequest per stock_id) — 20 pages x 200 rows = 4,000 contracts is
+# far more than one right/DTE/delta slice of a single underlying can return.
 _OPTION_SCREEN_MAX_PAGES: int = 20
 
 # T-155-01 (SAFE-OG-01): whitelist of OCC-style Moomoo option codes, e.g.
@@ -694,9 +695,10 @@ class MoomooGateway:
     ) -> list:
         """Screen the US option chain and return normalised contract rows.
 
-        One request covers every underlying at once (the screener takes a
-        STOCK_LIST filter), so a full universe scan costs 1 call per right.
-        Rows come back with the key names the pure strategy functions consume
+        One request PER underlying (~15 calls per right) — the server caps a
+        single screen at 1000 rows, and a shared multi-underlying request
+        silently starves the low-volume names (observed live 2026-08-17: SPY
+        got 19 of 1000 rows). Rows come back with the key names the pure strategy functions consume
         (right/strike/expiry/dte/bid/ask/mid/open_interest/delta/iv) plus the
         per-underlying values flattened out of the nested `underlying` cell as
         u_stock_id/u_price/u_iv/u_iv_rank/u_iv_percentile/u_change_ratio.
@@ -725,51 +727,64 @@ class MoomooGateway:
             OptUnderlyingIndicator,
         )
 
-        req = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
-        req.add_underlying_filter(OptUnderlyingIndicator.STOCK_LIST, values=list(stock_ids))
-        req.add_option_filter(OptIndicator.OPTION_TYPE, values=[1 if right == "C" else 2])
-        req.add_option_filter(OptIndicator.LEFT_DAY, lower=dte_lo, upper=dte_hi)
-        req.add_option_filter(OptIndicator.DELTA, lower=delta_lo, upper=delta_hi)
-        req.add_sort(OptIndicator.STRIKE_PRICE)
-        for ind in (
-            OptIndicator.OPTION_TYPE, OptIndicator.STRIKE_PRICE, OptIndicator.LEFT_DAY,
-            OptIndicator.BID_PRICE, OptIndicator.ASK_PRICE, OptIndicator.MID_PRICE,
-            OptIndicator.OPEN_INTEREST, OptIndicator.IMPLIED_VOLATILITY, OptIndicator.DELTA,
-            OptIndicator.THETA, OptIndicator.OTM_PROBABILITY, OptIndicator.BID_ASK_SPREAD,
-        ):
-            req.add_option_retrieve(ind)
-        for ind in (
-            OptUnderlyingIndicator.STOCK_PRICE, OptUnderlyingIndicator.IV,
-            OptUnderlyingIndicator.IV_RANK, OptUnderlyingIndicator.IV_PERCENTILE,
-            OptUnderlyingIndicator.CHANGE_RATIO,
-        ):
-            req.add_underlying_retrieve(ind)
+        def _build_req(stock_id):
+            # Fresh instance per underlying — the SDK builder APPENDS filters,
+            # so a reused request would accumulate one STOCK_LIST filter per
+            # iteration instead of replacing it.
+            req = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
+            req.add_underlying_filter(OptUnderlyingIndicator.STOCK_LIST, values=[stock_id])
+            req.add_option_filter(OptIndicator.OPTION_TYPE, values=[1 if right == "C" else 2])
+            req.add_option_filter(OptIndicator.LEFT_DAY, lower=dte_lo, upper=dte_hi)
+            req.add_option_filter(OptIndicator.DELTA, lower=delta_lo, upper=delta_hi)
+            req.add_sort(OptIndicator.STRIKE_PRICE)
+            for ind in (
+                OptIndicator.OPTION_TYPE, OptIndicator.STRIKE_PRICE, OptIndicator.LEFT_DAY,
+                OptIndicator.BID_PRICE, OptIndicator.ASK_PRICE, OptIndicator.MID_PRICE,
+                OptIndicator.OPEN_INTEREST, OptIndicator.IMPLIED_VOLATILITY, OptIndicator.DELTA,
+                OptIndicator.THETA, OptIndicator.OTM_PROBABILITY, OptIndicator.BID_ASK_SPREAD,
+            ):
+                req.add_option_retrieve(ind)
+            for ind in (
+                OptUnderlyingIndicator.STOCK_PRICE, OptUnderlyingIndicator.IV,
+                OptUnderlyingIndicator.IV_RANK, OptUnderlyingIndicator.IV_PERCENTILE,
+                OptUnderlyingIndicator.CHANGE_RATIO,
+            ):
+                req.add_underlying_retrieve(ind)
+            return req
 
         loop = asyncio.get_running_loop()
 
         def _blocking():
-            # Whole paging loop runs in ONE executor job — never await per page.
+            # Whole per-underlying paging loop runs in ONE executor job — never
+            # await per page, never await per underlying.
             rows: list = []
-            req.page_from = 0
-            for _ in range(_OPTION_SCREEN_MAX_PAGES):    # T-155-02: bounded
-                ret, data = self._quote_ctx.get_option_screen(req)
-                _check_ret(ret, data, "get_option_screen")
-                last_page, _all_count, df = data
-                page_len = 0 if df is None else len(df)
-                if page_len:
-                    rows.extend(_normalise_option_row(dict(row), right)
-                                for _, row in df.iterrows())
-                if last_page or page_len == 0:
-                    # Empty page also breaks: defends against a server that
-                    # never sets last_page.
-                    break
-                req.page_from += page_len
-            return rows
+            counts_by_stock_id: dict = {}
+            for stock_id in stock_ids:
+                req = _build_req(stock_id)
+                req.page_from = 0
+                stock_rows = 0
+                for _ in range(_OPTION_SCREEN_MAX_PAGES):    # T-155-02: bounded, per underlying
+                    ret, data = self._quote_ctx.get_option_screen(req)
+                    _check_ret(ret, data, "get_option_screen")
+                    last_page, _all_count, df = data
+                    page_len = 0 if df is None else len(df)
+                    if page_len:
+                        rows.extend(_normalise_option_row(dict(row), right)
+                                    for _, row in df.iterrows())
+                        stock_rows += page_len
+                    if last_page or page_len == 0:
+                        # Empty page also breaks: defends against a server that
+                        # never sets last_page.
+                        break
+                    req.page_from += page_len
+                counts_by_stock_id[stock_id] = stock_rows
+            return rows, counts_by_stock_id
 
-        rows = await loop.run_in_executor(None, _blocking)
+        rows, counts_by_stock_id = await loop.run_in_executor(None, _blocking)
         _logger.info(
             "option_screen_done",
             right=right, underlyings=len(stock_ids), rows=len(rows),
+            rows_by_stock_id=counts_by_stock_id,
         )
         return rows
 
