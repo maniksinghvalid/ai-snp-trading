@@ -48,9 +48,21 @@ updated: 2026-08-17
 | T-09-07 | 09-03 | 3 | OBT-01 | T-09-E1 | engine imports no `bot.gateway`/`moomoo`/`place_order` | unit | `pytest tests/backtester/options/test_engine.py::test_imports_not_copies tests/backtester/options/test_engine.py::test_no_broker_imports -x -q` | ✅ backtester/options/engine.py | ✅ green |
 | T-09-08 | 09-03 | 3 | OBT-05 | — | N/A | unit | `pytest tests/backtester/options/test_engine.py::test_fill_and_settlement -x -q` | ✅ backtester/options/engine.py | ✅ green |
 | T-09-09 | 09-03 | 3 | OBT-07 | T-09-T1 | stock-shaped P&L pipeline provably not in the call path | unit | `pytest tests/backtester/options/test_report.py -x -q` | ✅ backtester/options/report.py | ✅ green |
-| T-09-10 | 09-04 | 4 | OBT-01, OBT-07 | T-09-T2, T-09-E1 | `--set` never rewrites `rules_options.json`; CLI constructs no gateway/StateStore | unit | `pytest tests/backtester/options/test_options_run.py -x -q` | ❌ created by task | ⬜ pending |
-| T-09-11 | 09-04 | 4 | OBT-06 | T-09-R1, T-09-D1 | hypotheses commit precedes every result artifact; backfill has a wall-clock stop budget | manual (git order) + artifact check | `python3 -c "import glob,json,sys; d=glob.glob('backtester/results/options/*/summary.json'); sys.exit(0 if len(d)>=6 and all(json.load(open(p)).get('total_trades') is not None for p in d) else 1)"` | ❌ created by task | ⬜ pending |
-| T-09-12 | 09-04 | 4 | OBT-07 | T-09-T2 | `rules_options.json` changes only for a SUPPORTED verdict, one key max | integration + doc | `grep -Ec 'H[123].*(SUPPORTED\|REJECTED\|INSUFFICIENT-EVIDENCE)' docs/research/*-options-backtest-results.md && pytest -q` | ❌ created by task | ⬜ pending |
+| T-09-10 | 09-04 | 4 | OBT-01, OBT-07 | T-09-T2, T-09-E1 | `--set` never rewrites `rules_options.json`; CLI constructs no gateway/StateStore | unit | `pytest tests/backtester/options/test_options_run.py -x -q` | ✅ backtester/options_run.py | ✅ green (8 passed) |
+| T-09-11 | 09-04 | 4 | OBT-06 | T-09-R1, T-09-D1 | hypotheses commit precedes every result artifact; backfill has a wall-clock stop budget | manual (git order) + artifact check | ordering gate PASS (`a62c0af` precedes all artifacts); wall-clock stop budget INVOKED — see below | N/A (no arm runs produced; infeasibility documented) | ⚠️ stopped-per-budget (see note) |
+| T-09-12 | 09-04 | 4 | OBT-07 | T-09-T2 | `rules_options.json` changes only for a SUPPORTED verdict, one key max | integration + doc | `grep -Ec 'H[123].*(SUPPORTED\|REJECTED\|INSUFFICIENT-EVIDENCE)' docs/research/*-options-backtest-results.md && pytest -q` | ✅ docs/research/2026-08-17-options-backtest-results.md | ✅ green (3 verdicts, 1027 passed 1 skipped, rules_options.json unchanged) |
+
+**T-09-11 note (stopped-per-budget, not a red status):** the plan's own `<action>` text
+pre-authorizes stopping and reporting the observed rate rather than grinding past ~2 hours of
+wall clock. SPY's IS-window strike-band-narrowed candidate count (58,366-79,750 depending on
+band width, measured from the live-fetched contracts-reference cache) combined with the
+measured live fetch rate (5.3-5.8 req/min, two independent measurements) projects to ~183
+hours for one arm's one window — ~90x the budget. The RESEARCH.md Open Question #3 escape
+hatch (grouped-daily options endpoint) was probed once, live: HTTP 400 (not available). One
+real end-to-end smoke run (`backtester/results/options/smoke-real-data`) completed
+successfully against live Massive data (330 real contract fetches, exit 0), satisfying
+success_criteria #1 (pipeline correctness) without attempting the infeasible full backfill.
+Full detail: `docs/research/2026-08-17-options-backtest-results.md`.
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -70,8 +82,8 @@ it creates), so no task ships without a runnable check.
 - [x] `tests/backtester/options/test_greeks.py` — **T-09-04** (extended by T-09-05)
 - [x] `tests/backtester/options/test_engine.py` — **T-09-07** (extended by T-09-08)
 - [x] `tests/backtester/options/test_report.py` — **T-09-09**
-- [ ] `tests/backtester/options/test_options_run.py` — **T-09-10**
-- [x] `backtester/options/{__init__,data,greeks,engine,report}.py` — [ ] `backtester/options_run.py` — modules under test (Plans 09-01 → 09-04)
+- [x] `tests/backtester/options/test_options_run.py` — **T-09-10**
+- [x] `backtester/options/{__init__,data,greeks,engine,report}.py` — [x] `backtester/options_run.py` — modules under test (Plans 09-01 → 09-04)
 
 ---
 
@@ -95,4 +107,6 @@ it creates), so no task ships without a runnable check.
 - [x] Feedback latency < 90s
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** planned — statuses flip during `/gsd-execute-phase 9`
+**Approval:** executed 2026-08-17 (09-04). T-09-10/T-09-12 green; T-09-11 stopped
+per its own pre-authorized wall-clock budget (see note above) — all three hypotheses
+report INSUFFICIENT-EVIDENCE, `rules_options.json` unchanged, full suite green.
