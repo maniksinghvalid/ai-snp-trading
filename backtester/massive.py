@@ -22,6 +22,13 @@ HTTP 429 responses are retried with a Retry-After-aware backoff.
 
 Imports nothing from the broker gateway layer — pure data source.
 
+Also exposes the two Phase 9 options endpoints (D-05): `/v3/reference/
+options/contracts` (`fetch_contracts`/`cached_contracts`, JSON read-through
+cache since the payload is a record list, not a bar frame) and per-contract
+`O:…` daily aggregates (`cached_option_bars`, CSV read-through cache via the
+existing `fetch_bars`/`cached_bars` machinery — the `O:` prefix passes
+through `_massive_ticker` unchanged, it only rewrites `-` to `.`).
+
 Exports: MassiveDataSource, MassiveApiError, load_massive_api_key
 """
 import json
@@ -43,6 +50,10 @@ _RETRY_FALLBACK_SLEEP_S = 15.0  # free tier is ~5 req/min; used when no Retry-Af
 # Same guard as backtester.feed._SYMBOL_RE (T-06-03): cache filenames interpolate
 # the symbol — restrict to ticker-shaped characters, no path separators.
 _SYMBOL_RE = re.compile(r"[A-Z0-9.\-]+")
+
+# Same T-06-03 rationale: occ_ticker is interpolated into a cache filename
+# (backtester/options/data.py builds these from Massive contract records).
+_OPTION_TICKER_RE = re.compile(r"O:[A-Z]+\d{6}[CP]\d{8}")
 
 _COLUMN_MAP = {"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"}
 
@@ -160,6 +171,78 @@ class MassiveDataSource:
             frame.index = pd.to_datetime(frame.index, utc=True).tz_convert(ET)
             return frame
         frame = self.fetch_bars(yf_symbol, multiplier, timespan, start, end)
+        if not frame.empty:
+            frame.to_csv(path)
+        return frame
+
+    # --------------------------------------------------------
+    # Options: contracts reference + O: daily aggregates (D-05, Phase 9)
+    # --------------------------------------------------------
+
+    def fetch_contracts(self, underlying, expiry_gte, expiry_lte) -> list:
+        """All `/v3/reference/options/contracts` results for `underlying` with
+        expiration in [expiry_gte, expiry_lte], deduped by ticker and sorted
+        by (expiration_date, contract_type, strike_price).
+
+        Follows next_url pagination exactly like fetch_bars (auth stays in
+        the header — never appended to the URL).
+        """
+        url = (
+            f"{BASE_URL}/v3/reference/options/contracts"
+            f"?underlying_ticker={underlying}&expired=true"
+            f"&expiration_date.gte={expiry_gte}&expiration_date.lte={expiry_lte}"
+            f"&limit=1000"
+        )
+        rows = []
+        while url:
+            payload = self._get_json(url)
+            rows.extend(payload.get("results") or [])
+            url = payload.get("next_url")
+        deduped = {r["ticker"]: r for r in rows if r.get("ticker")}
+        return sorted(
+            deduped.values(),
+            key=lambda r: (
+                r.get("expiration_date", ""),
+                r.get("contract_type", ""),
+                r.get("strike_price", 0),
+            ),
+        )
+
+    def cached_contracts(self, underlying, expiry_gte, expiry_lte) -> list:
+        """Read-through JSON cache around fetch_contracts (D-06).
+
+        JSON, not CSV, because the payload is a record list, not a bar frame.
+        """
+        if not _SYMBOL_RE.fullmatch(underlying):
+            raise ValueError(f"invalid underlying {underlying!r} for cache filename (T-06-03)")
+        path = os.path.join(
+            self.cache_dir, f"contracts_{underlying}_{expiry_gte}_{expiry_lte}.json"
+        )
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        results = self.fetch_contracts(underlying, expiry_gte, expiry_lte)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(results, f)
+        return results
+
+    def cached_option_bars(self, occ_ticker, start, end) -> pd.DataFrame:
+        """Read-through CSV cache around fetch_bars for a single `O:` ticker.
+
+        Same Title-Case ET-indexed frame shape as cached_bars — fetch_bars
+        already handles the `O:` prefix unchanged (_massive_ticker only
+        rewrites `-`), so this delegates to it directly.
+        """
+        if not _OPTION_TICKER_RE.fullmatch(occ_ticker):
+            raise ValueError(f"invalid option ticker {occ_ticker!r} for cache filename (T-06-03)")
+        path = os.path.join(
+            self.cache_dir, f"{occ_ticker.replace(':', '_')}_1d_{start}_{end}.csv"
+        )
+        if os.path.exists(path):
+            frame = pd.read_csv(path, index_col=0, parse_dates=True)
+            frame.index = pd.to_datetime(frame.index, utc=True).tz_convert(ET)
+            return frame
+        frame = self.fetch_bars(occ_ticker, 1, "day", start, end)
         if not frame.empty:
             frame.to_csv(path)
         return frame

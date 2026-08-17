@@ -74,7 +74,9 @@ def test_fetch_contracts_paginates_dedupes_sorts(tmp_path):
     src._get_json = fake_get
     results = src.fetch_contracts("SPY", "2025-01-01", "2025-03-31")
     assert len(calls) == 2
-    assert [r["ticker"] for r in results] == ["O:SPY250620P00500000", "O:SPY250620C00600000"]
+    # same expiration_date; sorted by (expiration_date, contract_type, strike) ->
+    # "call" < "put" alphabetically, so the call sorts first regardless of strike.
+    assert [r["ticker"] for r in results] == ["O:SPY250620C00600000", "O:SPY250620P00500000"]
 
 
 def test_cached_contracts_round_trip_never_refetches(tmp_path):
