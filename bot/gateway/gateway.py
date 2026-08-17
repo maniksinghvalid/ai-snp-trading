@@ -15,6 +15,7 @@ Exports: MoomooGateway, GatewayConfig, GatewayError, get_gateway_config
 """
 import asyncio
 import os
+import re
 import socket
 from dataclasses import dataclass
 from typing import Optional
@@ -82,6 +83,20 @@ _RATE_LIMIT_MARKERS: tuple = (
 )
 _RATE_LIMIT_MAX_RETRIES: int = 3           # total retry attempts after first failure
 _RATE_LIMIT_BACKOFF_SECONDS: float = 3.0  # asyncio.sleep between retries
+
+
+# ============================================================
+# Phase 8 — option read constants
+# ============================================================
+# T-155-02: the screen paging loop runs inside an executor thread; a server that
+# never sets last_page would spin forever. 20 pages x 200 rows = 4,000 contracts,
+# far more than one right/DTE/delta slice of 15 ETFs can return.
+_OPTION_SCREEN_MAX_PAGES: int = 20
+
+# T-155-01 (SAFE-OG-01): whitelist of OCC-style Moomoo option codes, e.g.
+# US.SPY260320P600000. The paper account is SHARED with a human — the options
+# path must never see, adopt or close their equity holdings (US.SPY).
+_OPTION_CODE_RE = re.compile(r"^US\.[A-Z]+\d{6}[CP]\d+$")
 
 
 # ============================================================
@@ -220,6 +235,51 @@ def _check_ret(ret: int, data, action: str) -> None:
     """
     if ret != RET_OK:
         raise GatewayError(f"{action} failed: ret={ret}, data={data}")
+
+
+_OPTION_RIGHT_MAP = {
+    1: "C", "1": "C", "CALL": "C", "C": "C",
+    2: "P", "2": "P", "PUT": "P", "P": "P",
+}
+
+
+def _normalise_option_row(row: dict, right: str) -> dict:
+    """Map one raw get_option_screen row onto the keys the strategy consumes.
+
+    Flattens the nested `underlying` cell (a dict, or the SDK's NoneDataType
+    sentinel when absent) into u_* keys, and aliases the SDK column names to the
+    short names pick_strikes/leg_is_liquid read. Every other raw column is kept
+    untouched so the caller can still see theta, otm_probability, etc.
+
+    `right` is the requested right, used only as the fallback when a row's
+    option_type is missing or unrecognised (the query filter already pinned it).
+    """
+    underlying = row.pop("underlying", None)
+    if isinstance(underlying, dict):
+        row["u_stock_id"] = underlying.get("stock_id")
+        row["u_price"] = underlying.get("price")
+        row["u_iv"] = underlying.get("iv")
+        row["u_iv_rank"] = underlying.get("iv_rank")      # fraction; x100 in service
+        row["u_iv_percentile"] = underlying.get("iv_percentile")
+        row["u_change_ratio"] = underlying.get("change_ratio")
+    else:
+        for key in ("u_stock_id", "u_price", "u_iv", "u_iv_rank",
+                    "u_iv_percentile", "u_change_ratio"):
+            row[key] = None
+
+    opt_type = row.get("option_type")
+    if isinstance(opt_type, str):
+        opt_type = opt_type.upper()
+    row["right"] = _OPTION_RIGHT_MAP.get(opt_type, right)
+
+    row["strike"] = row.get("strike_price")
+    row["expiry"] = str(row.get("strike_date", ""))[:10]   # YYYY-MM-DD
+    row["dte"] = row.get("left_day")
+    row["bid"] = row.get("bid_price")
+    row["ask"] = row.get("ask_price")
+    row["mid"] = row.get("mid_price")
+    row["iv"] = row.get("implied_volatility")
+    return row
 
 
 def _safe_close(ctx) -> None:
@@ -549,6 +609,195 @@ class MoomooGateway:
             None,
             lambda: self._quote_ctx.get_market_snapshot(codes),
         )
+
+    # --------------------------------------------------------
+    # Option reads (Phase 8 — OPT-GW-01)
+    # --------------------------------------------------------
+
+    async def get_stock_ids(self, codes: list) -> dict:
+        """Resolve Moomoo codes to the integer stock_id the option screener needs.
+
+        The Phase 8 universe is ETFs (D2), so the ETF security type is tried
+        first; anything unresolved gets ONE follow-up call as SecurityType.STOCK
+        for the remainder only. A code absent after both calls is omitted from
+        the result — the caller decides whether to skip or alert.
+
+        Args:
+            codes: Moomoo-format codes (e.g. ["US.SPY", "US.QQQ"]).
+
+        Returns:
+            dict: {code: stock_id int} for every code that resolved.
+
+        Raises:
+            GatewayError — if either get_stock_basicinfo call returns non-RET_OK.
+        """
+        # Deferred import — module must import with moomoo-api absent (D-02).
+        from moomoo import Market, SecurityType
+
+        loop = asyncio.get_running_loop()
+
+        def _blocking():
+            result: dict = {}
+
+            def _fetch(sec_type, wanted):
+                ret, data = self._quote_ctx.get_stock_basicinfo(
+                    Market.US, sec_type, code_list=wanted,
+                )
+                _check_ret(ret, data, "get_stock_basicinfo")
+                if data is None or len(data) == 0:
+                    return
+                for _, row in data.iterrows():
+                    stock_id = row.get("stock_id")
+                    # NaN != NaN, and 0 is not a valid stock_id → skip both.
+                    if not stock_id or stock_id != stock_id:
+                        continue
+                    result[row.get("code")] = int(stock_id)
+
+            _fetch(SecurityType.ETF, list(codes))
+            missing = [c for c in codes if c not in result]
+            if missing:
+                _fetch(SecurityType.STOCK, missing)
+            return result
+
+        result = await loop.run_in_executor(None, _blocking)
+        unresolved = [c for c in codes if c not in result]
+        if unresolved:
+            _logger.warning("stock_ids_unresolved", codes=unresolved)
+        return result
+
+    async def screen_options(
+        self,
+        stock_ids: list,
+        right: str,
+        dte_lo: int,
+        dte_hi: int,
+        delta_lo: float,
+        delta_hi: float,
+    ) -> list:
+        """Screen the US option chain and return normalised contract rows.
+
+        One request covers every underlying at once (the screener takes a
+        STOCK_LIST filter), so a full universe scan costs 1 call per right.
+        Rows come back with the key names the pure strategy functions consume
+        (right/strike/expiry/dte/bid/ask/mid/open_interest/delta/iv) plus the
+        per-underlying values flattened out of the nested `underlying` cell as
+        u_stock_id/u_price/u_iv/u_iv_rank/u_iv_percentile/u_change_ratio.
+
+        u_iv_rank is passed through as the SDK's fraction (0.066) — the x100
+        scaling to a percent happens once, in the service.
+
+        Args:
+            stock_ids: Underlying stock_ids from get_stock_ids().
+            right:     "C" or "P" — also the fallback when a row's option_type
+                       is missing/unrecognised (the filter already constrained it).
+            dte_lo/dte_hi:     inclusive days-to-expiry band.
+            delta_lo/delta_hi: inclusive delta band (SDK-signed).
+
+        Returns:
+            list[dict]: one dict per contract, across all pages.
+
+        Raises:
+            GatewayError — if any page returns non-RET_OK.
+        """
+        # Deferred import — module must import with moomoo-api absent (D-02).
+        from moomoo import (
+            OptionScreenRequest,
+            OptMarketCategory,
+            OptIndicator,
+            OptUnderlyingIndicator,
+        )
+
+        req = OptionScreenRequest(market_categories=[OptMarketCategory.US_STOCK])
+        req.add_underlying_filter(OptUnderlyingIndicator.STOCK_LIST, values=list(stock_ids))
+        req.add_option_filter(OptIndicator.OPTION_TYPE, values=[1 if right == "C" else 2])
+        req.add_option_filter(OptIndicator.LEFT_DAY, lower=dte_lo, upper=dte_hi)
+        req.add_option_filter(OptIndicator.DELTA, lower=delta_lo, upper=delta_hi)
+        req.add_sort(OptIndicator.STRIKE_PRICE)
+        for ind in (
+            OptIndicator.OPTION_TYPE, OptIndicator.STRIKE_PRICE, OptIndicator.LEFT_DAY,
+            OptIndicator.BID_PRICE, OptIndicator.ASK_PRICE, OptIndicator.MID_PRICE,
+            OptIndicator.OPEN_INTEREST, OptIndicator.IMPLIED_VOLATILITY, OptIndicator.DELTA,
+            OptIndicator.THETA, OptIndicator.OTM_PROBABILITY, OptIndicator.BID_ASK_SPREAD,
+        ):
+            req.add_option_retrieve(ind)
+        for ind in (
+            OptUnderlyingIndicator.STOCK_PRICE, OptUnderlyingIndicator.IV,
+            OptUnderlyingIndicator.IV_RANK, OptUnderlyingIndicator.IV_PERCENTILE,
+            OptUnderlyingIndicator.CHANGE_RATIO,
+        ):
+            req.add_underlying_retrieve(ind)
+
+        loop = asyncio.get_running_loop()
+
+        def _blocking():
+            # Whole paging loop runs in ONE executor job — never await per page.
+            rows: list = []
+            req.page_from = 0
+            for _ in range(_OPTION_SCREEN_MAX_PAGES):    # T-155-02: bounded
+                ret, data = self._quote_ctx.get_option_screen(req)
+                _check_ret(ret, data, "get_option_screen")
+                last_page, _all_count, df = data
+                page_len = 0 if df is None else len(df)
+                if page_len:
+                    rows.extend(_normalise_option_row(dict(row), right)
+                                for _, row in df.iterrows())
+                if last_page or page_len == 0:
+                    # Empty page also breaks: defends against a server that
+                    # never sets last_page.
+                    break
+                req.page_from += page_len
+            return rows
+
+        rows = await loop.run_in_executor(None, _blocking)
+        _logger.info(
+            "option_screen_done",
+            right=right, underlyings=len(stock_ids), rows=len(rows),
+        )
+        return rows
+
+    async def get_option_positions(self) -> dict:
+        """Return broker-held OPTION positions as {code: signed_qty}.
+
+        Only codes matching _OPTION_CODE_RE are returned (T-155-01 / SAFE-OG-01):
+        the paper account is shared with a human, and the options path must
+        never see their equity holdings. Short legs come back negative — the
+        SDK reports them as a positive qty with position_side="SHORT", but some
+        payloads already carry a negative qty, so both are honoured.
+
+        Returns:
+            dict: {option_code: signed int qty (contracts)}.
+
+        Raises:
+            GatewayError — if position_list_query returns non-RET_OK.
+        """
+        loop = asyncio.get_running_loop()
+
+        def _blocking():
+            ret, data = self._trade_ctx.position_list_query(
+                trd_env=_parse_trd_env(self.cfg.trd_env),
+                acc_id=self.cfg.acc_id,
+                refresh_cache=True,          # MANDATORY on SIMULATE (Pitfall B)
+            )
+            _check_ret(ret, data, "position_list_query")
+            out: dict = {}
+            if data is None or len(data) == 0:
+                return out
+            for _, row in data.iterrows():
+                code = str(row.get("code", "") or "")
+                if not _OPTION_CODE_RE.match(code):
+                    continue
+                raw_qty = float(row.get("qty", 0) or 0)
+                qty = abs(raw_qty)
+                is_short = (
+                    "SHORT" in str(row.get("position_side", "")).upper()
+                    or raw_qty < 0
+                )
+                out[code] = int(-qty if is_short else qty)
+            return out
+
+        positions = await loop.run_in_executor(None, _blocking)
+        _logger.info("option_positions_read", count=len(positions))
+        return positions
 
     def set_handler(self, handler) -> None:
         """Register a CurKlineHandlerBase push handler on the quote context.
