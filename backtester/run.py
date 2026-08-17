@@ -19,6 +19,7 @@ Exports: build_arg_parser, main
 """
 import argparse
 import asyncio
+import json
 import os
 import sys
 import uuid
@@ -32,6 +33,7 @@ from bot.state.store import DEFAULT_DB_PATH, StateStore
 
 from backtester.feed import BacktestWindowError, SimulatedBarFeed
 from backtester.harness import BacktestHarness
+from backtester.massive import MassiveApiError, MassiveDataSource, load_massive_api_key
 from backtester.report import write_report
 
 _DATE_FMT = "%Y-%m-%d"
@@ -57,7 +59,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir", required=True,
-        help="Directory to write summary.json + trades.csv",
+        help="Directory to write summary.json + trades.csv + equity_curve.csv",
+    )
+    parser.add_argument(
+        "--source", choices=["yfinance", "massive"], default="yfinance",
+        help="Historical data provider (massive: deep history, needs MASSIVE_API_KEY)",
+    )
+    parser.add_argument(
+        "--interval", default="5m",
+        help="Bar interval; only 5m is supported (Trend Join Long is a 5m-bar FSM)",
+    )
+    parser.add_argument(
+        "--starting-capital", type=float, default=None,
+        help="Override risk.sizing_equity_usd for sizing AND reporting (default: rules.json)",
+    )
+    parser.add_argument(
+        "--commission-per-share", type=float, default=0.0,
+        help="Per-share commission, charged on entry and exit shares (report-layer)",
+    )
+    parser.add_argument(
+        "--slippage-usd", type=float, default=0.0,
+        help="Adverse per-share slippage applied to every simulated fill",
     )
     return parser
 
@@ -114,6 +136,31 @@ def main(argv=None) -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
+    if args.interval != "5m":
+        print(
+            f"[ERROR] --interval must be 5m (Trend Join Long is a 5m-bar strategy), "
+            f"got {args.interval!r}",
+            file=sys.stderr,
+        )
+        return 1
+    if args.commission_per_share < 0 or args.slippage_usd < 0:
+        print("[ERROR] --commission-per-share and --slippage-usd must be >= 0", file=sys.stderr)
+        return 1
+    if args.starting_capital is not None and args.starting_capital <= 0:
+        print("[ERROR] --starting-capital must be > 0", file=sys.stderr)
+        return 1
+
+    # Cost-realism guardrail (strategy-audit P0-A): live pays spread + $0.10 of
+    # entry/exit buffers + $0.10/round exit escalation (bot/execution/engine.py).
+    # A zero-slippage backtest is an upper-bound diagnostic, not a comparable result.
+    if args.slippage_usd == 0:
+        print(
+            "[WARN] --slippage-usd is 0 -- this run has no fill cost realism and "
+            "overstates live performance (live pays spread + buffers + escalation). "
+            "Treat these numbers as an upper bound, not a forecast.",
+            file=sys.stderr,
+        )
+
     configure_logging()
     get_logger(__name__)
 
@@ -122,6 +169,12 @@ def main(argv=None) -> int:
     except ConfigError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
+
+    # Backtest-only sizing override: same cfg field RiskEngine reads (RISK-01),
+    # so sizing and reporting share one capital number.
+    if args.starting_capital is not None:
+        cfg.sizing_equity_usd = args.starting_capital
+    starting_capital = cfg.sizing_equity_usd or 100_000.0
 
     # Pitfall 4 -- the resolved scratch path must never equal the live state DB.
     db_path = _scratch_db_path()
@@ -138,18 +191,31 @@ def main(argv=None) -> int:
     # broker-free (BacktestHarness passes a simulated stub into SignalEngine/RiskEngine
     # and gateway=None into PositionManager).
     try:
-        feed = SimulatedBarFeed(symbols, args.start, args.end)
-    except BacktestWindowError as exc:
+        if args.source == "massive":
+            massive = MassiveDataSource(load_massive_api_key())
+            feed = SimulatedBarFeed(
+                symbols, args.start, args.end, source="massive", massive=massive
+            )
+        else:
+            feed = SimulatedBarFeed(symbols, args.start, args.end)
+    except (BacktestWindowError, MassiveApiError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
-    harness = BacktestHarness(cfg, feed, store)
+    harness = BacktestHarness(cfg, feed, store, slippage_usd=args.slippage_usd)
     for day in _trading_days(args.start, args.end):
         harness.setup_day(day, symbols)
 
     asyncio.run(harness.run())
 
-    write_report(harness.trade_log, args.output_dir)
+    metrics = write_report(
+        harness.trade_log, args.output_dir,
+        starting_capital=starting_capital,
+        commission_per_share=args.commission_per_share,
+        start=args.start, end=args.end,
+        extra_assumptions={"slippage_usd": args.slippage_usd, "rules_json": args.rules_json},
+    )
+    print(json.dumps(metrics, indent=2, default=str))
     return 0
 
 

@@ -103,6 +103,23 @@ class ExecutionEngine:
         self._store = store
         self._cfg = cfg
 
+    def _entry_chase_limit_exceeded(self, intent, limit_price: float) -> bool:
+        """P2 (strategy-audit finding): True when limit_price has chased beyond
+        cfg.max_entry_chase_r * (entry_price - stop_price) above the signal's
+        own entry_price. cfg.max_entry_chase_r is None by default (unbounded
+        chase, today's behavior) -- the guard is a no-op unless explicitly
+        configured. Live-only: the backtester's N+1-open fill model has no
+        re-quote loop to bound, so this is never consulted offline.
+        """
+        max_chase_r = getattr(self._cfg, "max_entry_chase_r", None)
+        if max_chase_r is None:
+            return False
+        stop_distance = intent.entry_price - intent.stop_price
+        if stop_distance <= 0:
+            return False  # defensive -- RiskEngine already rejects this upstream
+        cap = intent.entry_price + max_chase_r * stop_distance
+        return limit_price > cap
+
     async def _get_price_with_fallback(
         self, code: str, side: str, fallback: Optional[float] = None,
     ) -> float:
@@ -281,6 +298,19 @@ class ExecutionEngine:
             return None
         limit_price = round(ask_price + self._cfg.entry_limit_buffer_usd, 4)
 
+        # P2 (strategy-audit finding): never place at a price the signal never
+        # justified, even on the very first placement.
+        if self._entry_chase_limit_exceeded(intent, limit_price):
+            self._resolve_intent_expired(intent.intent_id)
+            _logger.warning(
+                "entry_chase_limit_exceeded",
+                code=intent.code,
+                intent_id=intent.intent_id,
+                limit_price=limit_price,
+                max_entry_chase_r=self._cfg.max_entry_chase_r,
+            )
+            return None
+
         trd_side_buy = _get_trd_side_buy()
         order_id = await self._gw.place_order(
             intent.code, intent.quantity, limit_price, trd_side_buy
@@ -373,6 +403,20 @@ class ExecutionEngine:
                     intent.code, "ask", fallback=ask_price,
                 )
                 limit_price = round(ask_price + self._cfg.entry_limit_buffer_usd, 4)
+
+                # P2 (strategy-audit finding): abandon rather than chase the
+                # price past the configured cap on a re-price too.
+                if self._entry_chase_limit_exceeded(intent, limit_price):
+                    self._resolve_intent_expired(intent.intent_id)
+                    _logger.warning(
+                        "entry_chase_limit_exceeded",
+                        code=intent.code,
+                        intent_id=intent.intent_id,
+                        limit_price=limit_price,
+                        max_entry_chase_r=self._cfg.max_entry_chase_r,
+                    )
+                    return None
+
                 order_id = await self._gw.place_order(
                     intent.code, intent.quantity, limit_price, trd_side_buy
                 )
@@ -413,7 +457,7 @@ class ExecutionEngine:
         escalation_step: float,
         escalation_cadence: float,
         ttl: float,
-    ) -> int:
+    ) -> tuple:
         """Place a marketable-limit exit; escalate until fully flat (D-07/EXEC-02).
 
         Prices the exit through the bid (bid - cfg.exit_limit_buffer_usd). If
@@ -435,7 +479,11 @@ class ExecutionEngine:
             ttl:                Seconds before each cancel-replace cycle.
 
         Returns:
-            int — total filled quantity across all exit order_ids (cumulative).
+            (total_filled, avg_price) — total_filled is the cumulative filled
+            quantity across all exit order_ids; avg_price is the qty-weighted
+            average fill price across every leg (P1-B: lets the caller record
+            one blended trades-table row instead of discarding fill prices).
+            avg_price is 0.0 when total_filled is 0 (no fill occurred).
 
         Fill detection uses get_order_status(order_id) → order_list_query (cumulative
         dealt_qty per order) instead of get_order_fills() → deal_list_query. The latter
@@ -449,6 +497,7 @@ class ExecutionEngine:
         CR-02 quantity-tracking invariants (remaining decrements once per order_id fill).
         """
         total_filled = 0
+        total_notional = 0.0  # P1-B: qty-weighted price accumulator across legs
         remaining = qty
         # Price through bid with buffer (D-07). Finding 2.4: bounded retry inside
         # _get_price_with_fallback; no fallback price exists yet for this very
@@ -506,6 +555,11 @@ class ExecutionEngine:
                 ]
                 if matched:
                     order_filled_this_round = int(matched[0].get("dealt_qty", 0) or 0)
+                    # Fallback price if the post-cancel re-query below has no match
+                    # (P1-B: manage_exit's own weighted-avg-price accumulator).
+                    order_filled_price_this_round = float(
+                        matched[0].get("dealt_avg_price", 0.0) or 0.0
+                    )
                     if order_filled_this_round > 0:
                         break
 
@@ -531,12 +585,18 @@ class ExecutionEngine:
                     ]
                     if post_matched:
                         post_cancel_filled = int(post_matched[0].get("dealt_qty", 0) or 0)
+                        post_cancel_price = float(
+                            post_matched[0].get("dealt_avg_price", 0.0) or 0.0
+                        )
                     else:
                         post_cancel_filled = order_filled_this_round  # safe fallback
+                        post_cancel_price = order_filled_price_this_round
                 except Exception:
                     post_cancel_filled = order_filled_this_round  # safe fallback
+                    post_cancel_price = order_filled_price_this_round
 
                 total_filled += post_cancel_filled
+                total_notional += post_cancel_filled * post_cancel_price
                 remaining = qty - total_filled
 
                 append_audit({
@@ -576,7 +636,8 @@ class ExecutionEngine:
                 _logger.info("exit_escalating", code=code, round=escalation_rounds,
                              new_limit=limit_price)
 
-        return total_filled
+        avg_price = total_notional / total_filled if total_filled > 0 else 0.0
+        return total_filled, avg_price
 
     # --------------------------------------------------------
     # Internal helpers

@@ -29,10 +29,13 @@ from bot.position.state import (
 
 class _Cfg:
     """Minimal StrategyConfig-compatible namespace for FSM testing."""
-    def __init__(self, partial_r=0.75, be_r=1.0, frac=0.3333):
+    def __init__(self, partial_r=0.75, be_r=1.0, frac=0.3333, be_buffer_r=0.0):
         self.partial_profit_trigger_r = partial_r
         self.breakeven_trigger_r = be_r
         self.partial_profit_fraction = frac
+        # P2 (strategy-audit finding): default 0.0 preserves today's exact-entry
+        # breakeven behavior for every pre-existing test in this file.
+        self.breakeven_buffer_r = be_buffer_r
 
 
 def _make_pos(
@@ -171,6 +174,47 @@ def test_breakeven_trigger():
     assert pos5.phase == PositionPhase.CLOSED
 
 
+def test_breakeven_buffer_r():
+    """P2 (strategy-audit finding): cfg.breakeven_buffer_r shifts the breakeven
+    stop ABOVE entry_price, so a breakeven stop-out is not a guaranteed net
+    loss after entry/exit buffers. 0.0 (default, exercised by every other test
+    in this file) preserves today's exact-entry behavior.
+
+    With entry_price=100, initial_stop=96 (R=4), be_buffer_r=0.1:
+      trail_stop after breakeven = 100 + 0.1 * 4 = 100.4 (NOT 100.0)
+    """
+    cfg = _Cfg(partial_r=0.75, be_r=1.0, frac=0.3333, be_buffer_r=0.1)
+
+    pos = _make_pos(phase=PositionPhase.PARTIAL_TAKEN, entry_price=100.0, initial_stop=96.0)
+    action, _ = pos.evaluate_close(104.0, cfg)  # breakeven threshold still 1.0R = 104.0
+    assert action == FSM_ACTION_BREAKEVEN
+    assert pos.phase == PositionPhase.BREAKEVEN
+    assert pos.trail_stop == pytest.approx(100.4), (
+        f"trail_stop must be entry_price + breakeven_buffer_r*R = 100.4, got {pos.trail_stop}"
+    )
+
+    # A subsequent close between entry (100.0) and the buffered stop (100.4)
+    # now correctly triggers STOP_OUT -- proving the buffer actually moved
+    # the live stop, not just a stored value nothing reads.
+    pos2 = _make_pos(phase=PositionPhase.PARTIAL_TAKEN, entry_price=100.0, initial_stop=96.0)
+    pos2.evaluate_close(104.0, cfg)
+    action2, _ = pos2.evaluate_close(100.2, cfg)
+    assert action2 == FSM_ACTION_STOP_OUT, (
+        "close=100.2 is below the buffered stop=100.4 and must stop out"
+    )
+
+
+def test_breakeven_buffer_r_defaults_to_zero_preserving_exact_entry_stop():
+    """A _Cfg built without be_buffer_r (the default) must reproduce the
+    ORIGINAL exact-entry breakeven behavior byte-for-byte."""
+    cfg = _Cfg(partial_r=0.75, be_r=1.0, frac=0.3333)
+    assert cfg.breakeven_buffer_r == 0.0
+
+    pos = _make_pos(phase=PositionPhase.PARTIAL_TAKEN, entry_price=100.0, initial_stop=96.0)
+    pos.evaluate_close(104.0, cfg)
+    assert pos.trail_stop == 100.0
+
+
 # ============================================================
 # POS-03: Trail stop ratchet — never loosens (D-11)
 # ============================================================
@@ -258,3 +302,17 @@ def test_trail_never_loosens():
         "close above trail_stop with no new swing-low should return NONE"
     )
     assert pos2.trail_stop == 103.0, "trail_stop must not change if no swing_low supplied"
+
+
+# ============================================================
+# P1-B (strategy-audit finding): in-memory blended-exit accumulator fields
+# ============================================================
+
+def test_exit_accumulator_fields_default_to_zero_and_unrecorded():
+    """PositionState gains exit_filled_qty/exit_notional/trade_recorded --
+    in-memory only (never persisted, same as pending_exit_reason), populated
+    by PositionManager._record_trade_if_closed as each exit leg fills."""
+    pos = _make_pos()
+    assert pos.exit_filled_qty == 0
+    assert pos.exit_notional == 0.0
+    assert pos.trade_recorded is False

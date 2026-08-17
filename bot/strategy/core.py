@@ -63,6 +63,7 @@ class StrategyCore(abc.ABC):
         premarket_high: float,
         hod: float,
         rvol: float,
+        hod_prev: Optional[float] = None,
     ) -> bool:
         """
         Evaluate I1/I2/I3 intraday filters on a closed 5m bar.
@@ -72,8 +73,12 @@ class StrategyCore(abc.ABC):
             bars_5m:        DataFrame of closed 5m bars (at least 1 row;
                             row[-1] is the most recently closed bar).
             premarket_high: Premarket high price (before 09:30 ET).
-            hod:            Current high-of-day price.
+            hod:            Current high-of-day price (includes this bar's own high).
             rvol:           Pre-computed relative volume ratio.
+            hod_prev:       High-of-day AS OF THE PRIOR closed bar (excludes this
+                            bar's own high), or None on the first bar of a session /
+                            when unavailable. Only consulted when
+                            cfg.i2_mode == "close_above_prior_hod".
 
         Returns:
             True if all intraday filter conditions are met; False otherwise.

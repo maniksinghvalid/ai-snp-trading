@@ -37,6 +37,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Service Orchestration and Reliability** - Scheduler, OpenD watchdog, Telegram alerts, and structured logging (completed 2026-06-24; docs recovered 2026-07-06 after ec826eb stripped them from develop; 3/6 UAT tests blocked pending live-session exercise: watchdog disconnect, launchd supervision, full-day scheduler timing)
 - [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (9/9 plans executed 2026-07-07; gap-closure 06-07..06-09 closed all 7 original multi-day BLOCKERs, but re-verification gaps_found — 2 NEW BLOCKERs: NaN union-index bars crash multi-ticker replay; Gate 7 -2R circuit breaker can never trip during replay) (completed 2026-07-07)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
+- [x] **Phase 8: Options Premium Selling (tasty_credit_spreads)** - Successor strategy after Trend Join Long was validated as no-edge (2026-08-13): tastylive-derived defined-risk iron condors / put credit spreads on liquid ETFs (45 DTE, IVR≥30 gate, 20Δ shorts, 50% profit target, 21-DTE exit), self-contained `bot/options/` package + `python -m bot --rules rules_options.json` dispatch (built 2026-08-17 via quick tasks 260817-0ph/155/1ie + UAT batch ad41cd5; 961 tests; live paper UAT `--live-1lot` pending operator run)
 
 ## Phase Details
 
@@ -263,7 +264,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -274,6 +275,32 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 5. Service Orchestration and Reliability | 6/6 | Complete (3 UAT items blocked on live session) | 2026-06-24 |
 | 6. Backtester | 12/12 | Complete    | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
+| 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
+
+### Phase 8: Options Premium Selling (tasty_credit_spreads)
+
+**Goal:** The bot can trade a research-derived options premium-selling strategy on the Moomoo paper account, end-to-end and unattended: screen liquid ETFs for IV Rank, build a defined-risk iron condor / put credit spread at ~45 DTE, size by dollar risk, manage to 50% profit or 21 DTE, reconcile against the broker, alert, and report — without touching the equity bot's code path or the human's positions on the shared account.
+**Requirements**: OPT-01 strategy core is pure/config-driven (rules_options.json, CFG-01); OPT-02 defined-risk only, one position per underlying, BP/concurrency/per-day caps, daily-loss breaker; OPT-03 legs placed long-wing-first, unwind on failure, shorts bought back first on close, LIMIT orders only; OPT-04 the options bot only ever manages legs recorded in its own DB (SAFE-OG-01 for options); OPT-05 separate DB/kill-file/report-dir so both bots can coexist; OPT-06 research provenance (docs/research/2026-08-17-tastylive-options-research.md)
+**Depends on:** Phase 5 (gateway/watchdog/alerter/kill-switch/scheduler patterns), Phase 1 (StateStore/migrations)
+**Design:** ~/.claude/plans/scrape-highly-rated-options-velvety-naur.md (approved 2026-08-17)
+**Success Criteria** (what must be TRUE):
+
+  1. `python -m bot --rules rules_options.json` dispatches on `strategy_name` to `bot/options/service.py:main`; `python -m bot` (equity) is byte-for-byte unchanged in behaviour
+  2. `pick_expiry/pick_strikes/size_position/manage_decision` are pure functions with tests covering the priority table, geometry, sizing floors and BP cap
+  3. Migration 0006 adds `option_positions`/`option_legs`; migrations 0001-0005 untouched
+  4. `LegExecutor` never places a MARKET order, opens long wings before shorts, persists order_id before the next leg, and unwinds on any leg failure
+  5. `OptionsBot.reconcile()` flags NEEDS_ATTENTION on any DB/broker leg mismatch and never adopts or closes broker option codes it did not record
+  6. Full test suite green (961 as of ad41cd5)
+  7. Live UAT: `scripts/uat_options_probe.py` read-only run during RTH shows sane liquidity/credit decisions; `--live-1lot --confirm` opens+closes 1 SPY put credit spread on paper with clean reconcile and recorded realized P&L (OPERATOR-RUN, pending)
+
+**Plans:** delivered as GSD quick tasks (not phase plans):
+
+- [x] 260817-0ph — Wave 1: migration 0006, bot/options/{schema,config,strategy}.py, rules_options.json (14d9ab5, b5f1c85, 10aef4e, 47a47dd)
+- [x] 260817-155 — Wave 2-3: gateway get_stock_ids/screen_options/get_option_positions, OptionsStore, LegExecutor (f5c6612, ac614eb, 7624ea9)
+- [x] 260817-1ie — Wave 4: OptionsBot service (entry/manage/eod jobs, reconcile, alerts, report), main dispatch + --rules (ce3edb7, bb059f1, 96ad6ac, e34e252, 35194ed)
+- [x] Wave 5: research doc, scripts/uat_options_probe.py, live read-only UAT fixes (ad41cd5), ROADMAP/README/CLAUDE.md
+- [ ] Live paper UAT (`--live-1lot`) + first RTH probe review of liquidity thresholds — operator
+- [ ] Phase 9 (follow-up, not started): options backtester on Massive option daily aggregates (entitlement verified 2026-08-17)
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
 

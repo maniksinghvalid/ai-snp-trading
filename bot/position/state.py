@@ -9,7 +9,7 @@ exit logic for the Trend Join Long strategy:
   AWAITING_FILL — order placed, no confirmed fill yet
   ACTIVE        — entry filled; initial stop active; no profit milestone hit yet
   PARTIAL_TAKEN — 1/3 partial exit taken at 0.75R close (POS-01)
-  BREAKEVEN     — full 1R close hit; stop moved to entry price (POS-02)
+  BREAKEVEN     — full 1R close hit; stop moved to entry + breakeven_buffer_r*R (POS-02)
   TRAILING      — 5m swing-low trail active; stop ratchets up, never down (POS-03, D-11)
   CLOSED        — position fully exited
 
@@ -120,6 +120,17 @@ class PositionState:
     # Set at the FSM trigger point before the exit fill arrives so the alerter
     # can pass the real reason (not a hardcoded constant) to on_exit_alert (ALERT-02).
     pending_exit_reason: Optional[str] = None
+    # In-memory blended-exit-price accumulator (never persisted — same rationale
+    # as pending_exit_reason). Populated by PositionManager._record_trade_if_closed
+    # as each exit leg (partial + final) fills; exit_notional / exit_filled_qty is
+    # the qty-weighted average exit price used for the ONE trades-table row this
+    # position ever produces (P1-B, strategy-audit finding). A restart between
+    # legs resets these to 0 — the final recorded price then reflects only the
+    # legs filled after the restart, a known and accepted trade-off (see
+    # PositionManager._record_trade_if_closed docstring).
+    exit_filled_qty: int = 0
+    exit_notional: float = 0.0
+    trade_recorded: bool = False
     # Broker-assigned order_id of the live protective stop order (D-01/D-04).
     # None before the first stop is placed; set by arm_stop_protection() after a
     # confirmed entry fill; updated by _sync_broker_stop() on every trail ratchet.
@@ -237,7 +248,11 @@ class PositionState:
                 return (FSM_ACTION_STOP_OUT, self.remaining_quantity)
             # D-03: 1.0R breakeven trigger (POS-02)
             if close >= self.entry_price + cfg.breakeven_trigger_r * R:
-                self.trail_stop = self.entry_price   # stop moves to entry (POS-02)
+                # P2 (strategy-audit finding): breakeven_buffer_r shifts the stop
+                # ABOVE entry (default 0.0 preserves exact-entry POS-02 behavior)
+                # so a breakeven stop-out is not a guaranteed net loss after
+                # entry/exit buffers.
+                self.trail_stop = self.entry_price + cfg.breakeven_buffer_r * R
                 self.phase = PositionPhase.BREAKEVEN
                 return (FSM_ACTION_BREAKEVEN, 0)
 

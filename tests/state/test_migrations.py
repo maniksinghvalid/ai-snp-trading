@@ -454,10 +454,15 @@ class TestMigration0005FreshDb:
     """Migration 0005 adds the tod_baselines table and broker_stop_order_id column."""
 
     def test_migration_0005_user_version_is_5(self, in_memory_conn):
-        """PRAGMA user_version must equal 5 after all migrations (migration 0005 added)."""
+        """PRAGMA user_version must equal CURRENT_VERSION after all migrations.
+
+        Note: originally tested for version==5; updated to CURRENT_VERSION after
+        migration 0006 was added in Phase 8. The test name is preserved for git
+        history continuity; CURRENT_VERSION now equals 6.
+        """
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 5
+        assert version == CURRENT_VERSION
 
     def test_migration_0005_tod_baselines_table_exists(self, in_memory_conn):
         """After run_migrations, sqlite_master must contain a table named tod_baselines."""
@@ -510,11 +515,16 @@ class TestMigration0005Idempotency:
     """Running run_migrations twice after migration 0005 must be a no-op (WR-03)."""
 
     def test_migration_0005_idempotent_run_twice_no_raise(self, in_memory_conn):
-        """run_migrations twice must not raise and must leave user_version at 5."""
+        """run_migrations twice must not raise and must leave user_version at CURRENT_VERSION.
+
+        Note: originally asserted version==5; updated to CURRENT_VERSION after
+        migration 0006 was added in Phase 8. The test name is preserved for git
+        history continuity; CURRENT_VERSION now equals 6.
+        """
         run_migrations(in_memory_conn)
         run_migrations(in_memory_conn)  # second call — idempotent (WR-03)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 5
+        assert version == CURRENT_VERSION
 
     def test_migration_0005_idempotent_broker_stop_order_id_not_duplicated(self, in_memory_conn):
         """broker_stop_order_id must appear exactly once after two run_migrations calls."""
@@ -525,3 +535,152 @@ class TestMigration0005Idempotency:
         assert col_list.count("broker_stop_order_id") == 1, (
             "broker_stop_order_id must not be duplicated on re-apply"
         )
+
+
+# ============================================================
+# Migration 0006 tests (Phase 8: option_positions + option_legs)
+# ============================================================
+
+class TestMigration0006FreshDb:
+    """Migration 0006 adds the option_positions and option_legs tables."""
+
+    def test_migration_0006_user_version_is_6(self, in_memory_conn):
+        """PRAGMA user_version must equal 6 == CURRENT_VERSION == len(MIGRATIONS)."""
+        run_migrations(in_memory_conn)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 6
+        assert version == CURRENT_VERSION == len(MIGRATIONS)
+
+    def test_migration_0006_option_tables_exist(self, in_memory_conn):
+        """sqlite_master must contain both new option tables."""
+        run_migrations(in_memory_conn)
+        names = {
+            r[0] for r in in_memory_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "option_positions" in names
+        assert "option_legs" in names
+
+    def test_migration_0006_option_positions_columns(self, in_memory_conn):
+        """option_positions must expose every column the OptionsStore writes."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(option_positions)").fetchall()
+        col_names = {row[1] for row in info}
+        required = {
+            "position_id", "underlying", "structure", "expiry", "dte_at_entry",
+            "ivr_at_entry", "credit_per_spread", "width", "qty", "max_loss_usd",
+            "status", "opened_at", "closed_at", "close_reason", "realized_pnl_usd",
+        }
+        assert required.issubset(col_names), (
+            f"Missing option_positions columns: {required - col_names}"
+        )
+
+    def test_migration_0006_option_legs_columns(self, in_memory_conn):
+        """option_legs must expose every column the LegExecutor writes."""
+        run_migrations(in_memory_conn)
+        info = in_memory_conn.execute("PRAGMA table_info(option_legs)").fetchall()
+        col_names = {row[1] for row in info}
+        required = {
+            "leg_id", "position_id", "code", "right", "strike", "side", "qty",
+            "entry_order_id", "entry_price", "exit_order_id", "exit_price", "status",
+        }
+        assert required.issubset(col_names), (
+            f"Missing option_legs columns: {required - col_names}"
+        )
+
+    def test_migration_0006_legs_index_exists(self, in_memory_conn):
+        """The option_legs(position_id) index must exist (leg-join lookups)."""
+        run_migrations(in_memory_conn)
+        names = {
+            r[0] for r in in_memory_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        assert "idx_option_legs_position_id" in names
+
+    def test_migration_0006_right_column_is_writable_and_readable(self, in_memory_conn):
+        """The quoted "right" column round-trips (RIGHT is a SQLite 3.39+ keyword)."""
+        run_migrations(in_memory_conn)
+        in_memory_conn.execute(
+            'INSERT INTO option_legs (leg_id, position_id, code, "right", strike, '
+            'side, qty, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            ("leg-1", "pos-1", "US.SPY260918P00600000", "P", 600.0, "SELL", 1, "PENDING"),
+        )
+        in_memory_conn.commit()
+        in_memory_conn.row_factory = sqlite3.Row
+        row = in_memory_conn.execute(
+            "SELECT * FROM option_legs WHERE leg_id = 'leg-1'"
+        ).fetchone()
+        assert row["right"] == "P"
+        assert row["side"] == "SELL"
+
+
+class TestMigration0006Idempotency:
+    """Running run_migrations twice after 0006 must be a no-op (WR-03)."""
+
+    def test_migration_0006_idempotent_run_twice_no_raise(self, in_memory_conn):
+        """Second run_migrations call must not raise and must stay at version 6."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)  # second call — idempotent (WR-03)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 6
+
+    def test_migration_0006_existing_rows_survive_second_run(self, in_memory_conn):
+        """A row written between two runs must survive (no DROP + re-CREATE)."""
+        run_migrations(in_memory_conn)
+        in_memory_conn.execute(
+            "INSERT INTO option_positions (position_id, underlying, structure, "
+            "expiry, status) VALUES ('sentinel', 'US.SPY', 'iron_condor', "
+            "'2026-09-18', 'OPEN')"
+        )
+        in_memory_conn.commit()
+
+        run_migrations(in_memory_conn)
+
+        row = in_memory_conn.execute(
+            "SELECT underlying, status FROM option_positions WHERE position_id='sentinel'"
+        ).fetchone()
+        assert row == ("US.SPY", "OPEN")
+
+    def test_migration_0006_index_not_duplicated(self, in_memory_conn):
+        """The legs index must appear exactly once after two run_migrations calls."""
+        run_migrations(in_memory_conn)
+        run_migrations(in_memory_conn)
+        idx = [
+            r[0] for r in in_memory_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        ]
+        assert idx.count("idx_option_legs_position_id") == 1
+
+
+class TestUpgradeFromV5Db:
+    """A DB at user_version=5 gains both option tables on the next run_migrations."""
+
+    def test_upgrade_from_v5_db(self, in_memory_conn):
+        """Simulated v5 DB must gain option_positions and option_legs at v6."""
+        # Apply 0001-0005 only, then pin user_version to 5.
+        in_memory_conn.executescript(MIGRATIONS[0])
+        for migration in MIGRATIONS[1:5]:
+            migration(in_memory_conn)
+        in_memory_conn.execute("PRAGMA user_version = 5")
+        in_memory_conn.commit()
+
+        names_before = {
+            r[0] for r in in_memory_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "option_positions" not in names_before
+
+        run_migrations(in_memory_conn)
+
+        names_after = {
+            r[0] for r in in_memory_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {"option_positions", "option_legs"}.issubset(names_after)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 6

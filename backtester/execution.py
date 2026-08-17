@@ -88,54 +88,56 @@ class SimulatedExecution:
         escalation_step: float,
         escalation_cadence: float,
         ttl: float,
-    ) -> int:
+    ) -> tuple:
         """Fill an exit at the next bar's open, minus slippage (symmetric N+1, Assumption
         A2) -- a long-only SELL exit slips DOWN (adverse), never up (T-06-11).
 
-        Matches ExecutionEngine.manage_exit's signature exactly so PositionManager's
-        _trigger_stop_out/_place_exit_order call sites are unchanged. No TTL/escalation loop
-        here (no wall-clock in a backtest) -- the args are accepted for signature parity and
-        otherwise ignored.
+        Matches ExecutionEngine.manage_exit's signature AND (qty, price) return
+        contract exactly (P1-B) so PositionManager's _trigger_stop_out/
+        _place_exit_order call sites are unchanged. No TTL/escalation loop here
+        (no wall-clock in a backtest) -- the args are accepted for signature
+        parity and otherwise ignored.
 
         Force-close mode (self._force_close=True, set by the harness's force_close_all wiring,
         CR-05): fills at the last observed bar close instead of consulting feed.next_bar (there
         is no N+1 bar at the final observed bar of a replay) and always returns the FULL qty so
         force_close_all reaches CLOSED.
 
-        Normal mode with no next bar (WR-01): returns 0 and records NO fill -- mirrors the live
-        "manage_exit returning 0 is valid, no fill occurred" contract, so the position stays open
-        for a later force-close rather than fabricating a phantom exit_price=None full fill.
+        Normal mode with no next bar (WR-01): returns (0, 0.0) and records NO fill -- mirrors
+        the live "manage_exit returning 0 is valid, no fill occurred" contract, so the position
+        stays open for a later force-close rather than fabricating a phantom exit_price=None
+        full fill.
         """
         if self._force_close:
             last = self._last_bar.get(code)
             if last is None:
-                return 0  # defensive: should not happen after a replay has seen this code
+                return 0, 0.0  # defensive: should not happen after a replay has seen this code
+            exit_price = last["close"] - self._slippage  # long-only SELL: adverse slippage DOWN
             exit_fill = {
                 "code": code,
-                # Long-only exit is a SELL -- adverse slippage is DOWNWARD.
-                "exit_price": last["close"] - self._slippage,
+                "exit_price": exit_price,
                 "qty": qty,
                 "time_key": last["time_key"],
             }
             self.exit_fills.append(exit_fill)
             self.fills.append(exit_fill)
-            return int(qty)
+            return int(qty), exit_price
 
         after = self._last_bar_time_key.get(code, "")
         next_bar = self._feed.next_bar(code, after=after)
         if next_bar is None:
-            return 0  # no fill available -- stay open (WR-01), no fabricated fill recorded
+            return 0, 0.0  # no fill available -- stay open (WR-01), no fabricated fill recorded
 
+        exit_price = next_bar["open"] - self._slippage  # long-only SELL: adverse slippage DOWN
         exit_fill = {
             "code": code,
-            # Long-only exit is a SELL -- adverse slippage is DOWNWARD.
-            "exit_price": next_bar["open"] - self._slippage,
+            "exit_price": exit_price,
             "qty": qty,
             "time_key": next_bar["time_key"],
         }
         self.exit_fills.append(exit_fill)
         self.fills.append(exit_fill)
-        return int(qty)
+        return int(qty), exit_price
 
 
 class SimulatedGateway:

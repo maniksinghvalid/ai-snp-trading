@@ -108,6 +108,100 @@ def _compute_tod_baselines(daily_frame_5m, lookback_days: int = 14) -> dict:
         return {}
 
 
+def _mask_prior_sessions(frame_5m: "pd.DataFrame", scan_date: date) -> "pd.DataFrame":
+    """Rows of frame_5m with an ET session date STRICTLY BEFORE scan_date.
+
+    No-look-ahead cutoff for a mid-day rescan's TOD-baseline fetch (P1-A):
+    _compute_tod_baselines has no date cutoff of its own (it takes
+    pivot.tail(lookback_days) over whatever sessions the frame contains), so an
+    unmasked mid-day fetch would include scan_date's own partial session,
+    self-contaminating the very baseline this scan_date's bars are about to be
+    judged against. Mirrors backtester.harness.BacktestHarness's own
+    _prior_sessions_only rationale exactly.
+
+    Not needed at premarket (run_daily_scan): the fetch happens before 09:30 ET,
+    so today's frame has no RTH rows yet regardless.
+    """
+    from bot.safety.et_helpers import ET
+
+    idx = frame_5m.index
+    idx_et = idx.tz_convert(ET) if idx.tzinfo is not None else idx.tz_localize("UTC").tz_convert(ET)
+    mask = idx_et.date < scan_date
+    return frame_5m.loc[mask]
+
+
+def _persist_tod_baselines(
+    store: StateStore,
+    cfg: StrategyConfig,
+    codes: List[str],
+    scan_date: date,
+    exclude_today: bool = False,
+) -> None:
+    """Compute and persist TOD cumulative-volume baselines for `codes` (SIG-RVOL-TOD).
+
+    Extracted from run_daily_scan's premarket Step 5b so run_intraday_rescan can
+    call it too, for exactly the codes newly subscribed intraday (P1-A: rescan-
+    added codes previously NEVER got a TOD baseline, so they always fell onto the
+    unit-mismatched legacy RVOL fallback in SignalEngine and could never fire I3
+    -- the fallback has since been removed entirely).
+
+    codes: moomoo-format codes (e.g. "US.AAPL") to fetch and persist baselines for.
+        A no-op (no download) when empty.
+    exclude_today: when True (intraday rescan), mask each 5m frame to sessions
+        STRICTLY BEFORE scan_date via _mask_prior_sessions before computing
+        baselines. Premarket runs (exclude_today=False) never need this.
+
+    Any failure (batch download or per-candidate compute) logs and continues --
+    never aborts the calling scan (matches run_daily_scan's original Step 5b
+    error-handling contract exactly).
+    """
+    if not codes:
+        return
+
+    scan_date_str = scan_date.isoformat()
+    yf_syms = [c.removeprefix("US.") for c in codes]
+    try:
+        data_5m, _failed_5m = download_intraday_5m(yf_syms)
+    except Exception:
+        _logger.warning(
+            "tod_baseline_5m_download_failed",
+            exc_info=True,
+            reason="5m batch download failed — TOD baselines skipped for this scan",
+        )
+        return
+
+    for code in codes:
+        yf_sym = code.removeprefix("US.")
+        try:
+            frame_5m = data_5m.get(yf_sym) if isinstance(data_5m, dict) else None
+            if frame_5m is None or (hasattr(frame_5m, "empty") and frame_5m.empty):
+                continue  # graceful degradation — no 5m data for this candidate
+
+            if exclude_today:
+                frame_5m = _mask_prior_sessions(frame_5m, scan_date)
+                if frame_5m.empty:
+                    continue
+
+            tod_baselines = _compute_tod_baselines(
+                frame_5m, lookback_days=cfg.rvol_tod_lookback_days
+            )
+            if tod_baselines:
+                store.upsert_tod_baselines(scan_date_str, code, tod_baselines)
+                _logger.info(
+                    "tod_baseline_stored",
+                    code=code,
+                    bucket_count=len(tod_baselines),
+                    scan_date=scan_date_str,
+                )
+        except Exception:
+            _logger.warning(
+                "tod_baseline_candidate_error",
+                code=code,
+                exc_info=True,
+                reason="per-candidate TOD baseline failed — skipping (does not abort scan)",
+            )
+
+
 # ============================================================
 # Symbol evaluation
 # ============================================================
@@ -570,52 +664,10 @@ def run_daily_scan(
 
     store.persist_watchlist(scan_date, top20, scan_pass)
 
-    # Step 5b: compute and persist TOD cumulative-volume baselines (SIG-RVOL-TOD).
-    # Runs at premarket only (not intraday rescan — RESEARCH Open Q4 / T-07-08).
-    # Batch download 5m history for the capped top-20, then compute per-candidate.
-    # Failure of any per-candidate step logs and continues — never aborts the scan.
-    scan_date_str = scan_date.isoformat()
-    if top20:
-        # Convert Moomoo codes to yfinance symbols (strip "US." prefix)
-        yf_syms_top20 = [c["code"].removeprefix("US.") for c in top20]
-        try:
-            data_5m, _failed_5m = download_intraday_5m(yf_syms_top20)
-        except Exception:
-            _logger.warning(
-                "tod_baseline_5m_download_failed",
-                exc_info=True,
-                reason="5m batch download failed — TOD baselines skipped for this scan",
-            )
-            data_5m = {}
-
-        for candidate in top20:
-            yf_sym = candidate["code"].removeprefix("US.")
-            try:
-                frame_5m = data_5m.get(yf_sym) if isinstance(data_5m, dict) else None
-                if frame_5m is None or (
-                    hasattr(frame_5m, "empty") and frame_5m.empty
-                ):
-                    continue  # graceful degradation — no 5m data for this candidate
-                tod_baselines = _compute_tod_baselines(
-                    frame_5m, lookback_days=cfg.rvol_tod_lookback_days
-                )
-                if tod_baselines:
-                    store.upsert_tod_baselines(
-                        scan_date_str, candidate["code"], tod_baselines
-                    )
-                    _logger.info(
-                        "tod_baseline_stored",
-                        code=candidate["code"],
-                        bucket_count=len(tod_baselines),
-                        scan_date=scan_date_str,
-                    )
-            except Exception:
-                _logger.warning(
-                    "tod_baseline_candidate_error",
-                    code=candidate["code"],
-                    exc_info=True,
-                    reason="per-candidate TOD baseline failed — skipping (does not abort scan)",
-                )
+    # Step 5b: compute and persist TOD cumulative-volume baselines (SIG-RVOL-TOD)
+    # for the capped top-20. exclude_today=False: the premarket fetch happens
+    # before 09:30 ET, so today's frame has no RTH rows yet regardless.
+    _persist_tod_baselines(store, cfg, [c["code"] for c in top20], scan_date, exclude_today=False)
 
     # Step 6: return moomoo codes
     result = [c["code"] for c in top20]
@@ -758,7 +810,14 @@ def run_intraday_rescan(
     )
 
     # Step 8: subscribe ONLY newly-added codes (not already in active_codes)
-    _subscribe_new_codes(gateway, result, active_codes)
+    new_codes = _subscribe_new_codes(gateway, result, active_codes)
+
+    # Step 8b (P1-A): persist TOD baselines for exactly the newly-subscribed
+    # codes -- an already-active code already has one from whenever it was
+    # first subscribed. exclude_today=True: this is a mid-day fetch, so the
+    # 5m frame may include scan_date's own partial session and must be masked
+    # (_persist_tod_baselines / _mask_prior_sessions) before computing.
+    _persist_tod_baselines(store, cfg, new_codes, scan_date, exclude_today=True)
 
     # Step 9 (WR-01): unsubscribe active codes evicted from the protected watchlist,
     # so the cumulative subscribed set never exceeds the top-20 cap across rescans.

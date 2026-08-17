@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-backtester.feed — SimulatedBarFeed: yfinance/CSV-cache 5m bar replay for the backtester.
+backtester.feed — SimulatedBarFeed: yfinance/Massive/CSV-cache 5m bar replay for the backtester.
+
+Supports two sources: yfinance (default, rolling ~60-calendar-day 5m window) and
+the Massive API via backtester.massive (deep history — see _load_massive).
 
 Historical-5m-bar source that replaces the live moomoo SDK push stream (BT-04). Downloads
 5m bars via the reused bot.scanner.fetcher batch kernel (_download_batch directly, plus
@@ -73,6 +76,13 @@ _SYMBOL_RE = re.compile(r"[A-Z0-9.\-]+")
 # resolve_today_price's own documented rationale: a fixed market fact, not a strategy
 # parameter that could ever vary by config).
 _RTH_OPEN = datetime.strptime("09:30", "%H:%M").time()
+_RTH_END = datetime.strptime("16:00", "%H:%M").time()
+
+# Massive-source fetch padding: daily bars need >=200 prior sessions for SMA200
+# (~290 calendar days) and the 5m fetch needs >=14 prior sessions for the
+# RVOL-TOD baseline. Calendar-day pads with margin.
+_MASSIVE_DAILY_PAD_DAYS = 400
+_MASSIVE_TOD_PAD_DAYS = 30
 
 
 class BacktestWindowError(Exception):
@@ -87,10 +97,15 @@ class BacktestWindowError(Exception):
 class SimulatedBarFeed:
     """Historical 5m bar replay engine: yfinance + CSV cache -> chronological BarEvent dicts."""
 
-    def __init__(self, codes: List[str], start: str, end: str, cache_dir: str = CACHE_DIR):
+    def __init__(self, codes: List[str], start: str, end: str, cache_dir: str = CACHE_DIR,
+                 source: str = "yfinance", massive=None):
         """codes: moomoo-format codes (e.g. ["US.AAPL", "US.BRK-B"]).
         start/end: "YYYY-MM-DD" strings bounding the requested 5m range.
-        cache_dir: directory for the CSV read-through cache (created if absent).
+        cache_dir: directory for the yfinance CSV read-through cache.
+        source: "yfinance" (default, rolling ~60-day 5m window) or "massive"
+            (Massive API — deep history; run.py resolves MASSIVE_API_KEY).
+        massive: MassiveDataSource instance, required when source == "massive"
+            (injected so tests can pass a fake; it owns its own CSV cache).
         """
         self.codes = list(codes)
         for code in self.codes:
@@ -104,8 +119,17 @@ class SimulatedBarFeed:
         os.makedirs(cache_dir, exist_ok=True)
         self._bars_by_code: Dict[str, list] = {}
         self._premarket_bars_by_code: Dict[str, list] = {}
-        self._load_5m()
-        self._load_premarket()
+        self._source = source
+        self._massive = massive
+        self._massive_daily: Dict[str, pd.DataFrame] = {}
+        self._massive_tod: Dict[str, pd.DataFrame] = {}
+        if source == "massive":
+            if massive is None:
+                raise ValueError('source="massive" requires a MassiveDataSource instance')
+            self._load_massive()
+        else:
+            self._load_5m()
+            self._load_premarket()
         self._enforce_coverage()
 
     # --------------------------------------------------------
@@ -316,6 +340,79 @@ class SimulatedBarFeed:
             self._premarket_bars_by_code[moomoo_code] = bars
 
     # --------------------------------------------------------
+    # Massive-source load (backtester.massive — deep history past the yfinance window)
+    # --------------------------------------------------------
+
+    def _load_massive(self) -> None:
+        """Massive-source load: ONE 5m fetch + ONE daily fetch per symbol (CSV-cached).
+
+        The single extended-hours 5m frame per symbol is sliced three ways:
+          - RTH bars within [start, end]        -> replay bars (_materialize_bars)
+          - pre-09:30 bars within [start, end]  -> premarket bars (Gate 1 / TodayPrice)
+          - RTH bars over the padded range      -> RVOL-TOD baseline frames
+        The daily fetch covers [start - _MASSIVE_DAILY_PAD_DAYS, end] so
+        _evaluate_symbol's SMA200 / date < scan_date cutoff has real history for
+        every replay day (a from-now yfinance period="1y" fetch would hold zero
+        history for a deep-past window).
+
+        No _enforce_window() here — that guard models yfinance's rolling window;
+        Massive history is bounded by the account's subscription, and
+        _enforce_coverage() still fails loudly per missing trading day.
+        """
+        start_dt = datetime.strptime(self.start, "%Y-%m-%d")
+        start_d = start_dt.date()
+        end_d = datetime.strptime(self.end, "%Y-%m-%d").date()
+        tod_start = (start_dt - timedelta(days=_MASSIVE_TOD_PAD_DAYS)).date().isoformat()
+        daily_start = (start_dt - timedelta(days=_MASSIVE_DAILY_PAD_DAYS)).date().isoformat()
+
+        for code in self.codes:
+            sym = self._yf_symbol(code)
+            moomoo_code = yfinance_to_moomoo(sym)
+
+            daily = self._massive.cached_bars(sym, "1d", 1, "day", daily_start, self.end)
+            if not daily.empty:
+                # yfinance daily frames are tz-NAIVE dates, and _evaluate_symbol
+                # compares the index against a naive pd.Timestamp(scan_date)
+                # (bot/scanner/scanner.py) — a tz-aware index there raises
+                # "Cannot compare tz-naive and tz-aware". Strip the ET tz
+                # (keeping ET wall dates) so Massive daily frames match the
+                # consumer's expected shape exactly.
+                daily.index = daily.index.tz_localize(None).normalize()
+                self._massive_daily[sym] = daily
+
+            full_5m = self._massive.cached_bars(sym, "5m", 5, "minute", tod_start, self.end)
+            if full_5m.empty:
+                continue
+
+            times = full_5m.index.time
+            dates = full_5m.index.date
+            rth_mask = (times >= _RTH_OPEN) & (times < _RTH_END)
+            pre_mask = times < _RTH_OPEN
+            in_range = (dates >= start_d) & (dates <= end_d)
+
+            rth_padded = full_5m[rth_mask]
+            if not rth_padded.empty:
+                self._massive_tod[sym] = rth_padded  # prior sessions feed TOD baselines
+
+            replay = get_ticker_frame({sym: full_5m[rth_mask & in_range]}, sym)
+            if replay is not None and not replay.empty:
+                self._bars_by_code[moomoo_code] = self._materialize_bars(sym, replay)
+
+            pre = get_ticker_frame({sym: full_5m[pre_mask & in_range]}, sym)
+            if pre is not None and not pre.empty:
+                pre = pre.sort_index().dropna(subset=["open", "high", "low", "close", "volume"])
+                self._premarket_bars_by_code[moomoo_code] = [
+                    {
+                        "time_key": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                    }
+                    for ts, row in pre.iterrows()
+                ]
+
+    # --------------------------------------------------------
     # Replay
     # --------------------------------------------------------
 
@@ -350,14 +447,28 @@ class SimulatedBarFeed:
     # --------------------------------------------------------
 
     def daily_bars(self, codes: Optional[List[str]] = None):
-        """download_daily_bars result (raw, group_by="ticker") — feeds _evaluate_symbol directly."""
+        """Raw daily-bar mapping for _evaluate_symbol (get_ticker_frame handles dicts).
+
+        massive source: the preloaded {yf_symbol: frame} dict — NO network per
+        call (the harness calls this once per replay day; refetching would burn
+        the API rate limit day after day for identical data).
+        yfinance source: download_daily_bars result (raw, group_by="ticker").
+        """
+        if self._source == "massive":
+            return dict(self._massive_daily)
         codes = codes or self.codes
         yf_symbols = [self._yf_symbol(c) for c in codes]
         data, _failed = download_daily_bars(yf_symbols)
         return data
 
     def intraday_5m_for_tod(self, codes: Optional[List[str]] = None):
-        """download_intraday_5m result (raw, prepost=False) — feeds _compute_tod_baselines directly."""
+        """Raw prepost-free 5m mapping for _compute_tod_baselines (capital "Volume").
+
+        massive source: preloaded RTH-only frames over the padded range (no network);
+        yfinance source: download_intraday_5m result (raw, prepost=False).
+        """
+        if self._source == "massive":
+            return dict(self._massive_tod)
         codes = codes or self.codes
         yf_symbols = [self._yf_symbol(c) for c in codes]
         data, _failed = download_intraday_5m(yf_symbols)

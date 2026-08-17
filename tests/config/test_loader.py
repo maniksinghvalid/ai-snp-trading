@@ -465,3 +465,145 @@ class TestExitModelConfig:
         msg = str(exc_info.value)
         # Schema validation error must mention enum or the invalid value
         assert "moon" in msg or "enum" in msg.lower() or "schema" in msg.lower()
+
+
+# ============================================================
+# I2-mode config tests (CFG-01, strategy-audit finding)
+# ============================================================
+
+class TestI2ModeConfig:
+    """I2-mode config surface (intraday_filters.I2_mode, schema enum, StrategyConfig.i2_mode).
+
+    Mirrors TestExitModelConfig's structure:
+    1. Real rules.json: i2_mode == "close_at_hod" (the explicit default / current behavior)
+    2. Config with I2_mode omitted: defaults to "close_at_hod" (no KeyError)
+    3. I2_mode = "close_above_prior_hod": accepted (both candidates are implemented)
+    4. I2_mode = unknown string ("moon"): fails jsonschema enum validation (ConfigError)
+    """
+
+    def test_real_rules_json_i2_mode_is_close_at_hod(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.i2_mode == "close_at_hod"
+
+    def test_i2_mode_omitted_defaults_to_close_at_hod(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"].pop("I2_mode", None)  # ensure key is absent
+        path = tmp_path / "no_i2_mode.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.i2_mode == "close_at_hod"
+
+    def test_i2_mode_close_above_prior_hod_is_accepted(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"]["I2_mode"] = "close_above_prior_hod"
+        path = tmp_path / "i2_prior_hod.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.i2_mode == "close_above_prior_hod"
+
+    def test_i2_mode_unknown_string_fails_schema_validation(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"]["I2_mode"] = "moon"
+        path = tmp_path / "unknown_i2_mode.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        msg = str(exc_info.value)
+        assert "moon" in msg or "enum" in msg.lower() or "schema" in msg.lower()
+
+    def test_i2_mode_not_in_implemented_set_fails_closed(self, tmp_path, monkeypatch):
+        """Defense-in-depth: a value that somehow passed schema but isn't in the
+        loader's own implemented set must still be rejected (mirrors
+        _IMPLEMENTED_EXIT_MODELS' fail-closed guard) -- passing schema alone must
+        never be sufficient to run a candidate the loader hasn't opted into."""
+        import bot.config.loader as loader_mod
+
+        monkeypatch.setattr(loader_mod, "_IMPLEMENTED_I2_MODES", ("close_at_hod",))
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["intraday_filters"]["I2_mode"] = "close_above_prior_hod"
+        path = tmp_path / "not_yet_implemented.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        assert "close_above_prior_hod" in str(exc_info.value)
+
+
+# ============================================================
+# P2 sweep knobs: breakeven buffer + stop reference (strategy-audit finding)
+# ============================================================
+
+class TestBreakevenBufferConfig:
+    """exit.breakeven_buffer_R -> StrategyConfig.breakeven_buffer_r (default-off).
+
+    Addresses weakness #6 in the strategy audit: a breakeven stop set to
+    exactly entry_price is a guaranteed net loss after entry/exit buffers.
+    """
+
+    def test_real_rules_json_breakeven_buffer_defaults_to_zero(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.breakeven_buffer_r == 0.0
+
+    def test_breakeven_buffer_omitted_defaults_to_zero(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"].pop("breakeven_buffer_R", None)  # ensure key is absent
+        path = tmp_path / "no_be_buffer.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.breakeven_buffer_r == 0.0
+
+    def test_breakeven_buffer_explicit_value_is_read(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["breakeven_buffer_R"] = 0.1
+        path = tmp_path / "be_buffer.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.breakeven_buffer_r == 0.1
+
+
+class TestInitialStopReferenceConfig:
+    """exit.initial_stop_rule now also selects StrategyConfig.initial_stop_reference
+    ("lod" | "bar_low"), addressing weakness #6 (wide gap-day stops: the session
+    LOD is often the 09:30 bar low while entries fire >=10:05)."""
+
+    def test_lod_minus_1pct_selects_lod_reference(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.initial_stop_reference == "lod"
+        assert cfg.initial_stop_pct == 1.0
+
+    def test_bar_low_minus_1pct_selects_bar_low_reference(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["initial_stop_rule"] = "bar_low_minus_1pct"
+        path = tmp_path / "bar_low_stop.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.initial_stop_reference == "bar_low"
+        assert cfg.initial_stop_pct == 1.0
+
+    def test_unknown_stop_rule_still_raises_config_error(self, tmp_path):
+        """The (reference, pct) restructuring must not weaken the existing
+        fail-closed guard (CR-01: never silently fall back to the risk budget)."""
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["exit"]["initial_stop_rule"] = "moon_minus_1pct"
+        path = tmp_path / "unknown_stop_rule.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError) as exc_info:
+            load_strategy_config(str(path))
+        assert "moon_minus_1pct" in str(exc_info.value)
+
+
+# ============================================================
+# max_entry_chase_r config test (P2, strategy-audit finding)
+# ============================================================
+
+class TestMaxEntryChaseRConfig:
+    def test_real_rules_json_defaults_to_none(self):
+        cfg = load_strategy_config(_RULES_JSON)
+        assert cfg.max_entry_chase_r is None
+
+    def test_explicit_value_is_read(self, tmp_path):
+        data = json.loads(json.dumps(CANONICAL_RULES))
+        data["execution"]["max_entry_chase_r"] = 2.0
+        path = tmp_path / "chase.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cfg = load_strategy_config(str(path))
+        assert cfg.max_entry_chase_r == 2.0

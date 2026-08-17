@@ -366,13 +366,29 @@ class PositionManager:
 
         Called from the QuoteTickHandler callback registered by arm_stop_protection
         when use_broker_stop_orders=False. If a monitored position exists and
-        bid_price <= pos.trail_stop, fires an immediate exit (manage_exit) for
-        the remaining_quantity — replicating the bar-close stop-out but at tick
+        bid_price <= pos.trail_stop, fires an immediate exit for the
+        remaining_quantity — replicating the bar-close stop-out but at tick
         granularity (D-02).
+
+        P1-B (strategy-audit finding): this method previously called
+        self._engine.manage_exit(code=, qty=, pos=pos) directly — a signature
+        that does not exist on ExecutionEngine.manage_exit (which requires
+        side/escalation_step/escalation_cadence/ttl and has no pos parameter).
+        Every real invocation raised TypeError, silently swallowed by the
+        bare except below, so with use_broker_stop_orders=False (the live
+        rules.json setting) this configured D-02 protection never actually
+        fired — only the bar-close FSM stop worked. Routes through
+        _place_exit_order (cfg-driven exit escalation, same as every other
+        exit path) and applies the fill exactly like _trigger_stop_out does
+        (persist, record the trade, fire the alert on full close) — a fixed
+        call signature alone would still have left the position's DB state
+        and the trades table never updated even after a real fill.
 
         One-shot guard (self._quote_exiting): once the exit has been initiated for
         a code, subsequent ticks for the same code are silently discarded to prevent
-        double-fire (D-02 exactly-once semantics).
+        double-fire (D-02 exactly-once semantics). Not cleared on a partial/zero
+        fill — deliberately: this is the tick-level backstop only, the bar-close
+        FSM remains the primary stop mechanism regardless (D-02 class docstring).
 
         A bid above trail_stop is silently ignored.
 
@@ -400,15 +416,51 @@ class PositionManager:
             trail_stop=pos.trail_stop,
             remaining_quantity=pos.remaining_quantity,
         )
+
+        # Same exit-reason derivation _trigger_stop_out uses (ALERT-02).
+        prev_phase = pos.phase
+        if prev_phase == PositionPhase.BREAKEVEN:
+            pos.pending_exit_reason = "breakeven"
+        elif prev_phase == PositionPhase.TRAILING:
+            pos.pending_exit_reason = "trail_stop"
+        else:
+            pos.pending_exit_reason = "stop_out"
+
+        qty = pos.remaining_quantity
         try:
-            await self._engine.manage_exit(
-                code=code,
-                qty=pos.remaining_quantity,
-                pos=pos,
-            )
+            filled_qty, exit_price = await self._place_exit_order(pos.code, qty)
         except Exception:
             _logger.warning("quote_stop_exit_failed", code=code, exc_info=True)
-            # Non-fatal; the one-shot guard prevents repeated attempts.
+            return
+
+        if filled_qty <= 0:
+            _logger.warning("quote_stop_no_fill", code=code, requested=qty)
+            return
+
+        pos.remaining_quantity = max(0, pos.remaining_quantity - filled_qty)
+        if pos.remaining_quantity == 0:
+            pos.phase = PositionPhase.CLOSED
+        pos.updated_at = now_et()
+        self._persist_position(
+            pos,
+            event="quote_stop_out_filled" if pos.phase == PositionPhase.CLOSED
+            else "quote_stop_out_partial",
+        )
+        self._record_trade_if_closed(pos, filled_qty, exit_price)
+
+        if pos.phase == PositionPhase.CLOSED and self._on_exit_alert is not None:
+            try:
+                entry = pos.entry_price or 0.0
+                stop = pos.initial_stop or 0.0
+                risk = entry - stop
+                r_multiple = (exit_price - entry) / risk if risk != 0 else 0.0
+                self._on_exit_alert(
+                    pos.code,
+                    pos.pending_exit_reason or "stop_out",
+                    round(r_multiple, 2),
+                )
+            except Exception:
+                _logger.warning("on_exit_alert_error", code=pos.code, exc_info=True)
 
     # ============================================================
     # Public API — startup reconciliation
@@ -545,7 +597,7 @@ class PositionManager:
 
             try:
                 if self._engine is not None:
-                    filled = await self._engine.manage_exit(
+                    filled, exit_price = await self._engine.manage_exit(
                         code=code,
                         qty=qty,
                         side=sell_side,
@@ -576,13 +628,23 @@ class PositionManager:
                         # Record force_close reason for the alert (ALERT-02). In-memory only.
                         pos.pending_exit_reason = "force_close"
                         self._persist_position(pos, event="force_close")
+                        # P1-B: records the trades-table row (restores Gate 7 / EOD truth).
+                        self._record_trade_if_closed(pos, filled, exit_price)
                         _logger.info("force_close_filled", code=code, qty=qty)
                         # Fire exit alert from the filled return (D-01/D-02 / POS-04 / ALERT-04).
                         if self._on_exit_alert is not None:
                             try:
                                 entry = pos.entry_price or 0.0
                                 stop = pos.initial_stop or 0.0
-                                exit_proxy = pos.avg_fill_price or entry
+                                # P1-B: use the SAME blended exit price
+                                # _record_trade_if_closed just wrote, not
+                                # avg_fill_price (the ENTRY fill price — same
+                                # class of bug Finding 2.7 already fixed for
+                                # stop_out, which made R ~= 0 here too).
+                                exit_proxy = (
+                                    pos.exit_notional / pos.exit_filled_qty
+                                    if pos.exit_filled_qty > 0 else entry
+                                )
                                 risk = entry - stop
                                 r_multiple = (exit_proxy - entry) / risk if risk != 0 else 0.0
                                 self._on_exit_alert(
@@ -703,7 +765,10 @@ class PositionManager:
         # Decrement remaining_quantity by the matched fill quantity (order_id-keyed).
         prev_qty = pos.remaining_quantity
         pos.remaining_quantity = max(0, pos.remaining_quantity - fill.filled_qty)
-        pos.updated_at = now_et()
+        # Use the fill's own timestamp (more precise than now_et() — mirrors
+        # _on_entry_fill's opened_at=fill.fill_time convention) since
+        # _record_trade_if_closed below persists pos.updated_at as closed_at.
+        pos.updated_at = fill.fill_time
 
         if pos.remaining_quantity == 0:
             # All shares exited — mark CLOSED (Pitfall E: only here, never on partial)
@@ -721,31 +786,19 @@ class PositionManager:
             phase=pos.phase.value,
         )
 
+        # P1-B: accumulate this leg / write the trades row via the shared helper
+        # (same one _trigger_partial_profit/_trigger_stop_out/force_close_all/
+        # _on_quote use) instead of a separate inline record_trade call — keeps
+        # every exit path's blended-price accounting identical.
+        self._record_trade_if_closed(pos, fill.filled_qty, fill.avg_fill_price)
+
         if pos.remaining_quantity == 0:
-            # Compute R-multiple: (exit_price - entry) / (entry - initial_stop)
+            # Compute R-multiple for the alert (exit_price - entry) / (entry - initial_stop).
             entry = pos.entry_price or 0.0
             stop = pos.initial_stop or 0.0
             exit_price = fill.avg_fill_price or entry
             risk = entry - stop
             r_multiple = (exit_price - entry) / risk if risk != 0 else 0.0
-
-            # Finding 2.3: write the completed trade row now that the position is
-            # fully closed (trades.exit_price/closed_at are NOT NULL — a partial
-            # exit must never attempt this insert). This is what get_closed_trades /
-            # get_daily_trade_stats read for the EOD report and daily summary.
-            try:
-                self._store.record_trade(
-                    position_id=pos.position_id,
-                    code=pos.code,
-                    entry_price=pos.entry_price,
-                    exit_price=fill.avg_fill_price,
-                    quantity=pos.full_quantity,
-                    exit_reason=pos.pending_exit_reason or "exit_fill",
-                    r_multiple=round(r_multiple, 2),
-                    closed_at=fill.fill_time,
-                )
-            except Exception:
-                _logger.warning("record_trade_error", code=pos.code, exc_info=True)
 
             # Fire optional exit alert callback when position is fully closed
             # (ALERT-04: isolation — callback failure must never propagate).
@@ -793,10 +846,25 @@ class PositionManager:
         pos.updated_at = now_et()
         self._persist_position(pos, event="partial_profit")
 
-        if self._engine is not None:
+        if qty < 1:
+            # P2 (strategy-audit finding): floor(remaining_quantity *
+            # partial_profit_fraction) rounds to 0 for small positions (qty<=2 at
+            # fraction=0.3333) -- skip the engine round-trip for a zero-share
+            # order entirely. The FSM has already transitioned to PARTIAL_TAKEN
+            # above (evaluate_close), which is the correct degradation: the
+            # position now watches for the 1R breakeven trigger next, same as
+            # a real partial would, just without a scale-out that couldn't
+            # have sold a whole share anyway.
+            _logger.info(
+                "partial_skipped_min_qty",
+                code=pos.code,
+                remaining_quantity=pos.remaining_quantity,
+                reason="floor(remaining_quantity * partial_profit_fraction) < 1",
+            )
+        elif self._engine is not None:
             self._exiting.add(pos.code)
             try:
-                filled_qty = await self._place_exit_order(pos.code, qty)
+                filled_qty, exit_price = await self._place_exit_order(pos.code, qty)
             finally:
                 self._exiting.discard(pos.code)
             if filled_qty > 0:
@@ -819,6 +887,9 @@ class PositionManager:
                     pos.phase = PositionPhase.CLOSED
                 pos.updated_at = now_et()
                 self._persist_position(pos, event="partial_profit_filled")
+                # P1-B: accumulate this leg; writes the trades row only if this
+                # partial happened to zero remaining_quantity (WR-01 case above).
+                self._record_trade_if_closed(pos, filled_qty, exit_price)
 
         # Fire optional exit alert for the partial scale-out (ALERT-02).
         # Partials leave remaining_quantity > 0 so _on_exit_fill's full-close gate
@@ -908,7 +979,7 @@ class PositionManager:
         if self._engine is not None:
             self._exiting.add(pos.code)
             try:
-                filled_qty = await self._place_exit_order(pos.code, qty)
+                filled_qty, exit_price = await self._place_exit_order(pos.code, qty)
             finally:
                 self._exiting.discard(pos.code)
             # D-01/D-02: apply exit from the manage_exit return value (not exit_order_id).
@@ -923,6 +994,8 @@ class PositionManager:
                 pos.phase = PositionPhase.CLOSED
                 pos.updated_at = now_et()
                 self._persist_position(pos, event="stop_out_filled")
+                # P1-B: records the trades-table row (restores Gate 7 / EOD truth).
+                self._record_trade_if_closed(pos, filled_qty, exit_price)
                 # Fire exit alert synchronously from the filled return (ALERT-02 / ALERT-04).
                 if self._on_exit_alert is not None:
                     try:
@@ -950,6 +1023,8 @@ class PositionManager:
                     pos.phase = PositionPhase.CLOSED
                     pos.updated_at = now_et()
                     self._persist_position(pos, event="stop_out_filled")
+                    # P1-B: records the trades-table row (restores Gate 7 / EOD truth).
+                    self._record_trade_if_closed(pos, filled_qty, exit_price)
                     if self._on_exit_alert is not None:
                         try:
                             entry = pos.entry_price or 0.0
@@ -1054,6 +1129,71 @@ class PositionManager:
             "exit_order_id": pos.exit_order_id,
         })
 
+    def _record_trade_if_closed(
+        self, pos: PositionState, filled_qty: int, exit_price: float
+    ) -> None:
+        """Accumulate one exit leg into pos's in-memory blended-exit tracker, and
+        write the SINGLE trades-table row for this position the moment
+        remaining_quantity reaches 0 (P1-B, strategy-audit finding).
+
+        Before this fix, PositionManager only ever wrote a trades row via
+        _on_exit_fill, which requires pos.exit_order_id to match a FillEvent's
+        order_id — but exit_order_id is never assigned anywhere in bot/, so that
+        path was live-unreachable. SignalEngine's Gate 7 (-2R daily circuit
+        breaker) reads get_daily_trade_stats, which reads this table; with it
+        never written, realized_pnl was always 0.0 and the breaker could never
+        trip. This method is now called from every site that credits an exit
+        fill (_trigger_partial_profit, _trigger_stop_out, force_close_all,
+        _on_quote, _on_exit_fill), making PositionManager the SOLE trades-table
+        writer in both the live bot and the backtester (which wires this same
+        class against a scratch StateStore).
+
+        Blended across every leg (partial + final) exactly like the backtester
+        harness's own prior semantics: exit_price = total_notional / total_qty
+        across all legs. guarded by pos.trade_recorded so a position can never
+        produce two rows.
+
+        filled_qty/exit_price are for THIS leg only (not cumulative) — the
+        caller passes what this specific manage_exit call actually filled.
+
+        Known trade-off: exit_filled_qty/exit_notional are in-memory only
+        (never persisted, same as pending_exit_reason) — a restart between two
+        legs of the same position loses the earlier leg's contribution, so the
+        eventually-recorded price reflects only the legs filled after the
+        restart. Accepted rather than adding persistence for a rare event; the
+        backtester's own prior implementation carried the identical trade-off.
+        """
+        if filled_qty <= 0:
+            return
+        pos.exit_filled_qty += filled_qty
+        pos.exit_notional += filled_qty * exit_price
+
+        if pos.remaining_quantity != 0 or pos.trade_recorded:
+            return
+
+        blended_exit_price = (
+            pos.exit_notional / pos.exit_filled_qty if pos.exit_filled_qty > 0 else exit_price
+        )
+        entry = pos.entry_price or 0.0
+        stop = pos.initial_stop or 0.0
+        risk = entry - stop
+        r_multiple = (blended_exit_price - entry) / risk if risk != 0 else 0.0
+
+        try:
+            self._store.record_trade(
+                position_id=pos.position_id,
+                code=pos.code,
+                entry_price=pos.entry_price,
+                exit_price=blended_exit_price,
+                quantity=pos.full_quantity,
+                exit_reason=pos.pending_exit_reason or "exit_fill",
+                r_multiple=round(r_multiple, 2),
+                closed_at=pos.updated_at,
+            )
+            pos.trade_recorded = True
+        except Exception:
+            _logger.warning("record_trade_error", code=pos.code, exc_info=True)
+
     # ============================================================
     # Internal — helpers
     # ============================================================
@@ -1123,18 +1263,19 @@ class PositionManager:
             )
             return None
 
-    async def _place_exit_order(self, code: str, qty: int) -> int:
-        """Ask ExecutionEngine to place a marketable-limit exit; return total filled qty.
+    async def _place_exit_order(self, code: str, qty: int) -> tuple:
+        """Ask ExecutionEngine to place a marketable-limit exit; return (filled_qty, avg_price).
 
-        D-01: returns int (total filled qty, 0 on failure) — never None.
+        D-01: returns (int, float) — never None. On failure, (0, 0.0).
         D-02: callers apply the exit (decrement remaining_quantity, mark CLOSED,
               fire on_exit_alert) from this return value directly. exit_order_id is
               no longer the exit-alert delivery path (Pitfall 4: exit_order_id is
               preserved only for the entry-fill matching path in _on_exit_fill).
 
         Delegates to engine.manage_exit() which owns all retry-until-flat logic
-        (D-07 / CFG-01). Returns int(filled_qty) on success, 0 on exception
-        (Assumption A2: manage_exit returning 0 is valid — no fill occurred).
+        (D-07 / CFG-01) and (P1-B) returns the qty-weighted average fill price
+        alongside the quantity. Returns (0, 0.0) on exception (Assumption A2:
+        manage_exit returning 0 filled is valid — no fill occurred).
         """
         try:
             from moomoo import TrdSide
@@ -1144,7 +1285,7 @@ class PositionManager:
             sell_side = None
 
         try:
-            filled_qty = await self._engine.manage_exit(
+            filled_qty, avg_price = await self._engine.manage_exit(
                 code=code,
                 qty=qty,
                 side=sell_side,
@@ -1152,10 +1293,10 @@ class PositionManager:
                 escalation_cadence=self._cfg.exit_escalation_cadence_seconds,
                 ttl=self._cfg.exit_ttl_seconds,
             )
-            return int(filled_qty)
+            return int(filled_qty), float(avg_price)
         except Exception:
             _logger.warning("place_exit_order_error", code=code, qty=qty, exc_info=True)
-            return 0
+            return 0, 0.0
 
     def _increment_daily_filled_count(self, fill_time: datetime) -> None:
         """Increment daily_trade_count.filled_count for the fill's session date (D-08).

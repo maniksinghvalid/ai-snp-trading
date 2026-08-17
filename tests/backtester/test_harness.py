@@ -300,6 +300,9 @@ def test_full_replay_produces_a_closed_trade_filled_at_next_bar_open(monkeypatch
     )
     assert trade["code"] == "US.TEST"
     assert trade["exit_reason"] == "stop_out"
+    assert trade.get("opened_at") is not None, (
+        "trade_log rows must carry opened_at (exposure metrics, trades.csv column)"
+    )
 
     # Pitfall 6: bar_buffer must have been populated during the replay so the swing-low
     # trail (POS-03) has data to compute from.
@@ -686,3 +689,23 @@ def test_gate7_circuit_breaker_trips_from_backtest_recorded_trades(monkeypatch, 
     loser_trades = [t for t in harness.trade_log if t["code"] == "US.LOSER"]
     assert len(loser_trades) == 1
     assert loser_trades[0]["exit_reason"] == "stop_out"
+
+    # (4) P1-B regression: exactly ONE trades-table row for LOSER, and the DB's
+    # realized_pnl EXACTLY matches trade_log's own independently-built pnl --
+    # not just "below threshold" (assertion (3) above), which a DOUBLE-write
+    # would still silently satisfy (a doubled loss is still <= -2000). Both the
+    # harness's old direct store.record_trade call AND PositionManager's own
+    # (P1-B) writing the same position would double-count every trade.
+    closed_rows = store.get_closed_trades(_CB_DAY)
+    loser_rows = [r for r in closed_rows if r["code"] == "US.LOSER"]
+    assert len(loser_rows) == 1, (
+        f"expected exactly one trades-table row for LOSER (single writer, P1-B); "
+        f"got {len(loser_rows)}"
+    )
+    expected_pnl = sum(
+        (t["exit_price"] - t["entry_price"]) * t["quantity"] for t in loser_trades
+    )
+    assert stats["realized_pnl"] == pytest.approx(expected_pnl), (
+        f"DB realized_pnl ({stats['realized_pnl']}) must exactly match trade_log's "
+        f"own pnl ({expected_pnl}) -- a mismatch means the trades table double-counted."
+    )

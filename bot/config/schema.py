@@ -81,7 +81,15 @@ SCHEMA = {
                 "I3_rvol_min": {"type": "number"},
                 "I3_rvol_lookback_days": {"type": "integer"},
                 # Phase 7 addition (optional — loader provides default=14)
-                "I3_rvol_tod_lookback_days": {"type": "integer"}
+                "I3_rvol_tod_lookback_days": {"type": "integer"},
+                # I2_mode is optional (defaults to "close_at_hod" in the loader);
+                # only these two candidate strings are valid. Unknown strings fail
+                # here before the implemented-set guard in the loader (mirrors
+                # exit.model's own enum + fail-closed pattern).
+                "I2_mode": {
+                    "type": "string",
+                    "enum": ["close_at_hod", "close_above_prior_hod"]
+                }
             }
         },
 
@@ -122,7 +130,10 @@ SCHEMA = {
                 "partial_profit_trigger_R": {"type": "number"},
                 "partial_profit_fraction": {"type": "number"},
                 "breakeven_trigger_R": {"type": "number"},
-                "post_breakeven_trail": {"type": "string"}
+                "post_breakeven_trail": {"type": "string"},
+                # breakeven_buffer_R is optional (defaults to 0.0 in the loader —
+                # today's exact-entry breakeven behavior, P2 strategy-audit finding).
+                "breakeven_buffer_R": {"type": "number"}
             }
         },
 
@@ -177,7 +188,10 @@ SCHEMA = {
                 "force_close_escalation_step_usd":        {"type": "number"},
                 "force_close_escalation_cadence_seconds": {"type": "number"},
                 # Phase 7 addition (optional — loader provides default=True)
-                "use_broker_stop_orders":                 {"type": "boolean"}
+                "use_broker_stop_orders":                 {"type": "boolean"},
+                # P2 addition (optional — loader provides default=None/off,
+                # strategy-audit finding): live-only entry-chase cap.
+                "max_entry_chase_r":                      {"type": "number"}
             }
         },
 

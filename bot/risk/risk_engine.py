@@ -104,8 +104,17 @@ class RiskEngine:
         """
         entry_price = signal.bar.close
 
+        # P2 (strategy-audit finding): cfg.initial_stop_reference selects which
+        # price the stop is anchored to. "lod" (default) is today's behavior --
+        # the session low-of-day, which on a gap day is often just the 09:30
+        # bar's low even though entries fire >=10:05. "bar_low" anchors to the
+        # SIGNAL BAR's own low instead.
+        stop_reference_price = (
+            signal.bar.low if self._cfg.initial_stop_reference == "bar_low" else signal.lod
+        )
+
         # RISK-03: compute stop via the strategy helper (do NOT reimplement the math)
-        stop_price = self._strategy.compute_initial_stop(signal.lod)
+        stop_price = self._strategy.compute_initial_stop(stop_reference_price)
 
         stop_distance = entry_price - stop_price
         if stop_distance <= 0:

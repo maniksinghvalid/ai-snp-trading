@@ -104,7 +104,7 @@ def test_manage_exit_fills_at_next_bar_open_and_returns_int_qty():
     execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
     execution.on_bar(bar_n)  # harness wiring: record the latest bar seen for this code
 
-    filled_qty = asyncio.run(
+    filled_qty, exit_price = asyncio.run(
         execution.manage_exit(
             code=bar_n["code"], qty=5, side="SELL",
             escalation_step=0.01, escalation_cadence=1.0, ttl=5.0,
@@ -113,6 +113,9 @@ def test_manage_exit_fills_at_next_bar_open_and_returns_int_qty():
 
     assert isinstance(filled_qty, int)
     assert filled_qty == 5
+    assert exit_price == bar_n_plus_1["open"], (
+        "P1-B: manage_exit must also return the fill's price"
+    )
     assert len(execution.exit_fills) == 1
     exit_row = execution.exit_fills[0]
     assert exit_row["code"] == bar_n["code"]
@@ -130,7 +133,7 @@ def test_manage_exit_force_close_fills_at_last_bar_close_and_returns_full_qty():
     execution.on_bar(bar_n)
     execution._force_close = True
 
-    filled_qty = asyncio.run(
+    filled_qty, exit_price = asyncio.run(
         execution.manage_exit(
             code=bar_n["code"], qty=7, side="SELL",
             escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
@@ -138,6 +141,7 @@ def test_manage_exit_force_close_fills_at_last_bar_close_and_returns_full_qty():
     )
 
     assert filled_qty == 7
+    assert exit_price == bar_n["close"]
     assert execution.exit_fills[-1]["exit_price"] == bar_n["close"]
     assert execution.exit_fills[-1]["qty"] == 7
     assert execution.exit_fills[-1] in execution.fills
@@ -149,7 +153,7 @@ def test_manage_exit_force_close_with_no_recorded_bar_returns_zero():
     execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
     execution._force_close = True
 
-    filled_qty = asyncio.run(
+    filled_qty, exit_price = asyncio.run(
         execution.manage_exit(
             code="US.NEVER_SEEN", qty=3, side="SELL",
             escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
@@ -157,6 +161,7 @@ def test_manage_exit_force_close_with_no_recorded_bar_returns_zero():
     )
 
     assert filled_qty == 0
+    assert exit_price == 0.0
     assert execution.exit_fills == []
     assert execution.fills == []
 
@@ -169,7 +174,7 @@ def test_manage_exit_returns_zero_and_records_no_fill_when_no_next_bar():
     execution = SimulatedExecution(_FakeFeed(bars), slippage_usd=0.0)
     execution.on_bar(last_bar)
 
-    filled_qty = asyncio.run(
+    filled_qty, exit_price = asyncio.run(
         execution.manage_exit(
             code=last_bar["code"], qty=5, side="SELL",
             escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
@@ -177,6 +182,7 @@ def test_manage_exit_returns_zero_and_records_no_fill_when_no_next_bar():
     )
 
     assert filled_qty == 0
+    assert exit_price == 0.0
     assert execution.exit_fills == []
     assert execution.fills == []
 
@@ -199,25 +205,27 @@ def test_exit_slippage_is_adverse():
 
     # Normal-mode exit: a long-only SELL slips DOWN.
     execution.on_bar(bar_n)
-    filled_qty = asyncio.run(
+    filled_qty, exit_price = asyncio.run(
         execution.manage_exit(
             code=bar_n["code"], qty=5, side="SELL",
             escalation_step=0.01, escalation_cadence=1.0, ttl=5.0,
         )
     )
     assert filled_qty == 5
+    assert exit_price == bar_n_plus_1["open"] - 0.10
     assert execution.exit_fills[-1]["exit_price"] == bar_n_plus_1["open"] - 0.10
 
     # Force-close exit: also a SELL, also slips DOWN (uses the last observed bar's close).
     execution.on_bar(bar_n)
     execution._force_close = True
-    filled_qty = asyncio.run(
+    filled_qty, exit_price = asyncio.run(
         execution.manage_exit(
             code=bar_n["code"], qty=7, side="SELL",
             escalation_step=0.0, escalation_cadence=0.0, ttl=0.0,
         )
     )
     assert filled_qty == 7
+    assert exit_price == bar_n["close"] - 0.10
     assert execution.exit_fills[-1]["exit_price"] == bar_n["close"] - 0.10
 
 
