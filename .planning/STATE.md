@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: "Completed 09-04-PLAN.md (options backtester CLI + real-data attempt: all 3 hypotheses INSUFFICIENT-EVIDENCE due to Massive per-contract-bar architecture vs SPY chain density; Phase 9 complete)"
-last_updated: "2026-08-17T19:23:40.215Z"
+stopped_at: "Completed 09-05-PLAN.md (gap-closure: lazy fetch VERIFICATION gap 3, CR-01/WR-01/WR-02/WR-05, results doc correction; Phase 9 ready for re-verification)"
+last_updated: "2026-08-17T20:11:24.556Z"
 last_activity: 2026-08-17 -- Phase 9 execution started
 progress:
   total_phases: 11
   completed_phases: 10
-  total_plans: 47
-  completed_plans: 48
+  total_plans: 48
+  completed_plans: 49
   percent: 91
 ---
 
@@ -73,6 +73,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 09 P02 | ~35 minutes | 3 tasks | 3 files |
 | Phase 09-options-backtester P03 | ~50 minutes | 3 tasks | 4 files |
 | Phase 09 P04 | 90 minutes | 3 tasks | 4 files |
+| Phase 09-options-backtester P05 | 55min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -157,6 +158,9 @@ Recent decisions affecting current work:
 - [Phase 09-03]: 09-03: expiry settlement checked before manage_decision in _manage_day -- an expiring position always settles at intrinsic, never races a manage_decision exit reason on its own expiry day
 - [Phase ?]: 09-04: warm-up priming via a dedicated CLI-side loop (_prime_iv_series) feeding engine._iv_series directly, not engine.run(warmup_days) -- OptionsBacktestEngine.run_day has no public warm-up-only API and is frozen
 - [Phase ?]: 09-04: all 3 hypotheses (H1/H2/H3) verdicted INSUFFICIENT-EVIDENCE -- SPY's option chain density x measured Massive fetch rate (5.3-5.8 req/min) projects ~183hr for one arm's one window, ~90x the plan's 2hr stop-and-report budget; grouped-daily escape hatch probed live, HTTP 400; rules_options.json unchanged
+- [Phase 09-options-backtester]: 09-05: lazy per-decision-day fetch (rows_for) replaces eager contracts_for_day -- ~7.5k SPY contracts for the full 2024-08..2026-08 history at +/-10% band vs 58,366+ for one IS window; VERIFICATION gap 3 closed
+- [Phase 09-options-backtester]: 09-05: CR-01 closed -- close_open_at_end() settles positions still open at --end with exit_reason=end_of_window; no longer silently dropped from reported metrics
+- [Phase 09-options-backtester]: 09-05: root cause corrected -- Massive is a hard 5-req/min server-side tier cap (0.23s raw latency), not a gradual rate; free tier ~25h once for all of SPY, paid tier ~5min with --workers 8; all 3 hypotheses remain INSUFFICIENT-EVIDENCE (no live fetch run in this offline-only plan)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -193,6 +197,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T19:23:40.210Z
-Stopped at: Completed 09-04-PLAN.md (options backtester CLI + real-data attempt: all 3 hypotheses INSUFFICIENT-EVIDENCE due to Massive per-contract-bar architecture vs SPY chain density; Phase 9 complete)
+Last session: 2026-08-17T20:11:24.551Z
+Stopped at: Completed 09-05-PLAN.md (gap-closure: lazy fetch VERIFICATION gap 3, CR-01/WR-01/WR-02/WR-05, results doc correction; Phase 9 ready for re-verification)
 Resume file: None

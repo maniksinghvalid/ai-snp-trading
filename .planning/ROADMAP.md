@@ -276,7 +276,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 6. Backtester | 12/12 | Complete    | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
-| 9. Options Backtester | 4/4 | Complete   | 2026-08-17 |
+| 9. Options Backtester | 5/5 | Complete   | 2026-08-17 |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -355,7 +355,7 @@ Plans:
   5. Result doc reports each hypothesis as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with the numbers; `rules_options.json` is changed only if a hypothesis is SUPPORTED with OOS confirmation
   6. Full test suite green
 
-**Plans:** 4/4 plans complete
+**Plans:** 5/5 plans complete
 
 Plans:
 **Wave 1**
