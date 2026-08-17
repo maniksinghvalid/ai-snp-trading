@@ -34,6 +34,7 @@ def options_rules():
             "fear_drop_pct": 2.0,
             "fear_ivr_min": 20,
             "max_spread_pct_of_mid": 5.0,
+            "max_spread_abs_usd": 0.05,
             "min_open_interest": 500,
             "target_dte": 45,
             "min_dte": 30,

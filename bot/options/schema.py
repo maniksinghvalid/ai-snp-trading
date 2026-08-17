@@ -57,6 +57,7 @@ OPTIONS_SCHEMA = {
                 "fear_drop_pct",
                 "fear_ivr_min",
                 "max_spread_pct_of_mid",
+                "max_spread_abs_usd",
                 "min_open_interest",
                 "target_dte",
                 "min_dte",
@@ -72,6 +73,9 @@ OPTIONS_SCHEMA = {
                 "fear_drop_pct":         {"type": "number"},
                 "fear_ivr_min":          {"type": "number"},
                 "max_spread_pct_of_mid": {"type": "number"},
+                # A leg passes if spread <= pct-of-mid OR spread <= this absolute
+                # floor (cheap far-OTM wings are penny/nickel-wide but fail a % gate).
+                "max_spread_abs_usd":    {"type": "number"},
                 "min_open_interest":     {"type": "integer"},
                 "target_dte":            {"type": "integer"},
                 "min_dte":               {"type": "integer"},

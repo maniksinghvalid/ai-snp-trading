@@ -119,19 +119,23 @@ def leg_is_liquid(row: dict, cfg) -> bool:
     """Return True when a single contract is tradeable without silly slippage.
 
     Requires a positive bid, open interest >= cfg.min_open_interest, and a
-    bid/ask spread no wider than cfg.max_spread_pct_of_mid percent of the mid.
+    bid/ask spread no wider than cfg.max_spread_pct_of_mid percent of the mid
+    OR no wider than cfg.max_spread_abs_usd in absolute terms (cheap far-OTM
+    wings are nickel-wide yet fail a pure %-of-mid gate).
     Fails closed on missing or nonsensical quotes.
     """
     bid = _as_float(row.get("bid"))
     ask = _as_float(row.get("ask"))
-    if bid <= 0:
+    if bid <= 0 or ask < bid:
         return False
     if _as_float(row.get("open_interest")) < cfg.min_open_interest:
         return False
     mid = (bid + ask) / 2
     if mid <= 0:
         return False
-    return (ask - bid) / mid * 100 <= cfg.max_spread_pct_of_mid
+    spread = ask - bid
+    return (spread / mid * 100 <= cfg.max_spread_pct_of_mid
+            or spread <= cfg.max_spread_abs_usd + 1e-9)
 
 
 def pick_strikes(rows, underlying_px, structure, cfg) -> Optional[dict]:

@@ -273,6 +273,21 @@ class TestLegIsLiquid:
         row = self._row(1.00, 1.04, oi=100)
         assert leg_is_liquid(row, replace(options_cfg, min_open_interest=50)) is True
 
+    def test_cheap_wing_passes_via_absolute_floor(self, options_cfg):
+        """0.05 wide on a 0.325 mid is ~15% — fails the % gate but is nickel-wide,
+        which the absolute floor (0.05) accepts. Far-OTM wings live here."""
+        assert leg_is_liquid(self._row(0.30, 0.35), options_cfg) is True
+
+    def test_cheap_wing_fails_when_wider_than_absolute_floor(self, options_cfg):
+        assert leg_is_liquid(self._row(0.30, 0.36), options_cfg) is False
+
+    def test_absolute_floor_is_config_driven(self, options_cfg):
+        row = self._row(0.30, 0.36)
+        assert leg_is_liquid(row, replace(options_cfg, max_spread_abs_usd=0.06)) is True
+
+    def test_crossed_quote_fails(self, options_cfg):
+        assert leg_is_liquid(self._row(1.10, 1.00), options_cfg) is False
+
     def test_missing_fields_fail_closed(self, options_cfg):
         assert leg_is_liquid({}, options_cfg) is False
 

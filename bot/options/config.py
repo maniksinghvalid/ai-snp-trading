@@ -62,6 +62,7 @@ class OptionsConfig:
     fear_drop_pct: float                   # entry.fear_drop_pct
     fear_ivr_min: float                    # entry.fear_ivr_min
     max_spread_pct_of_mid: float           # entry.max_spread_pct_of_mid
+    max_spread_abs_usd: float              # entry.max_spread_abs_usd (absolute floor, OR'd with pct gate)
     min_open_interest: int                 # entry.min_open_interest
     target_dte: int                        # entry.target_dte
     min_dte: int                           # entry.min_dte
@@ -178,6 +179,7 @@ def load_options_config(path: str = "rules_options.json") -> OptionsConfig:
         fear_drop_pct=float(en["fear_drop_pct"]),
         fear_ivr_min=float(en["fear_ivr_min"]),
         max_spread_pct_of_mid=float(en["max_spread_pct_of_mid"]),
+        max_spread_abs_usd=float(en["max_spread_abs_usd"]),
         min_open_interest=int(en["min_open_interest"]),
         target_dte=int(en["target_dte"]),
         min_dte=int(en["min_dte"]),
