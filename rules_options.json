@@ -37,9 +37,10 @@
 
   "structure": {
     "type": "iron_condor",
-    "short_delta": 0.16,
+    "short_delta": 0.20,
     "wing_width_pct_of_underlying": 1.0,
-    "min_credit_to_width": 0.33
+    "min_wing_width_usd": 2.0,
+    "min_credit_to_width": 0.25
   },
 
   "sizing": {

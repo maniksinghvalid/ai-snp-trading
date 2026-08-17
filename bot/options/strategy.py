@@ -52,9 +52,11 @@ def pick_expiry(expiries: list, today: date, cfg) -> Optional[date]:
         cfg:      OptionsConfig.
 
     Returns the chosen expiry date, or None when nothing is inside the DTE
-    window. Ties on |dte - target_dte| are broken in favour of the monthly
-    (third-Friday) expiry when cfg.prefer_monthly is True; otherwise the first
-    listed candidate wins.
+    window. When cfg.prefer_monthly is True and at least one monthly
+    (third-Friday) expiry sits inside the window, only monthlies are considered
+    (live UAT 2026-08-17: the Wed 2026-09-30 series won on |dte-45| but its
+    wings had OI 41-74 and 5-7% spreads, while the monthlies were penny/nickel
+    wide). Otherwise the closest to target_dte wins; ties keep the earlier date.
     """
     candidates = [
         (expiry, dte) for expiry, dte in expiries
@@ -62,13 +64,11 @@ def pick_expiry(expiries: list, today: date, cfg) -> Optional[date]:
     ]
     if not candidates:
         return None
-    best = min(
-        candidates,
-        key=lambda e: (
-            abs(e[1] - cfg.target_dte),
-            cfg.prefer_monthly and not is_monthly_expiry(e[0]),
-        ),
-    )
+    if cfg.prefer_monthly:
+        monthlies = [c for c in candidates if is_monthly_expiry(c[0])]
+        if monthlies:
+            candidates = monthlies
+    best = min(candidates, key=lambda e: (abs(e[1] - cfg.target_dte), e[0]))
     return best[0]
 
 
@@ -165,7 +165,13 @@ def pick_strikes(rows, underlying_px, structure, cfg) -> Optional[dict]:
     if structure not in ("iron_condor", "put_credit_spread"):
         raise ValueError(f"unsupported structure: {structure}")
 
-    width_target = underlying_px * cfg.wing_width_pct_of_underlying / 100
+    # Wing width: a % of price, floored in dollars — 1% of a $60 ETF is one
+    # $0.50 strike, which turns a $1k risk budget into a 30+ lot condor (live
+    # UAT 2026-08-17: XLE). The floor keeps lot counts sane on cheap underlyings.
+    width_target = max(
+        underlying_px * cfg.wing_width_pct_of_underlying / 100,
+        getattr(cfg, "min_wing_width_usd", 0.0),
+    )
 
     puts = [r for r in rows if r.get("right") == "P"]
     short_put = _closest_delta(puts, cfg.short_delta)
@@ -284,10 +290,19 @@ def manage_decision(mark, credit, dte, cfg) -> Optional[str]:
 # ============================================================
 
 def _as_float(value) -> float:
-    """Coerce a possibly-missing chain field to float (None/'' -> 0.0)."""
+    """Coerce a possibly-missing chain field to float.
+
+    None / '' / the SDK's literal 'N/A' (seen live on bid/ask of untraded
+    strikes) / anything non-numeric → 0.0, which fails closed downstream
+    (leg_is_liquid rejects bid <= 0; a 0.0 mid never passes the credit gate).
+    """
     if value is None or value == "":
         return 0.0
-    return float(value)
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return out if out == out else 0.0   # NaN → 0.0
 
 
 def _mid(row: dict) -> float:

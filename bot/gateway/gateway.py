@@ -243,6 +243,18 @@ _OPTION_RIGHT_MAP = {
 }
 
 
+_OPTION_CODE_EXPIRY_RE = re.compile(r"^US\.[A-Z]+(\d{2})(\d{2})(\d{2})[CP]\d+$")
+
+
+def _expiry_from_option_code(code) -> Optional[str]:
+    """'US.XLE260918P50000' → '2026-09-18'; None if the code is not an option code."""
+    m = _OPTION_CODE_EXPIRY_RE.match(str(code or ""))
+    if not m:
+        return None
+    yy, mm, dd = m.groups()
+    return f"20{yy}-{mm}-{dd}"
+
+
 def _normalise_option_row(row: dict, right: str) -> dict:
     """Map one raw get_option_screen row onto the keys the strategy consumes.
 
@@ -273,7 +285,13 @@ def _normalise_option_row(row: dict, right: str) -> dict:
     row["right"] = _OPTION_RIGHT_MAP.get(opt_type, right)
 
     row["strike"] = row.get("strike_price")
-    row["expiry"] = str(row.get("strike_date", ""))[:10]   # YYYY-MM-DD
+    # Expiry: the screen only fills strike_date when STRIKE_DATE_TIMESTAMP is
+    # retrieved (live payloads showed "N/A" without it), so derive it from the
+    # option code, which always carries YYMMDD — e.g. US.XLE260918P50000 →
+    # 2026-09-18. Fall back to strike_date only if the code is unparseable.
+    row["expiry"] = _expiry_from_option_code(row.get("code")) or (
+        str(row.get("strike_date", ""))[:10] if row.get("strike_date") not in (None, "N/A") else None
+    )
     row["dte"] = row.get("left_day")
     row["bid"] = row.get("bid_price")
     row["ask"] = row.get("ask_price")

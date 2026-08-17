@@ -40,9 +40,10 @@ class TestLoadOptionsConfigDefaults:
     def test_top_level_and_structure_defaults(self, options_cfg):
         assert options_cfg.strategy_name == "tasty_credit_spreads"
         assert options_cfg.structure_type == "iron_condor"
-        assert options_cfg.short_delta == 0.16
+        assert options_cfg.short_delta == 0.20
         assert options_cfg.wing_width_pct_of_underlying == 1.0
-        assert options_cfg.min_credit_to_width == 0.33
+        assert options_cfg.min_credit_to_width == 0.25
+        assert options_cfg.min_wing_width_usd == 2.0
 
     def test_entry_defaults(self, options_cfg):
         assert options_cfg.ivr_min == 30

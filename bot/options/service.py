@@ -99,6 +99,22 @@ def _ivp_pct(row: dict):
     return None if value is None else float(value) * 100
 
 
+def _change_pct(row: dict):
+    """Return the underlying's day change in PERCENT, or None.
+
+    VERIFIED LIVE (2026-08-17, scripts/uat_options_probe.py): the screen's
+    underlying change_ratio is a FRACTION (0.01392 = +1.39%), same convention
+    as iv_rank. x100 once, here.
+    """
+    value = row.get("u_change_ratio")
+    if value in (None, "N/A"):
+        return None
+    try:
+        return float(value) * 100
+    except (TypeError, ValueError):
+        return None
+
+
 def _group_rows_by_underlying(rows) -> dict:
     """Group chain rows by u_stock_id; rows with no underlying id are dropped."""
     out: dict = {}
@@ -534,11 +550,7 @@ class OptionsBot:
         u = {
             "ivr_pct": _ivr_pct(head),
             "ivp_pct": _ivp_pct(head),
-            # ASSUMPTION: u_change_ratio is already a percent. UNVERIFIED against
-            # a live payload — scripts/uat_options_probe.py is the check. If it
-            # turns out to be a fraction, the x100 belongs right here, next to
-            # the IVR conversion above.
-            "change_pct": head.get("u_change_ratio"),
+            "change_pct": _change_pct(head),   # fraction → percent (verified live)
         }
         if not passes_entry_gate(u, cfg):
             return None

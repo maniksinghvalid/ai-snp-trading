@@ -200,6 +200,27 @@ def test_iv_helpers_scale_fraction_to_percent_and_pass_none():
     assert _ivr_pct({"u_iv_rank": 0.066}) == pytest.approx(6.6)
     assert _ivp_pct({"u_iv_percentile": 0.5}) == pytest.approx(50.0)
     assert _ivr_pct({"u_iv_rank": None}) is None
+
+
+def test_change_pct_scales_fraction_to_percent():
+    """Verified live 2026-08-17: u_change_ratio 0.01392 == +1.39% (a fraction)."""
+    from bot.options.service import _change_pct
+    assert _change_pct({"u_change_ratio": 0.01392}) == pytest.approx(1.392)
+    assert _change_pct({"u_change_ratio": -0.025}) == pytest.approx(-2.5)
+    assert _change_pct({"u_change_ratio": "N/A"}) is None
+    assert _change_pct({"u_change_ratio": None}) is None
+
+
+def test_entry_scan_fear_knob_uses_percent_change(make_bot, store, gateway, monkeypatch):
+    """IVR 22% fails ivr_min=30 but a -2.5% day (fraction -0.025 from the SDK)
+    lowers the gate to fear_ivr_min=20 → the scan proceeds to build a spread."""
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch, ivr_frac=0.22, change_ratio=-0.025)
+    bot._executor = _fake_executor()
+
+    _run(bot._job_entry_scan())
+
+    assert _statuses(store, "OPEN") != []
     assert _ivp_pct({}) is None
 
 

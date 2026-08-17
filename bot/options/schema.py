@@ -96,6 +96,7 @@ OPTIONS_SCHEMA = {
                 "type",
                 "short_delta",
                 "wing_width_pct_of_underlying",
+                "min_wing_width_usd",
                 "min_credit_to_width"
             ],
             "properties": {
@@ -108,6 +109,9 @@ OPTIONS_SCHEMA = {
                 },
                 "short_delta":                  {"type": "number"},
                 "wing_width_pct_of_underlying": {"type": "number"},
+                # Dollar floor on the wing width (1% of a $60 ETF is one $0.50
+                # strike → 30+ lot condors for a $1k risk budget).
+                "min_wing_width_usd":           {"type": "number"},
                 "min_credit_to_width":          {"type": "number"}
             }
         },

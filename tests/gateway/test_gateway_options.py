@@ -240,6 +240,25 @@ class TestScreenOptions:
         row = _run(gw.screen_options([202805], "P", 30, 60, 0.10, 0.25))[0]
         assert row["expiry"] == "2026-03-20"
 
+    def test_expiry_derived_from_code_when_strike_date_is_na(self):
+        """Live payloads (2026-08-17 UAT) return strike_date='N/A' unless the
+        STRIKE_DATE_TIMESTAMP retrieve is requested; the code always carries
+        YYMMDD, so expiry must come from the code."""
+        gw = _gw()
+        gw._quote_ctx.get_option_screen.return_value = _page(
+            [_screen_row(code="US.XLE260918P50000", strike_date="N/A")], True,
+        )
+        row = _run(gw.screen_options([201909], "P", 30, 60, 0.10, 0.25))[0]
+        assert row["expiry"] == "2026-09-18"
+
+    def test_expiry_code_wins_over_conflicting_strike_date(self):
+        gw = _gw()
+        gw._quote_ctx.get_option_screen.return_value = _page(
+            [_screen_row(code="US.SPY261016P600000", strike_date="2026-03-20")], True,
+        )
+        row = _run(gw.screen_options([202805], "P", 30, 60, 0.10, 0.25))[0]
+        assert row["expiry"] == "2026-10-16"
+
     @pytest.mark.parametrize("option_type,expected", [
         (1, "C"), ("1", "C"), ("CALL", "C"), ("C", "C"),
         (2, "P"), ("2", "P"), ("PUT", "P"), ("P", "P"),

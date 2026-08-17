@@ -89,7 +89,13 @@ def grid_cfg(options_cfg):
     which real penny-wide SPY contracts beat easily but the shipped 5% gate does
     not. Only max_spread_pct_of_mid is relaxed; every other knob is the default.
     """
-    return replace(options_cfg, max_spread_pct_of_mid=30.0)
+    # The grid was designed around a 0.16-delta short and a 1-point wing on a
+    # $100 underlying, so those two geometry knobs are pinned here too (the
+    # shipped defaults moved to 0.20 delta / $2 wing floor after the live UAT).
+    return replace(
+        options_cfg, max_spread_pct_of_mid=30.0,
+        short_delta=0.16, min_wing_width_usd=0.0, min_credit_to_width=0.33,
+    )
 
 
 def _by_side(result):
@@ -169,12 +175,30 @@ class TestPickExpiry:
         monthly = (date(2026, 9, 18), 44)
         assert pick_expiry([weekly, monthly], self.TODAY, options_cfg) == monthly[0]
 
-    def test_list_order_wins_tie_when_prefer_monthly_off(self, options_cfg):
-        """With prefer_monthly False the monthly has no privilege — pure config knob."""
+    def test_earlier_date_wins_tie_when_prefer_monthly_off(self, options_cfg):
+        """With prefer_monthly False the monthly has no privilege — pure config knob;
+        an exact |dte-target| tie is broken by the earlier date (deterministic)."""
         weekly = (date(2026, 10, 2), 46)
         monthly = (date(2026, 9, 18), 44)
         cfg = replace(options_cfg, prefer_monthly=False)
-        assert pick_expiry([weekly, monthly], self.TODAY, cfg) == weekly[0]
+        assert pick_expiry([weekly, monthly], self.TODAY, cfg) == monthly[0]
+        later_weekly = (date(2026, 10, 2), 44)
+        earlier_weekly = (date(2026, 9, 16), 46)
+        assert pick_expiry([later_weekly, earlier_weekly], self.TODAY, cfg) == earlier_weekly[0]
+
+    def test_monthly_preferred_even_when_a_weekly_is_closer_to_target(self, options_cfg):
+        """Live UAT 2026-08-17: Wed 2026-09-30 (dte 44) beat the monthlies on
+        |dte-45| but its wings were illiquid (OI 41-74). With prefer_monthly a
+        monthly inside the window must win outright, closest monthly to target."""
+        wed = (date(2026, 9, 30), 44)
+        sep_monthly = (date(2026, 9, 18), 32)
+        oct_monthly = (date(2026, 10, 16), 60)
+        assert pick_expiry([wed, sep_monthly, oct_monthly], self.TODAY, options_cfg) == sep_monthly[0]
+
+    def test_falls_back_to_closest_when_no_monthly_in_window(self, options_cfg):
+        wed = (date(2026, 9, 30), 44)
+        fri_weekly = (date(2026, 9, 25), 39)
+        assert pick_expiry([wed, fri_weekly], self.TODAY, options_cfg) == wed[0]
 
     def test_window_bounds_are_inclusive(self, options_cfg):
         chosen = pick_expiry(self._candidates([30, 61]), self.TODAY, options_cfg)
@@ -327,6 +351,15 @@ class TestPickStrikesIronCondor:
         """3% of 100 = 3.0 wide -> 92 / 108 wings (a 3x wider spread needs 3x
         the credit to clear the shipped ratio, so that gate is relaxed here)."""
         cfg = replace(grid_cfg, wing_width_pct_of_underlying=3.0, min_credit_to_width=0.0)
+        result = pick_strikes(_grid(), UNDERLYING_PX, "iron_condor", cfg)
+        wings = {leg["right"]: leg["strike"] for leg in result["legs"] if leg["side"] == "BUY"}
+        assert wings == {"P": 92.0, "C": 108.0}
+
+    def test_wing_width_dollar_floor_wins_over_percent(self, grid_cfg):
+        """1% of 100 = 1.0, but a $3 floor makes the wings 3 away (92 / 108).
+        Live UAT 2026-08-17: XLE at $62 → 1% = one $0.50 strike → 34-lot condors."""
+        cfg = replace(grid_cfg, wing_width_pct_of_underlying=1.0, min_wing_width_usd=3.0,
+                      min_credit_to_width=0.0)
         result = pick_strikes(_grid(), UNDERLYING_PX, "iron_condor", cfg)
         wings = {leg["right"]: leg["strike"] for leg in result["legs"] if leg["side"] == "BUY"}
         assert wings == {"P": 92.0, "C": 108.0}

@@ -75,6 +75,7 @@ class OptionsConfig:
     structure_type: str                    # structure.type (renamed from `type`)
     short_delta: float                     # structure.short_delta
     wing_width_pct_of_underlying: float    # structure.wing_width_pct_of_underlying
+    min_wing_width_usd: float               # structure.min_wing_width_usd (dollar floor on wing width)
     min_credit_to_width: float             # structure.min_credit_to_width
 
     # ---- sizing ----
@@ -193,6 +194,7 @@ def load_options_config(path: str = "rules_options.json") -> OptionsConfig:
         structure_type=structure_type,
         short_delta=float(st["short_delta"]),
         wing_width_pct_of_underlying=float(st["wing_width_pct_of_underlying"]),
+        min_wing_width_usd=float(st["min_wing_width_usd"]),
         min_credit_to_width=float(st["min_credit_to_width"]),
         # sizing
         sizing_equity_usd=float(sz["sizing_equity_usd"]),
