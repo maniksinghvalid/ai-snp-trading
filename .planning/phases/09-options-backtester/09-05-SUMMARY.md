@@ -187,6 +187,20 @@ which is pre-existing project configuration, not new setup from this plan.
   not modified or committed by this plan (out of this plan's `files_modified` scope) — flagged
   here so the orchestrator can decide whether it needs a separate commit.
 
+## Self-Check: PASSED
+
+- `backtester/massive.py` — FOUND
+- `backtester/options/data.py` — FOUND
+- `backtester/options/engine.py` — FOUND
+- `backtester/options/greeks.py` — FOUND
+- `backtester/options_run.py` — FOUND
+- `docs/research/2026-08-17-options-backtest-results.md` — FOUND
+- `.planning/phases/09-options-backtester/09-05-SUMMARY.md` — FOUND
+- Commit `ae0270c` (T-09-13 data layer) — FOUND
+- Commit `fc34153` (T-09-13 engine/CLI + T-09-14) — FOUND
+- Commit `60a51a9` (T-09-15 results doc) — FOUND
+- Commit `66bb471` (summary + validation) — FOUND
+
 ---
 *Phase: 09-options-backtester*
 *Completed: 2026-08-17*
