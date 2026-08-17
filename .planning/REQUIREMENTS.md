@@ -97,6 +97,18 @@ Formalized 2026-07-03 from the quant-feedback phase. All four are config-driven 
 - [ ] **RISK-CIRCUIT**: When cumulative daily realized loss reaches −2R (realized-only, from the trades table; −$2,000 at the fixed $100k basis), all new entries are halted for the rest of the session; the trip is persisted (survives restart), auto-resets next trading day with no intraday re-arm, cancels working entry intents (D-08), and fires a Telegram alert + structured log event (D-05/D-06/D-07)
 - [ ] **EXIT-MODEL**: The exit model shipped in rules.json is chosen from a backtest comparison (current partial/BE/trail vs no-scale/fixed-2R vs full-size-to-1.5R+trail) using the Phase 6 backtester — not by default; Phase 7 ships the config-driven, fail-closed `exit.model` selector, and the evidence-based selection is gated on Phase 6 (plan 07-06)
 
+### Options Backtesting (Phase 9)
+
+Added 2026-08-17. Offline evidence for the Phase 8 `tasty_credit_spreads` strategy before any `rules_options.json` change.
+
+- [ ] **OBT-01**: The options backtester imports `bot/options/strategy.py` (`pick_expiry`/`passes_entry_gate`/`pick_strikes`/`size_position`/`manage_decision`) and reads `rules_options.json` unchanged — same import-not-copy pattern as Phase 6 vs `bot/strategy/`
+- [ ] **OBT-02**: Massive data layer for option contracts reference (incl. `expired=true`) + `O:…` daily aggregates with an on-disk cache (`backtester/massive.py` pattern) and no look-ahead — entry/strike decisions use only bars ≤ the decision date
+- [ ] **OBT-03**: Black-Scholes IV and delta derived from option close + underlying close + DTE + risk-free rate (no chain-snapshot dependency — that endpoint is 403 on the current entitlement)
+- [ ] **OBT-04**: IVR computed from the backtester's own rolling ATM-IV series (252-trading-day window, matching the live `ivr` semantics)
+- [ ] **OBT-05**: Fill model = mid ± configurable slippage per leg, per-leg commissions, expiry settlement at intrinsic value
+- [ ] **OBT-06**: Hypotheses (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) pre-registered in a committed doc BEFORE the first real-data run, with an evidence floor (min trades) and an out-of-sample window
+- [ ] **OBT-07**: Output = per-trade log + summary metrics (win rate, PF, avg credit captured, max DD, Sortino) reusing `backtester/report.py` conventions
+
 ## v2 Requirements
 
 Acknowledged but deferred — not in the current roadmap.
@@ -181,6 +193,13 @@ Which phases cover which requirements.
 | RISK-TICK-STOP | Phase 7 | Built (07-01, 07-03) but dead in production — wiring gap tracked as Phase 07.1 |
 | RISK-CIRCUIT | Phase 7 | Planned (07-01, 07-05) |
 | EXIT-MODEL | Phase 7 | Config seam planned (07-04); backtest selection gated on Phase 6 (07-06) |
+| OBT-01 | Phase 9 | Pending |
+| OBT-02 | Phase 9 | Pending |
+| OBT-03 | Phase 9 | Pending |
+| OBT-04 | Phase 9 | Pending |
+| OBT-05 | Phase 9 | Pending |
+| OBT-06 | Phase 9 | Pending |
+| OBT-07 | Phase 9 | Pending |
 
 **Coverage:**
 
@@ -188,6 +207,7 @@ Which phases cover which requirements.
 - Mapped to phases: 47 ✓
 - Unmapped: 0 ✓
 - Phase 7 strategy-optimization requirements (added 2026-07-03): SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — 4 total, all mapped to Phase 7 ✓
+- Phase 9 options-backtesting requirements (added 2026-08-17): OBT-01..OBT-07 — 7 total, all mapped to Phase 9 ✓
 
 ---
 *Requirements defined: 2026-06-23*
