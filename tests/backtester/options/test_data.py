@@ -305,22 +305,51 @@ def test_underlying_close_present_and_absent():
 
 
 def test_monthly_narrowing_covers_dte_window():
-    """Every decision-day t across a year has at least one monthly expiry in
-    [t+min_dte, t+max_dte] (rules_options.json: 30..60) — proves prefer_monthly
-    narrowing at load() time cannot change pick_expiry's answer."""
+    """rules_options.json's [min_dte, max_dte]=30..60 window is NOT wide
+    enough to always contain a monthly expiry (e.g. today=2025-04-17: the May
+    monthly falls 1 day before the window opens, the June monthly 4 days
+    after it closes) — proving the plan's original "hard-drop non-monthly at
+    load()" premise is false for real calendar alignments (Rule 1 bug found
+    via this test, see OptionChainSource.load()'s DEVIATION docstring).
+
+    So instead: prove `load()` keeps the non-monthly candidate on exactly
+    this adversarial day, and `pick_expiry` (unmodified, D-02) still returns
+    a sensible answer despite zero monthlies being in range — the narrowing
+    genuinely "cannot change pick_expiry's answer" because it never discards
+    a valid candidate in the first place.
+    """
     cfg = load_options_config()
     assert (cfg.min_dte, cfg.max_dte) == (30, 60)
-    today = date(2025, 1, 1)
-    for _ in range(365):
-        window_has_monthly = any(
-            is_monthly_expiry(today + timedelta(days=d))
-            for d in range(cfg.min_dte, cfg.max_dte + 1)
-        )
-        assert window_has_monthly, f"no monthly expiry in window for {today}"
-        today += timedelta(days=1)
+    today = date(2025, 4, 17)
+    window_has_monthly = any(
+        is_monthly_expiry(today + timedelta(days=d))
+        for d in range(cfg.min_dte, cfg.max_dte + 1)
+    )
+    assert not window_has_monthly  # the adversarial day this test exploits
+
+    in_window_expiry = today + timedelta(days=45)  # dte=45, land inside [30, 60]
+    while is_monthly_expiry(in_window_expiry):
+        in_window_expiry += timedelta(days=1)
+    non_monthly_ticker = data.format_massive_ticker("SPY", in_window_expiry, "C", 100)
+    contracts = [_raw_contract(
+        non_monthly_ticker, in_window_expiry.isoformat(), "C", 100
+    )]
+    option_bars = {non_monthly_ticker: _bars_frame({today.isoformat(): 5.0})}
+    underlying = _bars_frame({today.isoformat(): 100.0})
+    source = _FakeSource(contracts, option_bars, underlying)
+    chain = data.OptionChainSource(source, "SPY", today.isoformat(), today.isoformat())
+    chain.load(min_dte=cfg.min_dte, max_dte=cfg.max_dte, prefer_monthly=cfg.prefer_monthly)
+
+    expiries = chain.expiries_for_day(today.isoformat())
+    assert expiries  # the non-monthly candidate was NOT discarded at load() time
+    picked = pick_expiry(expiries, today, cfg)
+    assert picked == in_window_expiry  # pick_expiry falls back correctly, unmodified
 
 
-def test_load_fetches_contracts_once_and_monthly_only():
+def test_load_fetches_contracts_once_and_all_dte_matching_expiries():
+    """load() keeps both monthly and non-monthly candidates within the
+    strike band -- the plan's original 'monthly-only at load()' narrowing
+    was dropped as a Rule 1 bug fix (see class docstring DEVIATION note)."""
     monthly_ticker = "O:SPY250718C00100000"
     non_monthly_ticker = "O:SPY250725C00100000"
     contracts = [
@@ -338,7 +367,7 @@ def test_load_fetches_contracts_once_and_monthly_only():
 
     assert source.contracts_calls == 1  # ONE contracts-reference call per underlying
     assert monthly_ticker in source.option_bars_calls
-    assert non_monthly_ticker not in source.option_bars_calls  # narrowed out before fetch
+    assert non_monthly_ticker in source.option_bars_calls  # kept, not discarded
 
 
 def test_last_known_close_walks_backward_for_manage_only():
