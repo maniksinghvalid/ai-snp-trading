@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: "Completed 09-05-PLAN.md (gap-closure: lazy fetch VERIFICATION gap 3, CR-01/WR-01/WR-02/WR-05, results doc correction; Phase 9 ready for re-verification)"
+stopped_at: "Phase 9: 5/5 plans executed incl. gap-closure 09-05; VERIFICATION gaps 2+3 closed in code, gap 1 (hypothesis evidence) pending background run warm-cache-pool (started 2026-08-17, Massive free tier 5 req/min) — re-verify after the 12 arm runs"
 last_updated: "2026-08-17T20:11:24.556Z"
-last_activity: 2026-08-17 -- Phase 9 execution started
+last_activity: 2026-08-17 -- Phase 9 built (1038 tests); background cache-warming run started for hypothesis evidence
 progress:
   total_phases: 11
   completed_phases: 10
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 Phase: 9 (Options backtester) — EXECUTING
 Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-08-17 -- Phase 9 execution started
+Status: Awaiting evidence run (background) → then 12 arm runs from cache → results doc verdicts → re-verify
+Last activity: 2026-08-17 -- Phase 9 built (1038 tests); background cache-warming run started for hypothesis evidence
 
 Progress: [██████████] 9/9 phases (100%)
 

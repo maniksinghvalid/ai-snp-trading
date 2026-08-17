@@ -276,7 +276,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 6. Backtester | 12/12 | Complete    | 2026-07-07 |
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
-| 9. Options Backtester | 5/5 | Complete   | 2026-08-17 |
+| 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -301,7 +301,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 - [x] 260817-1ie — Wave 4: OptionsBot service (entry/manage/eod jobs, reconcile, alerts, report), main dispatch + --rules (ce3edb7, bb059f1, 96ad6ac, e34e252, 35194ed)
 - [x] Wave 5: research doc, scripts/uat_options_probe.py, live read-only UAT fixes (ad41cd5), ROADMAP/README/CLAUDE.md
 - [ ] Live paper UAT (`--live-1lot`) + first RTH probe review of liquidity thresholds — operator
-- [x] Phase 9 (see block below): options backtester on Massive option daily aggregates (entitlement verified 2026-08-17) (completed 2026-08-17)
+- [ ] Phase 9 (see block below): options backtester built (5/5 plans, 1038 tests); hypothesis evidence pending the background cache-warming run started 2026-08-17 (Massive free tier: 5 req/min hard cap)
 
 ### Phase 07.1: Close gap: RISK-TICK-STOP — wire gateway into PositionManager (INSERTED)
 
@@ -372,4 +372,9 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [x] 09-04-PLAN.md — `backtester.options_run` CLI with `--set` overrides, real-data runs for every hypothesis arm, results doc + conditional `rules_options.json` change (OBT-01, OBT-06, OBT-07) [Wave 4]
+- [x] 09-04-PLAN.md — `backtester.options_run` CLI with `--set` overrides, real-data runs for every hypothesis arm, results doc + conditional `rules_options.json` change (OBT-01, OBT-06, OBT-07) [Wave 4] — arms could NOT complete: Massive free tier = 5 req then 429 (0.23 s latency) + eager fetch design → all H1/H2/H3 INSUFFICIENT-EVIDENCE
+
+**Wave 5 — gap closure** *(09-VERIFICATION.md gaps_found 6/9; 09-REVIEW.md 1 critical / 5 warnings)*
+
+- [x] 09-05-PLAN.md — Lazy per-expiry/OTM-band fetch (≈7.5k SPY contracts vs 58k+), expired=true/false union (WR-03), per-ticker negative cache (WR-04), `--workers`, CR-01 end_of_window settlement, WR-01/02/05, results-doc root-cause correction (OBT-02/03/05/07) [Wave 5] ✅ 2026-08-17 (ae0270c…ded8f80, d3c956a)
+- [ ] Evidence: background run `warm-cache-pool` (SPY,QQQ,IWM,TLT,GLD,XLE 2024-11-18→2026-06-15) started 2026-08-17 (pid file `backtester/results/options/warm-cache-pool.pid`, log `.log`); then run the 12 arm commands in `docs/research/2026-08-17-options-backtest-results.md` from cache and fill in verdicts. Alternative: upgrade Massive to a paid options tier → `--workers 8`, minutes instead of days.
