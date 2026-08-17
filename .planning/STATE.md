@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 9 (Options backtester) — EXECUTING
 Plan: 4 of 4
 Status: Awaiting evidence run (background) → then 12 arm runs from cache → results doc verdicts → re-verify
-Last activity: 2026-08-17 -- Phase 9 built (1038 tests); background cache-warming run started for hypothesis evidence
+Last activity: 2026-08-17 -- Phase 9 built (1038 tests); background cache-warming run started for hypothesis evidence; merged quick task 260817-asl (force_close armed on mid-session restart) from origin
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -186,6 +186,7 @@ None yet.
 | 260817-155 | Phase 8 options strategy Wave 2-3: gateway option methods (get_stock_ids/screen_options/get_option_positions), OptionsStore, LegExecutor + tests | 2026-08-17 | 7624ea9 | [260817-155-phase-8-options-strategy-wave-2-3-gatewa](./quick/260817-155-phase-8-options-strategy-wave-2-3-gatewa/) |
 | 260817-1ie | Phase 8 options strategy Wave 4: OptionsBot service (entry scan/manage/eod jobs, reconcile, alerts, report), bot/main.py strategy_name dispatch + --rules, tests | 2026-08-17 | 35194ed | [260817-1ie-phase-8-options-strategy-wave-4-optionsb](./quick/260817-1ie-phase-8-options-strategy-wave-4-optionsb/) |
 | 260817-ask | screen_options per-underlying requests (escapes moomoo 1000-row/request cap that starved SPY/QQQ/DIA/FXI) + 3.5s inter-call throttle (SDK 10/30s limit), 4 tests, live RTH probe re-verified | 2026-08-17 | f44837e | [260817-ask-fix-screen-options-1000-row-server-cap-s](./quick/260817-ask-fix-screen-options-1000-row-server-cap-s/) |
+| 260817-asl | Fix force_close job never armed on mid-session (re)start: _register_jobs reschedules to today's calendar-aware close when started after 08:30 ET; _reschedule_force_close helper; regression test | 2026-08-17 | 8043243 | [260817-asl-fix-force-close-job-never-firing-when-bo](./quick/260817-asl-fix-force-close-job-never-firing-when-bo/) |
 
 ## Deferred Items
 

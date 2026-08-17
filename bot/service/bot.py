@@ -479,6 +479,13 @@ class TradingBot:
             coalesce=True,
             misfire_grace_time=self._cfg.force_close_misfire_grace_s,
         )
+        # Mid-session (re)start: if the bot comes up after premarket_scan_et,
+        # _job_premarket_scan will not run today and the job would stay parked at
+        # 2099 — arm today's calendar-aware close now (observed 2026-08-17: restart
+        # at 10:17 ET left force_close unarmed). Skipped once past the close time.
+        today = now_et().date()
+        if is_trading_day(today) and now_et().time() < get_force_close_time_et(today):
+            self._reschedule_force_close(today)
 
         # ---- eod_report (CronTrigger at cfg.eod_report_et) ----
         eod_h, eod_m = self._parse_hhmm(self._cfg.eod_report_et)
@@ -588,35 +595,39 @@ class TradingBot:
 
             await loop.run_in_executor(None, _premarket_scan_worker)
             _logger.info("premarket_scan_done", date=str(today))
-
-            # Fix 1.5: reschedule the force_close job with the calendar-aware
-            # close time for today. get_force_close_time_et returns the correct
-            # time for half-days (e.g. 12:51 ET on early-close days), avoiding
-            # the stale 15:51 CronTrigger that previously left positions open
-            # ~3 hours past early-close. (T-06.2-05)
-            try:
-                close_time = get_force_close_time_et(today)
-                run_at = _datetime.datetime.combine(
-                    today,
-                    close_time,
-                    tzinfo=ZoneInfo("America/New_York"),
-                )
-                self._scheduler.reschedule_job(
-                    "force_close",
-                    trigger=DateTrigger(run_date=run_at),
-                )
-                _logger.info(
-                    "force_close_job_rescheduled",
-                    date=str(today),
-                    run_at=str(run_at),
-                )
-            except Exception:
-                _logger.error("force_close_reschedule_error", exc_info=True)
+            self._reschedule_force_close(today)
 
         except asyncio.CancelledError:
             raise
         except Exception:
             _logger.error("premarket_scan_error", exc_info=True)
+
+    def _reschedule_force_close(self, today: _datetime.date) -> None:
+        """Move the force_close DateTrigger to today's calendar-aware close time.
+
+        Fix 1.5 (T-06.2-05): get_force_close_time_et returns the correct time for
+        half-days (e.g. 12:51 ET on early-close days), avoiding the stale 15:51
+        CronTrigger that previously left positions open ~3 hours past early-close.
+        Called by _job_premarket_scan every morning and by _register_jobs on a
+        mid-session (re)start. Errors are logged, never raised.
+        """
+        try:
+            run_at = _datetime.datetime.combine(
+                today,
+                get_force_close_time_et(today),
+                tzinfo=ZoneInfo("America/New_York"),
+            )
+            self._scheduler.reschedule_job(
+                "force_close",
+                trigger=DateTrigger(run_date=run_at),
+            )
+            _logger.info(
+                "force_close_job_rescheduled",
+                date=str(today),
+                run_at=str(run_at),
+            )
+        except Exception:
+            _logger.error("force_close_reschedule_error", exc_info=True)
 
     async def _job_market_open_subscribe(self) -> None:
         """Market-open subscribe job — seeds premarket highs, THEN subscribes the watchlist (D-01 guard).
