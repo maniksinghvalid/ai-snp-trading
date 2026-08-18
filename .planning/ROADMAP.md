@@ -38,6 +38,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (9/9 plans executed 2026-07-07; gap-closure 06-07..06-09 closed all 7 original multi-day BLOCKERs, but re-verification gaps_found — 2 NEW BLOCKERs: NaN union-index bars crash multi-ticker replay; Gate 7 -2R circuit breaker can never trip during replay) (completed 2026-07-07)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 - [x] **Phase 8: Options Premium Selling (tasty_credit_spreads)** - Successor strategy after Trend Join Long was validated as no-edge (2026-08-13): tastylive-derived defined-risk iron condors / put credit spreads on liquid ETFs (45 DTE, IVR≥30 gate, 20Δ shorts, 50% profit target, 21-DTE exit), self-contained `bot/options/` package + `python -m bot --rules rules_options.json` dispatch (built 2026-08-17 via quick tasks 260817-0ph/155/1ie + UAT batch ad41cd5; 961 tests; live paper UAT `--live-1lot` pending operator run)
+- [ ] **Phase 10: External Strategy Research** - Two Reddit-sourced day-trading strategies critically extracted and compared against Trend Join Long; backtest-only research package (`backtester/experimental/`) implementing their automatable cores, pre-registered hypotheses, cache-only cost-realistic backtests across 5 windows/9 regime slices, and a 14-section report — production code changed only on a separate branch if a hypothesis is SUPPORTED (started 2026-08-18)
 
 ## Phase Details
 
@@ -264,7 +265,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -277,6 +278,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
+| 10. External Strategy Research | 0/5 waves | Planned; design approved 2026-08-18 | - |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -378,3 +380,43 @@ Plans:
 
 - [x] 09-05-PLAN.md — Lazy per-expiry/OTM-band fetch (≈7.5k SPY contracts vs 58k+), expired=true/false union (WR-03), per-ticker negative cache (WR-04), `--workers`, CR-01 end_of_window settlement, WR-01/02/05, results-doc root-cause correction (OBT-02/03/05/07) [Wave 5] ✅ 2026-08-17 (ae0270c…ded8f80, d3c956a)
 - [ ] Evidence: background run `warm-cache-pool` (SPY,QQQ,IWM,TLT,GLD,XLE 2024-11-18→2026-06-15) started 2026-08-17 (pid file `backtester/results/options/warm-cache-pool.pid`, log `.log`); then run the 12 arm commands in `docs/research/2026-08-17-options-backtest-results.md` from cache and fill in verdicts. Alternative: upgrade Massive to a paid options tier → `--workers 8`, minutes instead of days.
+
+### Phase 10: External Strategy Research
+
+**Goal**: Two Reddit-sourced day-trading strategies ("day trading strategies that actually work", u/El1teM1ndset 2025-02-27; "Consistent trading strategy… netted $300K+", u/Logical_Argument_216 2025-01-26) are critically extracted, their credibility assessed, and their automatable cores backtested cache-only against Trend Join Long (TJL, no-edge since 2026-08-13) and candidate improvements, with a pre-registered hypothesis protocol, so any recommendation to change `rules.json` is evidence-gated rather than default — matching the Phase 9 pre-registration discipline. Research-only: no production code or config changes as part of this phase.
+**Requirements**: XSR-01, XSR-02, XSR-03, XSR-04, XSR-05, XSR-06
+**Depends on:** Phase 6 (backtester conventions — `SimulatedBarFeed`, `report.py` metrics/CSV schema), Phase 7 (RVOL-TOD / exit-model precedent this research extends)
+**Design:** `~/.claude/plans/analyze-and-improve-autotrader-cosmic-clover.md` (approved 2026-08-18)
+**Success Criteria** (what must be TRUE):
+
+  1. Both Reddit threads are extracted into explicit entry/exit/stop/sizing/timeframe rules, separated from assumptions, with credibility assessed (anecdotal, unverified P&L, survivorship, sample size) — captured in the results doc
+  2. `backtester/experimental/` implements the automatable strategy cores (SMA10+MACD; ORB30+1H-EMA100+VWAP; VWAP pullback) as tested, pluggable modules reusing `SimulatedBarFeed`/`report.py` conventions (cache-keyed data, N+1-open fills, no look-ahead); `bot/` and `rules.json`/`rules_options.json` are untouched
+  3. `docs/research/2026-08-18-external-strategies-hypotheses.md` (universe, IS/OOS windows, evidence floor ≥25 trades/arm/window, metric of record) is committed BEFORE any real-data run — git history proves ordering
+  4. All backtests run cache-only (zero new Massive requests; the Phase 9 warm-cache process is undisturbed) at realistic cost (commission + slippage), reporting standard + extended metrics (CAGR, Sharpe, Sortino, max DD, PF, win rate, avg trade $, expectancy, exposure, bootstrap CI) across the 5 windows and 9 regime slices
+  5. `docs/research/2026-08-18-external-strategies-results.md` reports every hypothesis (H1–H8) as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with numbers, plus the 14 requested report sections; `rules.json`/`rules_options.json` remain unchanged regardless of verdict
+  6. Full test suite green (`python3 -m pytest -q`)
+  7. If any hypothesis is SUPPORTED in both IS and OOS, the exact production integration exists on a separate, unmerged feature branch (default-off, schema-valid, tests green)
+
+**Plans**: 6 plans across 5 waves (Wave 1 pre-registration → Wave 2 engine+strategies+CLI+tests → Wave 3 runs → Wave 4 aggregate+charts+report → Wave 5 conditional productionization branch)
+
+Plans:
+**Wave 1**
+
+- [ ] 10-01-PLAN.md — Pre-registration: hypotheses doc (H1–H8, universe, windows, evidence floor, metric of record), frozen 15-arm `backtester/experimental/arms.json`, SPY daily regime series via yfinance (cached, provenance recorded), committed before any run [Wave 1]
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 10-02-PLAN.md — `backtester/experimental/{indicators,strategies,exits,engine}.py` + `backtester/report.py` side-aware `_net_pnl`/`extra_fields` patch + look-ahead/prefix-invariance/short-sign/caps/force-close tests [Wave 2]
+- [ ] 10-03-PLAN.md — `backtester/experimental/run.py` CLI: locked `WINDOWS` table, cache-presence guard + fail-closed data source, per-window arm loop, `--tjl-regime` day-filter mode + CLI tests [Wave 2]
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 10-04-PLAN.md — Pre-flight (cache/warm-pool/pre-registration/scope) → cache-only run matrix (15 arms × 5 windows × base/stress/zero + intrabar) → 11 TJL day-filter re-reports + post-run no-fetch proof [Wave 3]
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 10-05-PLAN.md — `aggregate.py` (9 slices, IS/OOS pools, bootstrap CI, walk-forward) + `charts.py` (hand-rolled SVG) + committed evidence assets + `docs/research/2026-08-18-external-strategies-results.md` (14 sections, H1–H8 verdict table) [Wave 4]
+
+**Wave 5** *(conditional — only if a hypothesis is SUPPORTED in both IS and OOS)*
+
+- [ ] 10-06-PLAN.md — Gate task reads the Wave-4 verdict table; if triggered: operator scope checkpoint, then `feature/phase10-<arm>` integration (`strategy_name`/`direction` loaded, `SignalEngine(strategy=...)` seam, new `StrategyCore` subclass, default-off, suite green) — not merged [Wave 5]
