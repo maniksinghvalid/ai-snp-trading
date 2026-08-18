@@ -117,7 +117,7 @@ Added 2026-08-18. Backtest-only research comparing two externally-sourced (Reddi
 - [x] **XSR-02**: A backtest-only research package (`backtester/experimental/`) implements the automatable cores of both external strategies as pluggable, tested modules reusing `SimulatedBarFeed`/`report.py` conventions (cache-keyed data, N+1-open fills, no look-ahead), without modifying `bot/` or `rules.json`
 - [x] **XSR-03**: Hypotheses (external strategies vs TJL vs candidate improvements) are pre-registered in a committed doc — universe, IS/OOS windows, evidence floor (≥25 closed trades/arm per window), metric of record — before any real-data run (git history proves ordering), matching the Phase 9 OBT-06 pattern
 - [x] **XSR-04**: Backtests run cache-only against already-cached windows/universe (zero new Massive requests; the Phase 9 warm-cache run is undisturbed) with realistic costs (commission + slippage) and both standard and extended metrics (CAGR, Sharpe, Sortino, max DD, PF, win rate, avg trade $, expectancy, exposure, bootstrap CI)
-- [ ] **XSR-05**: Each hypothesis is reported as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with numbers; `rules.json`/`rules_options.json` are unchanged as part of this phase regardless of verdict
+- [x] **XSR-05**: Each hypothesis is reported as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with numbers; `rules.json`/`rules_options.json` are unchanged as part of this phase regardless of verdict
 - [ ] **XSR-06**: If a hypothesis is SUPPORTED in both IS and OOS, the exact production integration (default-off, schema-valid) is implemented and tested on a separate feature branch, not merged to `develop` as part of this phase
 
 ## v2 Requirements

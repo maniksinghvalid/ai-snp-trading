@@ -278,7 +278,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
-| 10. External Strategy Research | 4/6 | In Progress|  |
+| 10. External Strategy Research | 5/6 | In Progress|  |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -415,7 +415,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 10-05-PLAN.md — `aggregate.py` (9 slices, IS/OOS pools, bootstrap CI, walk-forward) + `charts.py` (hand-rolled SVG) + committed evidence assets + `docs/research/2026-08-18-external-strategies-results.md` (14 sections, H1–H8 verdict table) [Wave 4]
+- [x] 10-05-PLAN.md — `aggregate.py` (9 slices, IS/OOS pools, bootstrap CI, walk-forward) + `charts.py` (hand-rolled SVG) + committed evidence assets + `docs/research/2026-08-18-external-strategies-results.md` (14 sections, H1–H8 verdict table) [Wave 4]
 
 **Wave 5** *(conditional — only if a hypothesis is SUPPORTED in both IS and OOS)*
 
