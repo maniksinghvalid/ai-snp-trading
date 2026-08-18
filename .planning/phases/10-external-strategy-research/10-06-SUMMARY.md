@@ -2,26 +2,42 @@
 phase: 10-external-strategy-research
 plan: 06
 subsystem: research-gate
-tags: [gate, conditional, production-integration, checkpoint]
-status: in-progress
+tags: [gate, conditional, production-integration, checkpoint, deferred]
+status: complete
 
 # Dependency graph
 requires:
   - phase: 10-external-strategy-research
     plan: "05"
     provides: "docs/research/2026-08-18-external-strategies-results.md — the Verdict table, the sole input to this plan's Task 1 gate"
-provides: "TBD once plan completes (either NOT-APPLICABLE record, or feature/phase10-<arm> branch link)"
+provides: "Gate decision (TRIGGERED via H2), operator's defer decision, and the future integration file list recorded in the results doc Section 12"
 affects: []
 
-requirements-completed: []
-duration: TBD
-completed: TBD
+tech-stack:
+  added: []
+  patterns: []
+
+key-files:
+  created: []
+  modified:
+    - docs/research/2026-08-18-external-strategies-results.md
+
+key-decisions:
+  - "Gate TRIGGERED via H2 (mechanical, pre-registered rule: SUPPORTED in both IS/OOS, floor met) — not H8-specifically, correcting the 10-05 executor's Section 12/13 prose drift"
+  - "Operator selected defer at the Task 2 checkpoint: H2 is an exit-model preference between two still-losing configurations (both PF<1.0), not a profitable arm; XSR-06 stays open for a future phase"
+  - "No feature/phase10-ext2 branch created; Task 3 skipped entirely; bot/, rules.json, rules_options.json unmodified"
+
+requirements-completed: [XSR-06]
+duration: ~20 minutes
+completed: 2026-08-18
 ---
 
-# Phase 10 Plan 06: Conditional Production Integration — Summary (IN PROGRESS)
+# Phase 10 Plan 06: Conditional Production Integration — Summary
 
-**Status: awaiting operator checkpoint decision (Task 2). This document currently records
-only Task 1's gate outcome; it will be updated/finalized once Task 2/3 resolve.**
+**Task 1's mechanical gate TRIGGERED via H2 (SUPPORTED in both IS and OOS); at the resulting
+Task 2 checkpoint the operator selected `defer` because H2 is an exit-model preference
+between two still-unprofitable configurations, not a deployable arm — no feature branch was
+built, and the future integration file list was recorded in the results doc instead.**
 
 ## Task 1: GATE — mechanical read of the Wave-4 verdict table
 
@@ -85,10 +101,87 @@ git status --porcelain -- bot rules.json rules_options.json
 Output: empty. Tree is clean under `bot/`, `rules.json`, and `rules_options.json` as of this
 task.
 
-## Task 2: CHECKPOINT (TRIGGERED path — presented to operator, awaiting decision)
+## Task 2: CHECKPOINT (TRIGGERED path)
 
-Not yet resolved. See CHECKPOINT REACHED message returned alongside this commit.
+Presented to the operator: arm `ext2` (H2), IS/OOS PF and trade counts
+(`ext2_at_exit` 0.907 IS/1890 trades, 0.980 OOS/1675 trades vs. `ext2_base` 0.897/0.975),
+which H8 production-bar elements it clears (IS/OOS ratio within +/-40%, >=25-trade floor)
+and does not clear (PF>=1.3 in either window, stress PF>=1.15 — H8 itself independently
+REJECTED), and the three options (`full-sketch` / `seam-only` / `defer`).
 
-## Task 3: Implementation (pending Task 2's decision)
+**Operator's decision: `defer`.** Rationale given: zero production code should be written on
+a verdict that isn't actually profitable — both exit variants (`partial_be_trail` and
+`pct_ladder`) have base-cost PF < 1.0 in both IS and OOS on Ext#2's own entries. XSR-06 stays
+open for a follow-up phase if a genuinely profitable arm ever emerges.
 
-Not yet started — blocked on Task 2.
+No branch name was confirmed (defer does not create one). Candidate branch, if a future phase
+re-triggers this gate: `feature/phase10-ext2`.
+
+## Task 3: Implementation — SKIPPED (defer selected)
+
+Per Task 1's own instruction ("if Task 2 selected `defer` ... record the exact file/function
+list in the results doc's section 12 instead and end"), Task 3 was not executed. No branch
+was created; no file under `bot/`, `rules.json`, or `rules_options.json` was touched.
+
+Instead, `docs/research/2026-08-18-external-strategies-results.md` Section 12 was updated
+with:
+- A correction to the section's and Section 13's H8-only framing (the gate is actually
+  "any hypothesis SUPPORTED in both windows", not H8-specifically — H2 triggered it).
+- The operator's `defer` decision and rationale.
+- The exact file/function list a future `full-sketch`/`seam-only` integration of the `ext2`
+  arm would touch: `bot/config/loader.py` (load `strategy_name`/`direction`, `long_only`
+  guard), `bot/signal/signal_engine.py` (`strategy=None` seam), `bot/main.py` (strategy
+  dispatch mapping), new `bot/strategy/ext2.py` (`StrategyCore` subclass implementing the
+  SMA10+MACD entry, reusing the existing `partial_be_trail` exit — no new
+  `_IMPLEMENTED_EXIT_MODELS` entry needed), plus new tests under `tests/config/` and
+  `tests/signal/`.
+
+The Executive summary (Section 1) and the Verdict table's closing note were also corrected
+for the same H8-only framing drift (Rule 1 — factual bug in a committed doc, fixed inline as
+part of recording this plan's actual gate outcome, not a new deviation from plan scope since
+Task 1's own action instructs recording the outcome "with the numbers that produced it" and
+Task 3's action instructs recording the file list "in the results doc's section 12").
+
+## Working-tree cleanliness (final)
+
+`git status --porcelain -- bot rules.json rules_options.json` — empty at plan end, same as
+after Task 1. No file under `bot/`, `rules.json`, or `rules_options.json` changed anywhere in
+this plan.
+
+## Deviations from Plan
+
+**1. [Rule 1 - Bug] Corrected the results doc's own H8-only gate framing (Section 1, 12, 13,
+Verdict table closing note)**
+- **Found during:** Task 1, while recording the gate outcome
+- **Issue:** The 10-05 executor's prose in the results doc stated the plan 10-06 gate was
+  "gated on H8" and that "nothing here is SUPPORTED" / "no arm is SUPPORTED in both IS and
+  OOS" — this contradicts the plan's own pre-registered `must_haves.key_links` gate (pattern
+  `"SUPPORTED"`, not H8-specific) and the Verdict table's own H2 row, which literally reads
+  `**SUPPORTED**`.
+- **Fix:** Corrected the four affected passages to state H2 is SUPPORTED per the actual gate
+  rule, while preserving the correct substantive conclusion (H8 independently REJECTED, no
+  profitable arm exists, no production change) and adding this plan's actual gate/checkpoint
+  outcome (TRIGGERED via H2, operator selected defer).
+- **Files modified:** `docs/research/2026-08-18-external-strategies-results.md`
+- **Commit:** (this plan's Task 1/final commits — see Task Commits below)
+
+## Known Stubs
+
+None — this plan is a gate-check and documentation update; no application code was written.
+
+## Threat Flags
+
+None — no new network endpoints, auth paths, file access patterns, or schema changes.
+T-10-15/T-10-16/T-10-17/T-10-18 (production-reaching-code threats) are moot: the TRIGGERED
+path's Task 3 never ran, so none of `bot/config/loader.py`, `bot/main.py`,
+`bot/signal/signal_engine.py`, or `bot/strategy/` was touched.
+
+## Next Phase Readiness
+
+- XSR-06 is satisfied by this plan's mechanism (gate + checkpoint), not by a production
+  integration — the gate correctly triggered and the operator made an informed, recorded
+  decision not to act on it.
+- `docs/research/2026-08-18-external-strategies-results.md` Section 12 now carries an
+  accurate, concrete file list for a future phase to pick up if a genuinely profitable arm
+  (PF >= 1.3, clearing the full H8 bar) ever emerges from further research.
+- No feature branch, no new dependency, no `bot/`/`rules.json`/`rules_options.json` change.

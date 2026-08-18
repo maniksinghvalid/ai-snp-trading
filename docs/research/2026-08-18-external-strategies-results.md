@@ -17,8 +17,12 @@ integration.** Every automatable core extracted from the two Reddit threads — 
 pullback (`vwap_pb_base`) — shows a base-cost profit factor **below 1.0 in-sample** across
 every arm and every sensitivity variant (min 0.803, max 0.922, all IS, all n>=1160
 trades). None of H1, H4, or H6 (the three "does this external idea have edge on its own"
-hypotheses) is SUPPORTED. Two candidate improvements to Ext#2 (H2's exit model, H3's
-weekly-regime gate) show mixed or negative effects and are also not SUPPORTED. The weekly
+hypotheses) is SUPPORTED. Of the two candidate improvements to Ext#2, H3 (weekly-regime
+gate) is not SUPPORTED; H2 (exit model) **is** SUPPORTED by the pre-registered rule
+(`partial_be_trail` beats `pct_ladder` in both IS and OOS, floor met both times) — but only
+as a preference between two exit models on Ext#2's own still-losing entries (both PF < 1.0),
+not a profitable, deployable arm; plan 10-06's Task 2 checkpoint on this trigger resolved to
+`defer` (Section 12). The weekly
 SPY regime gate applied to TJL itself (H7) makes TJL's IS profit factor **worse**, not
 better (0.798 -> 0.586), reversing the pre-registered a-priori guess of
 "INSUFFICIENT-EVIDENCE" — the evidence floor was in fact cleared (97 IS / 92 OOS
@@ -379,8 +383,9 @@ in-sample.** There is no improved variant to recommend.
 
 ## 12. Recommended architecture
 
-Described for completeness even though nothing here is SUPPORTED (per the pre-registration's
-own "What would change rules.json" section, verbatim):
+Described for completeness — one hypothesis (H2) IS in fact SUPPORTED by the pre-registered
+gate rule (per the pre-registration's own "What would change rules.json" section, verbatim
+below), but see the "10-06 gate outcome" subsection for why no integration was built:
 
 - **H2 SUPPORTED** would justify replacing `exit.model` semantics or adding an alternative
   exit model to `_IMPLEMENTED_EXIT_MODELS` (currently only the production
@@ -404,12 +409,70 @@ own "What would change rules.json" section, verbatim):
 `rules_options.json` were not modified by this phase, regardless of any hypothesis's
 verdict.
 
+### 10-06 gate outcome and deferred integration (2026-08-18)
+
+Plan 10-06's own Task 1 runs the pre-registered mechanical gate — SUPPORTED in both IS and
+OOS with the floor met, checked per-hypothesis, not narrowed to H8 — against the Verdict
+table above. **Result: TRIGGERED, via H2** (`0.907 vs 0.897 / 1890 IS`, `0.980 vs 0.975 /
+1675 OOS`, both floors met). This is a correction to this section's earlier framing ("nothing
+here is SUPPORTED") and to Section 13's roadmap item 2 below, which both stated the plan was
+gated on H8 specifically — the plan's actual pre-registered `key_links` gate has no such H8
+restriction.
+
+At the Task 2 checkpoint, the operator selected **defer**: zero production code written,
+because H2's substance is an exit-model preference between two still-losing configurations
+(`ext2_at_exit` PF 0.907 IS / 0.980 OOS, `ext2_base` PF 0.897 IS / 0.975 OOS — both below
+breakeven in both windows), not a profitable, deployable arm. XSR-06 stays open for a
+follow-up phase if a genuinely profitable arm ever emerges. No `feature/phase10-ext2` branch
+was created; `bot/`, `rules.json`, and `rules_options.json` remain unmodified by plan 10-06,
+same as by this phase's Waves 1-4.
+
+**Exact file/function list a future `full-sketch` or `seam-only` integration of the H2 arm
+(`feature/phase10-ext2`) would touch, if a follow-up phase ever re-triggers this gate** (per
+plan 10-06 Task 3's action, unexecuted — recorded here per that task's own "if defer, record
+the list here instead" instruction):
+
+- `bot/config/loader.py` (lines ~30-60, ~101-141) — actually load `strategy_name` and
+  `direction` from `rules.json` into `StrategyConfig` (both fields exist in the schema today
+  but are decorative/unloaded); `direction` accepts only `long_only` until a short-capable
+  FSM exists (Ext#2's own definition mirrors long/short, so a short arm needs new FSM work
+  out of scope for this note) — a `direction="short"`/`"long_short"` value must fail fast
+  with a clear config error, mirroring the `_IMPLEMENTED_EXIT_MODELS` guard's shape.
+  `_IMPLEMENTED_EXIT_MODELS` itself needs **no new entry** for this specific arm — the
+  winning exit (`partial_be_trail`) is already the production FSM; only the entry signal is
+  new.
+- `bot/signal/signal_engine.py` (~line 76, `self._strategy = TrendJoinLong(cfg)`) — add a
+  `strategy=None` constructor seam so an injected `StrategyCore` replaces the hard-constructed
+  `TrendJoinLong`; `strategy=None` must remain byte-identical to today's behaviour.
+- `bot/main.py` (~line 100, `strategy = TrendJoinLong(cfg)`) — dispatch on `cfg.strategy_name`
+  over a mapping containing today's `"Trend Join Long"` entry plus a new `"ext2"` (or similar)
+  entry; an unknown name fails fast.
+- `bot/strategy/ext2.py` (new) — a `StrategyCore` subclass (mirroring
+  `bot/strategy/trend_join_long.py`'s shape) implementing the SMA(10) + MACD(12,26,9) cross
+  entry as defined in `docs/research/2026-08-18-external-strategies-hypotheses.md`'s
+  `## Strategy definitions (as implemented)` `ext2` section — long entry at bar t when
+  `close > sma AND close[t-1] <= sma[t-1] AND macd > signal AND
+  bars_since(macd_cross_up) <= confirm_bars` (config-driven, no hardcoded threshold); reuse
+  the existing `partial_be_trail` exit FSM (no new exit model needed).
+- `rules.json` — unchanged unless this arm is actually built; if so, at most the
+  `strategy_name`/`direction` values plus any new `ext2`-specific threshold keys, in their own
+  commit, on `feature/phase10-ext2` only.
+- New tests under `tests/config/` (default-config regression: unmodified `rules.json` still
+  constructs today's exact `TrendJoinLong` pipeline) and `tests/signal/` (the `strategy=None`
+  seam is inert by default; `direction` values other than `long_only` raise a clear error).
+
+This list is descriptive only — no file on it was touched by plan 10-06.
+
 ## 13. Roadmap
 
 1. This phase closes with a "no production change" recommendation, recorded in
    `.planning/STATE.md` and `.planning/ROADMAP.md`.
-2. Plan 10-06 (conditional productionization) is gated on H8 — H8 is REJECTED, so 10-06's
-   scope is limited to documenting this outcome, not building a feature branch.
+2. Plan 10-06 (conditional productionization) is gated on any hypothesis SUPPORTED in both
+   IS and OOS with the floor met — not H8 specifically. H2 met that bar and the gate
+   TRIGGERED; the operator selected `defer` at the Task 2 checkpoint (H2's substance is an
+   exit-model preference between two still-losing configurations, not a profitable arm), so
+   10-06's scope stayed limited to documenting this outcome and the future file list
+   (Section 12), not building a feature branch.
 3. Next research candidate (unscheduled, not pre-registered): a materially different entry
    signal family, since every incremental tweak to TJL and every automatable external idea
    tested here tops out below breakeven in-sample.
@@ -463,9 +526,13 @@ never softened because a number looked promising.
 | H7 | Regime gate improves TJL | predicted INSUFFICIENT (trade count) | 0.586 vs 0.798 base (worse) / 97 / met | 0.905 vs 0.928 base (worse) / 92 / met | **REJECTED** (floor was in fact met, contrary to the a-priori guess) |
 | H8 | Combined arm clears the production bar (PF>=1.3 both, Sortino>1, maxDD<=10%, IS/OOS ratio +/-40%, stress PF>=1.15, no sign flip, >=2 entries/mo) | predicted no -> no production change | no `combo` arm exists (rule never fired: no family cleared IS PF>1); best of all 15 arms is orb5 IS PF 0.922 | n/a | **REJECTED** — no arm, combined or otherwise, is within reach of PF>=1.3 |
 
-**No arm is SUPPORTED in both IS and OOS.** Plan 10-06 (conditional productionization) is
-gated on H8; H8 is REJECTED, so plan 10-06 documents this outcome rather than building a
-feature branch.
+**H2 is SUPPORTED in both IS and OOS** (the only such row); H8 itself is REJECTED, so no
+arm reaches the production-candidate bar. Plan 10-06's gate is triggered by H2 per the
+pre-registered rule (any hypothesis SUPPORTED in both windows, not H8-specifically); at the
+resulting operator checkpoint, the operator selected `defer` (H2's substance is an
+exit-model preference between two still-losing configurations, not a profitable arm), so
+plan 10-06 documents this outcome and the future integration file list (Section 12) rather
+than building a feature branch.
 
 **`rules.json` and `rules_options.json` were not modified by this phase, regardless of
 verdict.**
