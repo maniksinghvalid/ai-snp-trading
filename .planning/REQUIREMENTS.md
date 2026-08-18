@@ -36,18 +36,18 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### Execution
 
-- [ ] **EXEC-01**: Orders are placed through the Moomoo API on the paper (SIMULATE) account only
-- [ ] **EXEC-02**: Exits use limit orders at aggressive prices (no reliance on paper market-order fills)
-- [ ] **EXEC-03**: Pending orders use a TTL with cancel-replace if unfilled
-- [ ] **EXEC-04**: Duplicate-order prevention via a broker-verified per-symbol position guard
-- [ ] **EXEC-05**: Stop-out and fill reconciliation matches broker fills by `order_id`, never by quantity (quantity matching produces false stop-outs after a partial exit)
+- [x] **EXEC-01**: Orders are placed through the Moomoo API on the paper (SIMULATE) account only *(04-03: ExecutionEngine.consume_intent; live round-trip UAT-verified 2026-07-02)*
+- [x] **EXEC-02**: Exits use limit orders at aggressive prices (no reliance on paper market-order fills) *(04-03: test_no_market_orders — 0 MARKET refs, gateway.place_order hardcodes NORMAL)*
+- [x] **EXEC-03**: Pending orders use a TTL with cancel-replace if unfilled *(04-03: test_ttl_cancel_replace, 3 scenarios incl. config-swap)*
+- [x] **EXEC-04**: Duplicate-order prevention via a broker-verified per-symbol position guard *(04-04: test_duplicate_guard, 3 paths — broker positions + open orders + clear-to-proceed)*
+- [x] **EXEC-05**: Stop-out and fill reconciliation matches broker fills by `order_id`, never by quantity (quantity matching produces false stop-outs after a partial exit) *(04-03: test_fill_by_order_id + source grep gate)*
 
 ### Position Lifecycle
 
-- [ ] **POS-01**: Take ⅓ off the position at 0.75R (partial profit)
-- [ ] **POS-02**: Move the stop to breakeven at 1.0R
-- [ ] **POS-03**: After breakeven, trail the stop on 5m swing lows (2/2 pattern)
-- [ ] **POS-04**: Force-close all open positions at 15:51 ET (calendar-aware for half-days)
+- [x] **POS-01**: Take ⅓ off the position at 0.75R (partial profit) *(04-01: test_partial_profit_trigger, config-driven via cfg.partial_profit_trigger_r)*
+- [x] **POS-02**: Move the stop to breakeven at 1.0R *(04-01: test_breakeven_trigger, incl. config-swap to 1.5R)*
+- [x] **POS-03**: After breakeven, trail the stop on 5m swing lows (2/2 pattern) *(04-01: test_trail_never_loosens, incl. restart simulation)*
+- [x] **POS-04**: Force-close all open positions at 15:51 ET (calendar-aware for half-days) *(04-04: test_force_close_half_day; force_close_stuck audit at manager.py:350,378)*
 - [x] **POS-05**: Per-position lifecycle state (the FSM) is persisted and survives restarts
 
 ### Strategy Configuration
@@ -65,21 +65,21 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 ### Service & Orchestration
 
-- [ ] **SVC-01**: Long-running supervised service with an internal scheduler (premarket scan → intraday loop → EOD flatten)
-- [ ] **SVC-02**: OpenD connectivity watchdog (poll `get_global_state` ~every 60s); pause order placement on failure
+- [x] **SVC-01**: Long-running supervised service with an internal scheduler (premarket scan → intraday loop → EOD flatten) *(05-01: TradingBot orchestrator, bot/service/bot.py, AsyncIOScheduler + 5 jobs; composed end-to-end in bot/main.py per 06.1)*
+- [x] **SVC-02**: OpenD connectivity watchdog (poll `get_global_state` ~every 60s); pause order placement on failure *(05-02: OpenDWatchdog, bot/service/watchdog.py)*
 - [x] **SVC-03**: Structured, rotating application logging *(01-04: structlog RotatingFileHandler JSON + ConsoleRenderer stderr)*
 - [x] **SVC-04**: All timing uses US Eastern (`zoneinfo`), correct across DST *(01-04: ET = ZoneInfo("America/New_York"), now_et(), to_et(); DST-tested)*
 
 ### Alerts
 
-- [ ] **ALERT-01**: Telegram alert on entry (ticker, size, entry price, initial stop)
+- [x] **ALERT-01**: Telegram alert on entry (ticker, size, entry price, initial stop) *(05-03: format_entry_alert; live delivery UAT-verified 2026-07-02)*
 - [x] **ALERT-02**: Telegram alert on each exit event (partial, breakeven move, trail-stop, stop-out, force-close)
 - [x] **ALERT-03**: Daily Telegram summary after force-close (trades, win/loss, realized PnL, open risk)
-- [ ] **ALERT-04**: Alert delivery failures never block or crash the trade loop
+- [x] **ALERT-04**: Alert delivery failures never block or crash the trade loop *(05-03: TelegramAlerter.send() swallows all exceptions; no-op without secrets)*
 
 ### Reporting
 
-- [ ] **DASH-01** *(optional)*: A static, offline, no-JS HTML performance dashboard is generated (R-multiple histogram, open-positions table, last-20 closed trades) alongside the Telegram daily summary
+- [x] **DASH-01** *(optional)*: A static, offline, no-JS HTML performance dashboard is generated (R-multiple histogram, open-positions table, last-20 closed trades) alongside the Telegram daily summary *(05-04: ReportBuilder; histogram overflow KeyError fixed commit be194e5; renders offline UAT-verified)*
 
 ### Backtesting
 
@@ -92,10 +92,10 @@ fully-specified strategy (PROJECT.md) and the research table-stakes (`.planning/
 
 Formalized 2026-07-03 from the quant-feedback phase. All four are config-driven (CFG-01). RISK-CIRCUIT promotes and supersedes the v2 CB-01 sketch (realized-only −2R halt rather than a −2% session-PnL rule).
 
-- [ ] **SIG-RVOL-TOD**: Intraday RVOL compares cumulative session volume at time T against the 14-day average of cumulative volume at the same time-of-day bucket (no full-day-average denominator before the close); falls back to the legacy ratio only when no TOD baseline exists
-- [ ] **RISK-TICK-STOP**: A stop violation is acted on at tick/quote granularity — a broker-side Stop-Market protective order (EXEC-02 amended to allow protective stop-market orders, D-01) or, on accounts that do not honor stop orders, a bot-side quote-tick monitor (D-02) — not at the next 5m bar close; the bar-close stop check is retained as a redundant backstop (D-03)
-- [ ] **RISK-CIRCUIT**: When cumulative daily realized loss reaches −2R (realized-only, from the trades table; −$2,000 at the fixed $100k basis), all new entries are halted for the rest of the session; the trip is persisted (survives restart), auto-resets next trading day with no intraday re-arm, cancels working entry intents (D-08), and fires a Telegram alert + structured log event (D-05/D-06/D-07)
-- [ ] **EXIT-MODEL**: The exit model shipped in rules.json is chosen from a backtest comparison (current partial/BE/trail vs no-scale/fixed-2R vs full-size-to-1.5R+trail) using the Phase 6 backtester — not by default; Phase 7 ships the config-driven, fail-closed `exit.model` selector, and the evidence-based selection is gated on Phase 6 (plan 07-06)
+- [x] **SIG-RVOL-TOD**: Intraday RVOL compares cumulative session volume at time T against the 14-day average of cumulative volume at the same time-of-day bucket (no full-day-average denominator before the close); falls back to the legacy ratio only when no TOD baseline exists *(07-01/02/05: get_tod_baseline in signal_engine Gate 2; _compute_tod_baselines in scanner)*
+- [x] **RISK-TICK-STOP**: A stop violation is acted on at tick/quote granularity — a broker-side Stop-Market protective order (EXEC-02 amended to allow protective stop-market orders, D-01) or, on accounts that do not honor stop orders, a bot-side quote-tick monitor (D-02) — not at the next 5m bar close; the bar-close stop check is retained as a redundant backstop (D-03) *(07-01/03: place_stop_order/arm_stop_protection/_on_quote; wiring wave 07.1-01 fixed bot/main.py's PositionManager(gateway=...) so this reaches the live path instead of no-op'ing)*
+- [x] **RISK-CIRCUIT**: When cumulative daily realized loss reaches −2R (realized-only, from the trades table; −$2,000 at the fixed $100k basis), all new entries are halted for the rest of the session; the trip is persisted (survives restart), auto-resets next trading day with no intraday re-arm, cancels working entry intents (D-08), and fires a Telegram alert + structured log event (D-05/D-06/D-07) *(07-01/05: _is_circuit_breaker_tripped Gate 7; _handle_circuit_breaker_side_effects; _breaker_handled startup init)*
+- [x] **EXIT-MODEL**: The exit model shipped in rules.json is chosen from a backtest comparison (current partial/BE/trail vs no-scale/fixed-2R vs full-size-to-1.5R+trail) using the Phase 6 backtester — not by default; Phase 7 ships the config-driven, fail-closed `exit.model` selector, and the evidence-based selection is gated on Phase 6 (plan 07-06) *(07-04: exit.model config seam + fail-closed _IMPLEMENTED_EXIT_MODELS; backtest-driven selection itself intentionally deferred — see traceability note)*
 
 ### Options Backtesting (Phase 9)
 
@@ -179,54 +179,63 @@ Which phases cover which requirements.
 | RISK-03 | Phase 3 | Complete |
 | RISK-04 | Phase 3 | Complete |
 | RISK-05 | Phase 3 | Complete |
-| EXEC-01 | Phase 4 | Pending |
-| EXEC-02 | Phase 4 | Pending |
-| EXEC-03 | Phase 4 | Pending |
-| EXEC-04 | Phase 4 | Pending |
-| EXEC-05 | Phase 4 | Pending |
-| POS-01 | Phase 4 | Pending |
-| POS-02 | Phase 4 | Pending |
-| POS-03 | Phase 4 | Pending |
-| POS-04 | Phase 4 | Pending |
+| EXEC-01 | Phase 4 | Complete (04-03; live round-trip UAT-verified 2026-07-02) |
+| EXEC-02 | Phase 4 | Complete (04-03) |
+| EXEC-03 | Phase 4 | Complete (04-03) |
+| EXEC-04 | Phase 4 | Complete (04-04) |
+| EXEC-05 | Phase 4 | Complete (04-03) |
+| POS-01 | Phase 4 | Complete (04-01) |
+| POS-02 | Phase 4 | Complete (04-01) |
+| POS-03 | Phase 4 | Complete (04-01) |
+| POS-04 | Phase 4 | Complete (04-04) |
 | POS-05 | Phase 4 | Complete |
-| SVC-01 | Phase 5 | Pending |
-| SVC-02 | Phase 5 | Pending |
-| ALERT-01 | Phase 5 | Pending |
+| SVC-01 | Phase 5 | Complete (05-01; composed end-to-end in bot/main.py per Phase 6.1) |
+| SVC-02 | Phase 5 | Complete (05-02) |
+| ALERT-01 | Phase 5 | Complete (05-03; live delivery UAT-verified 2026-07-02) |
 | ALERT-02 | Phase 5 | Complete |
 | ALERT-03 | Phase 5 | Complete |
-| ALERT-04 | Phase 5 | Pending |
-| DASH-01 | Phase 5 | Pending |
+| ALERT-04 | Phase 5 | Complete (05-03) |
+| DASH-01 | Phase 5 | Complete (05-04; UAT-verified renders offline) |
 | BT-01 | Phase 6 | Complete |
 | BT-02 | Phase 6 | Complete |
 | BT-03 | Phase 6 | Complete |
 | BT-04 | Phase 6 | Complete |
-| SIG-RVOL-TOD | Phase 7 | Planned (07-01, 07-02, 07-05) |
-| RISK-TICK-STOP | Phase 7 | Built (07-01, 07-03) but dead in production — wiring gap tracked as Phase 07.1 |
-| RISK-CIRCUIT | Phase 7 | Planned (07-01, 07-05) |
-| EXIT-MODEL | Phase 7 | Config seam planned (07-04); backtest selection gated on Phase 6 (07-06) |
-| OBT-01 | Phase 9 | Complete |
-| OBT-02 | Phase 9 | Complete |
-| OBT-03 | Phase 9 | Complete |
-| OBT-04 | Phase 9 | Complete |
-| OBT-05 | Phase 9 | Complete |
-| OBT-06 | Phase 9 | Complete |
-| OBT-07 | Phase 9 | Complete |
-| XSR-01 | Phase 10 | Planned |
-| XSR-02 | Phase 10 | Planned |
-| XSR-03 | Phase 10 | Planned |
-| XSR-04 | Phase 10 | Planned |
-| XSR-05 | Phase 10 | Planned |
-| XSR-06 | Phase 10 | Planned (conditional — only if a hypothesis is SUPPORTED) |
+| SIG-RVOL-TOD | Phase 7 | Complete (07-01, 07-02, 07-05) |
+| RISK-TICK-STOP | Phase 7 + Phase 07.1 | Complete — built 07-01/07-03; wiring gap (bot/main.py not passing `gateway=`) closed by Phase 07.1 |
+| RISK-CIRCUIT | Phase 7 | Complete (07-01, 07-05) |
+| EXIT-MODEL | Phase 7 | Config seam complete (07-04) and fail-closed; the evidence-based backtest selection (criterion 2) remains intentionally deferred — no phase has run it |
+| OBT-01 | Phase 9 | Complete (infrastructure) — see note |
+| OBT-02 | Phase 9 | Complete (infrastructure) — see note |
+| OBT-03 | Phase 9 | Complete (infrastructure) — see note |
+| OBT-04 | Phase 9 | Complete (infrastructure) — see note |
+| OBT-05 | Phase 9 | Complete (infrastructure) — see note |
+| OBT-06 | Phase 9 | Complete — hypotheses pre-registered before any run, per design |
+| OBT-07 | Phase 9 | Complete (infrastructure) — see note |
+
+> **Note (Phase 9):** All 7 OBT requirements are satisfied as code/infrastructure — the data layer, Black-Scholes greeks, replay engine, CLI, and report format all exist, are tested, and the full suite is green. But `09-VERIFICATION.md` records `status: gaps_found`: (1) a critical unfixed code-review finding (CR-01 — the engine silently drops positions still open at `--end` from every reported metric, biasing results optimistically) and (2) the data layer's per-contract-bar fetch strategy against Massive's free-tier rate limit projects to ~183 hours for a single hypothesis-arm run (~90x the phase's own budget), so all 3 pre-registered hypotheses report INSUFFICIENT-EVIDENCE — zero real evidence exists for `rules_options.json`. This is a phase-goal gap, not a requirement-level one; see the v1.0 milestone audit for the open recommendation.
+| XSR-01 | Phase 10 | Complete |
+| XSR-02 | Phase 10 | Complete |
+| XSR-03 | Phase 10 | Complete — pre-registration commit `f8439aa` precedes all run artifacts |
+| XSR-04 | Phase 10 | Complete — cache-only held throughout, zero new equity fetches |
+| XSR-05 | Phase 10 | Complete — H1-H8 verdicted; only H2 SUPPORTED (not a profitable arm — both exit variants PF&lt;1) |
+| XSR-06 | Phase 10 | Complete (conditional) — gate mechanically TRIGGERED via H2; operator selected `defer` at the Task 2 checkpoint given both exit variants are losing configurations. No feature branch created, `bot/`/`rules.json`/`rules_options.json` untouched — this is the gate correctly closing on informed judgment, not the "nothing SUPPORTED" case |
+| CB-01 | — (v2) | Deferred — superseded by RISK-CIRCUIT (Phase 7), reframed as realized-only −2R |
+| REP-01 | — (v2) | Deferred — not in current roadmap |
+| ALERT-05 | — (v2) | Deferred — not in current roadmap |
+| REP-02 | — (v2) | Deferred — not in current roadmap |
+| SVC-05 | — (v2) | Deferred — not in current roadmap |
+| ALERT-06 | — (v2) | Deferred — not in current roadmap |
 
 **Coverage:**
 
 - v1 requirements: 47 total (1 CFG + 8 SCAN + 4 SIG + 5 RISK + 5 EXEC + 5 POS + 1 STATE + 5 SAFE + 4 SVC + 4 ALERT + 1 DASH + 4 BT)
-- Mapped to phases: 47 ✓
+- Mapped to phases: 47 ✓ — all 47 confirmed Complete (audited 2026-08-18; see v1.0-MILESTONE-AUDIT.md)
 - Unmapped: 0 ✓
-- Phase 7 strategy-optimization requirements (added 2026-07-03): SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — 4 total, all mapped to Phase 7 ✓
-- Phase 9 options-backtesting requirements (added 2026-08-17): OBT-01..OBT-07 — 7 total, all mapped to Phase 9 ✓
-- Phase 10 external-strategy-research requirements (added 2026-08-18): XSR-01..XSR-06 — 6 total, all mapped to Phase 10 ✓
+- Phase 7 strategy-optimization requirements (added 2026-07-03): SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — 4 total, all mapped to Phase 7 ✓ — all Complete (EXIT-MODEL's evidence-based selection sub-criterion remains deferred, see row above)
+- Phase 9 options-backtesting requirements (added 2026-08-17): OBT-01..OBT-07 — 7 total, all mapped to Phase 9 ✓ — infrastructure Complete; phase goal (real evidence) not yet achieved, see note above
+- Phase 10 external-strategy-research requirements (added 2026-08-18): XSR-01..XSR-06 — 6 total, all mapped to Phase 10 ✓ — all Complete
+- v2 requirements: 6 total, all deferred (not in current roadmap) — listed above for traceability completeness, not phase-mapped
 
 ---
 *Requirements defined: 2026-06-23*
-*Last updated: 2026-06-23 — refined with humbledtrader.com build-guide inputs (Steps 4–13), adapted IBKR→Moomoo: added CFG-01 (rules.json), SCAN-06/07/08 (yfinance data, intraday re-scan, top-20 cap), RISK-05 (daily entry cap), EXEC-05 (order_id fill matching), DASH-01 (HTML dashboard), BT-04 (yfinance backtest data); strengthened SAFE-01 and SIG-01*
+*Last updated: 2026-08-18 — v1.0 milestone audit: corrected 19 stale checkboxes/traceability rows that had never been updated since 2026-06-23 despite Phases 4-7 shipping and passing verification (EXEC-01..05, POS-01..04, SVC-01/02, ALERT-01/04, DASH-01, SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — all confirmed SATISFIED against each phase's own VERIFICATION.md, cross-checked live against current code via the milestone integration checker); marked Phase 10's XSR-01..06 Complete; added the 6 orphaned v2 REQ-IDs to the traceability table; annotated Phase 9's OBT-01..07 with its still-open goal-level gap*
