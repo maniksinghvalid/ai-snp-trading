@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 10-01-PLAN.md (pre-registration: hypotheses doc H1-H8 + arms.json committed f8439aa, SPY regime CSV cached)"
-last_updated: "2026-08-18T19:00:50.736Z"
+stopped_at: Completed 10-02-PLAN.md (indicators/strategies/exits/engine.py + report.py side-aware patch, 1087 tests green)
+last_updated: "2026-08-18T19:33:00.616Z"
 last_activity: 2026-08-18 -- Phase 10 execution started
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 54
-  completed_plans: 50
+  completed_plans: 51
   percent: 83
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 10 (external-strategy-research) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-08-18 -- Phase 10 execution started
 
@@ -75,6 +75,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 09 P04 | 90 minutes | 3 tasks | 4 files |
 | Phase 09-options-backtester P05 | 55min | 3 tasks | 11 files |
 | Phase 10 P01 | 10min | 3 tasks | 5 files |
+| Phase 10-external-strategy-research P02 | 35min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -165,6 +166,8 @@ Recent decisions affecting current work:
 - [Phase 09-options-backtester]: 09-05: root cause corrected -- Massive is a hard 5-req/min server-side tier cap (0.23s raw latency), not a gradual rate; free tier ~25h once for all of SPY, paid tier ~5min with --workers 8; all 3 hypotheses remain INSUFFICIENT-EVIDENCE (no live fetch run in this offline-only plan)
 - [Phase 10]: 10-01: pre-registration doc + arms.json committed in ONE commit (f8439aa) before any experimental run artifact -- plan-mandated falsifiability discipline, not per-task commits — T-10-01 threat mitigation requires provable git ordering: doc+arms.json commit must precede backtester/results/experimental/
 - [Phase 10]: 10-01: SPY regime series fetched via bot.scanner.fetcher._download_batch (yfinance), zero Massive requests, cached to gitignored backtester/cache/SPY_1d_regime.csv with sha256 provenance recorded in the committed doc
+- [Phase 10-external-strategy-research]: 10-02: engine.py imports swing_low_2_2 directly and precomputes the swing pivot per bar, passing it into exits.py as new_swing_low/new_swing_high (mirrors bot.position.manager's compute-then-pass-in convention; satisfies the plan's key_link and the exactly-2-from-bot-imports grep) while exits.py keeps a bars-based fallback
+- [Phase 10-external-strategy-research]: 10-02: strategies.py signal functions compute indicators internally per call (not pre-attached by build_frame) so they are independently testable/prefix-invariant before engine.py exists in the same plan
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -202,6 +205,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-18T19:00:50.725Z
-Stopped at: Completed 10-01-PLAN.md (pre-registration: hypotheses doc H1-H8 + arms.json committed f8439aa, SPY regime CSV cached)
+Last session: 2026-08-18T19:33:00.611Z
+Stopped at: Completed 10-02-PLAN.md (indicators/strategies/exits/engine.py + report.py side-aware patch, 1087 tests green)
 Resume file: None
