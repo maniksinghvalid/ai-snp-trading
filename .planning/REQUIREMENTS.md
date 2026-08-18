@@ -109,6 +109,17 @@ Added 2026-08-17. Offline evidence for the Phase 8 `tasty_credit_spreads` strate
 - [x] **OBT-06**: Hypotheses (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) pre-registered in a committed doc BEFORE the first real-data run, with an evidence floor (min trades) and an out-of-sample window
 - [x] **OBT-07**: Output = per-trade log + summary metrics (win rate, PF, avg credit captured, max DD, Sortino) reusing `backtester/report.py` conventions
 
+### External Strategy Research (Phase 10)
+
+Added 2026-08-18. Backtest-only research comparing two externally-sourced (Reddit) day-trading strategies against Trend Join Long (TJL, validated no-edge 2026-08-13) and candidate improvements, using the Phase 6 backtester conventions. Does not lift the "multiple strategies" / "short selling" out-of-scope items for v1 production — those stay excluded unless a specific hypothesis is SUPPORTED and a separate follow-up phase is approved.
+
+- [ ] **XSR-01**: External strategies are extracted into explicit rules (entry/exit/stops/sizing/timeframe), separated from assumptions/interpretation, with credibility assessed (anecdotal evidence, no verified P&L, survivorship, sample size) — captured in a committed doc
+- [ ] **XSR-02**: A backtest-only research package (`backtester/experimental/`) implements the automatable cores of both external strategies as pluggable, tested modules reusing `SimulatedBarFeed`/`report.py` conventions (cache-keyed data, N+1-open fills, no look-ahead), without modifying `bot/` or `rules.json`
+- [ ] **XSR-03**: Hypotheses (external strategies vs TJL vs candidate improvements) are pre-registered in a committed doc — universe, IS/OOS windows, evidence floor (≥25 closed trades/arm per window), metric of record — before any real-data run (git history proves ordering), matching the Phase 9 OBT-06 pattern
+- [ ] **XSR-04**: Backtests run cache-only against already-cached windows/universe (zero new Massive requests; the Phase 9 warm-cache run is undisturbed) with realistic costs (commission + slippage) and both standard and extended metrics (CAGR, Sharpe, Sortino, max DD, PF, win rate, avg trade $, expectancy, exposure, bootstrap CI)
+- [ ] **XSR-05**: Each hypothesis is reported as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with numbers; `rules.json`/`rules_options.json` are unchanged as part of this phase regardless of verdict
+- [ ] **XSR-06**: If a hypothesis is SUPPORTED in both IS and OOS, the exact production integration (default-off, schema-valid) is implemented and tested on a separate feature branch, not merged to `develop` as part of this phase
+
 ## v2 Requirements
 
 Acknowledged but deferred — not in the current roadmap.
@@ -200,6 +211,12 @@ Which phases cover which requirements.
 | OBT-05 | Phase 9 | Complete |
 | OBT-06 | Phase 9 | Complete |
 | OBT-07 | Phase 9 | Complete |
+| XSR-01 | Phase 10 | Planned |
+| XSR-02 | Phase 10 | Planned |
+| XSR-03 | Phase 10 | Planned |
+| XSR-04 | Phase 10 | Planned |
+| XSR-05 | Phase 10 | Planned |
+| XSR-06 | Phase 10 | Planned (conditional — only if a hypothesis is SUPPORTED) |
 
 **Coverage:**
 
@@ -208,6 +225,7 @@ Which phases cover which requirements.
 - Unmapped: 0 ✓
 - Phase 7 strategy-optimization requirements (added 2026-07-03): SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — 4 total, all mapped to Phase 7 ✓
 - Phase 9 options-backtesting requirements (added 2026-08-17): OBT-01..OBT-07 — 7 total, all mapped to Phase 9 ✓
+- Phase 10 external-strategy-research requirements (added 2026-08-18): XSR-01..XSR-06 — 6 total, all mapped to Phase 10 ✓
 
 ---
 *Requirements defined: 2026-06-23*
