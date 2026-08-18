@@ -30,6 +30,7 @@ directly.
 Exports: WINDOWS, MEGA24, COST_PROFILES, build_arg_parser, main
 """
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -275,6 +276,12 @@ def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
+    if args.tjl_regime:
+        if not args.baseline:
+            print("[ERROR] --tjl-regime requires --baseline <dir>", file=sys.stderr)
+            return 1
+        return _run_tjl_regime(args)
+
     try:
         start, end = _resolve_window(args)
         symbols = (
@@ -309,6 +316,75 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
+
+
+def _load_baseline_trades(baseline_dir: str) -> list:
+    """Read <baseline_dir>/trades.csv, coercing the numeric columns the CSV
+    round-trip loses (report.compute_metrics does arithmetic on them)."""
+    with open(os.path.join(baseline_dir, "trades.csv"), newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        row["entry_price"] = float(row["entry_price"])
+        row["exit_price"] = float(row["exit_price"])
+        row["r_multiple"] = float(row["r_multiple"])
+        row["quantity"] = int(row["quantity"])
+    return rows
+
+
+def _run_tjl_regime(args) -> int:
+    """Day-filter the existing TJL baseline against the weekly SPY regime gate
+    -- never re-runs the TJL replay harness (CONTEXT.md hard constraint).
+    Constructs no SimulatedBarFeed/MassiveDataSource; reads <baseline>/trades.csv
+    READ-ONLY and writes only under --out."""
+    trades_path = os.path.join(args.baseline, "trades.csv")
+    if not os.path.exists(trades_path):
+        print(f"[ERROR] baseline trades.csv not found: {trades_path}", file=sys.stderr)
+        return 1
+
+    try:
+        rows = _load_baseline_trades(args.baseline)
+    except Exception as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    # opened_at carries a "-04:00"/"-05:00" offset suffix (10-RESEARCH Pitfall
+    # 5) -- day extraction is always opened_at[:10] string slicing, never a
+    # datetime parse.
+    days = sorted(r["opened_at"][:10] for r in rows) if rows else []
+    start = days[0] if days else None
+    end = days[-1] if days else None
+
+    write_report(
+        rows, os.path.join(args.out, "tjl_base"), starting_capital=100_000.0,
+        commission_per_share=0.005, start=start, end=end,
+        extra_assumptions={"source_baseline": args.baseline, "regime_csv": args.regime_csv},
+    )
+
+    labels = _load_regime_labels(args.regime_csv)
+    from backtester.experimental.indicators import regime_for_day
+
+    kept, dropped = [], 0
+    for row in rows:
+        day = row["opened_at"][:10]
+        if regime_for_day(labels, day) == "bear":
+            dropped += 1
+            continue
+        kept.append(row)
+
+    write_report(
+        kept, os.path.join(args.out, "tjl_regime"), starting_capital=100_000.0,
+        commission_per_share=0.005, start=start, end=end,
+        extra_assumptions={
+            "source_baseline": args.baseline, "regime_csv": args.regime_csv,
+            "filtered_out": dropped,
+            # TJL is long-only with no cross-day state: an exact day-filter,
+            # never the engine's "neutral halves qty" rule.
+            "regime_rule": "bear_days_excluded_only",
+        },
+    )
+
+    print(f"tjl_base: trades={len(rows)}  tjl_regime: trades={len(kept)} filtered_out={dropped}")
+    return 0
 
 
 def _run_arms(args, start, end, symbols, defaults, arms, overrides, commission, slippage,

@@ -14,6 +14,7 @@ in this file (parallelism contract, 10-03-PLAN.md).
 
 Plain def test_* functions, no pytest markers (project convention).
 """
+import csv
 import json
 
 import pandas as pd
@@ -324,3 +325,93 @@ def test_zero_trade_arm_still_writes_all_four_files_and_main_returns_0(monkeypat
     with open(arm_dir / "summary.json", encoding="utf-8") as f:
         summary = json.load(f)
     assert summary["total_trades"] == 0
+
+
+# ============================================================
+# Task 3: --tjl-regime mode
+# ============================================================
+
+_BASELINE_CSV_HEADER = "code,opened_at,entry_price,exit_price,quantity,exit_reason,r_multiple,closed_at\n"
+_BASELINE_CSV_ROWS = (
+    "US.AAPL,2024-09-03 10:00:00-04:00,100.0,101.0,10,force_close,0.5,2024-09-03 15:51:00-04:00\n"
+    "US.MSFT,2024-09-03 11:00:00-04:00,50.0,49.0,20,stop,-1.0,2024-09-03 11:30:00-04:00\n"
+    "US.NVDA,2024-09-10 10:00:00-04:00,200.0,190.0,5,stop,-1.0,2024-09-10 10:30:00-04:00\n"
+)
+
+# regime_for_day returns the last label strictly BEFORE the target day: both
+# 2024-09-03 rows resolve to "bull" (2024-09-02's label), the 2024-09-10 row
+# resolves to "bear" (2024-09-06's label).
+_REGIME_LABELS = pd.Series(
+    ["bull", "bear"], index=pd.to_datetime(["2024-09-02", "2024-09-06"])
+)
+
+
+def _write_baseline(tmp_path):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    with open(baseline / "trades.csv", "w", newline="", encoding="utf-8") as f:
+        f.write(_BASELINE_CSV_HEADER)
+        f.write(_BASELINE_CSV_ROWS)
+    return baseline
+
+
+def test_tjl_regime_writes_base_and_regime_variants(monkeypatch, tmp_path):
+    baseline = _write_baseline(tmp_path)
+    monkeypatch.setattr(run_mod, "_load_regime_labels", lambda path: _REGIME_LABELS)
+
+    out = tmp_path / "out"
+    rc = run_mod.main(["--tjl-regime", "--baseline", str(baseline), "--out", str(out)])
+    assert rc == 0
+
+    with open(out / "tjl_base" / "summary.json", encoding="utf-8") as f:
+        base_summary = json.load(f)
+    assert base_summary["total_trades"] == 3
+
+    with open(out / "tjl_regime" / "trades.csv", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    assert {r["code"] for r in rows} == {"US.AAPL", "US.MSFT"}
+
+    with open(out / "tjl_regime" / "summary.json", encoding="utf-8") as f:
+        regime_summary = json.load(f)
+    assert regime_summary["assumptions"]["filtered_out"] == 1
+    assert regime_summary["assumptions"]["regime_rule"] == "bear_days_excluded_only"
+    assert regime_summary["assumptions"]["source_baseline"] == str(baseline)
+
+
+def test_tjl_regime_missing_baseline_trades_csv_exits_1(tmp_path, capsys):
+    missing_dir = tmp_path / "nope"
+    rc = run_mod.main(
+        ["--tjl-regime", "--baseline", str(missing_dir), "--out", str(tmp_path / "out")]
+    )
+    assert rc == 1
+    assert str(missing_dir) in capsys.readouterr().err
+
+
+def test_tjl_regime_without_baseline_exits_1(tmp_path, capsys):
+    rc = run_mod.main(["--tjl-regime", "--out", str(tmp_path / "out")])
+    assert rc == 1
+    assert "--baseline" in capsys.readouterr().err
+
+
+def test_tjl_regime_constructs_no_feed_or_massive_source(monkeypatch, tmp_path):
+    baseline = _write_baseline(tmp_path)
+
+    def _raise(*a, **kw):
+        raise AssertionError("must not be constructed in --tjl-regime mode")
+
+    monkeypatch.setattr(run_mod, "SimulatedBarFeed", _raise)
+    monkeypatch.setattr(run_mod, "MassiveDataSource", _raise)
+    monkeypatch.setattr(run_mod, "_load_regime_labels", lambda path: _REGIME_LABELS)
+
+    rc = run_mod.main(
+        ["--tjl-regime", "--baseline", str(baseline), "--out", str(tmp_path / "out")]
+    )
+    assert rc == 0
+
+
+def test_run_py_never_invokes_backtest_harness_or_fromisoformat():
+    with open("backtester/experimental/run.py", encoding="utf-8") as f:
+        text = f.read()
+    assert "BacktestHarness" not in text
+    assert "fromisoformat" not in text
