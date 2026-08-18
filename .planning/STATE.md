@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 10-03-PLAN.md (backtester/experimental/run.py cache-only CLI + tests, 1114 tests green)
-last_updated: "2026-08-18T19:50:52.004Z"
+stopped_at: "Completed 10-04-PLAN.md (run matrix executed: 130 arm-run summaries + 15 intrabar + 22 TJL regime re-reports, cache-only proven, warm-cache-pool untouched)"
+last_updated: "2026-08-18T20:15:45.007Z"
 last_activity: 2026-08-18 -- Phase 10 execution started
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 54
-  completed_plans: 52
+  completed_plans: 53
   percent: 83
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 10 (external-strategy-research) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-08-18 -- Phase 10 execution started
 
@@ -77,6 +77,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 10 P01 | 10min | 3 tasks | 5 files |
 | Phase 10-external-strategy-research P02 | 35min | 3 tasks | 10 files |
 | Phase 10-external-strategy-research P03 | 25min | 3 tasks | 2 files |
+| Phase 10-external-strategy-research P04 | 20min | 3 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -171,6 +172,8 @@ Recent decisions affecting current work:
 - [Phase 10-external-strategy-research]: 10-02: strategies.py signal functions compute indicators internally per call (not pre-attached by build_frame) so they are independently testable/prefix-invariant before engine.py exists in the same plan
 - [Phase ?]: 10-03: run.py frame cache in _run_arms keyed by code alone (not a params signature) -- build_frame(feed, code, params) verified to not consume params in 10-02's implementation, so code-only caching is maximally efficient and provably correct
 - [Phase ?]: 10-03: run.py --tjl-regime is an early return in main() before window resolution/cache guard -- reads baseline trades.csv read-only, day-filters via regime_for_day(opened_at[:10]) string slicing only, never invokes the TJL replay harness
+- [Phase ?]: 10-04: No per-task git commits — all run artifacts under backtester/results/experimental/ are gitignored by plan design; only the final metadata commit lands (mirrors 10-01 precedent)
+- [Phase ?]: 10-04: cache-mtime post-run check excludes Phase 9 warm-cache-pool's own O_*-prefixed option-contract files (disjoint symbol space) to correctly isolate this plan's cache-only compliance — 0 new equity cache files confirmed
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -208,6 +211,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-18T19:50:51.999Z
-Stopped at: Completed 10-03-PLAN.md (backtester/experimental/run.py cache-only CLI + tests, 1114 tests green)
+Last session: 2026-08-18T20:15:45.002Z
+Stopped at: Completed 10-04-PLAN.md (run matrix executed: 130 arm-run summaries + 15 intrabar + 22 TJL regime re-reports, cache-only proven, warm-cache-pool untouched)
 Resume file: None

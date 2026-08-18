@@ -278,7 +278,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
-| 10. External Strategy Research | 3/6 | In Progress|  |
+| 10. External Strategy Research | 4/6 | In Progress|  |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -411,7 +411,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 10-04-PLAN.md — Pre-flight (cache/warm-pool/pre-registration/scope) → cache-only run matrix (15 arms × 5 windows × base/stress/zero + intrabar) → 11 TJL day-filter re-reports + post-run no-fetch proof [Wave 3]
+- [x] 10-04-PLAN.md — Pre-flight (cache/warm-pool/pre-registration/scope) → cache-only run matrix (15 arms × 5 windows × base/stress/zero + intrabar) → 11 TJL day-filter re-reports + post-run no-fetch proof [Wave 3]
 
 **Wave 4** *(blocked on Wave 3)*
 
