@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "frozen": "2026-08-18",
+  "defaults": {
+    "ext2": {
+      "sma_period": 10,
+      "macd": [12, 26, 9],
+      "confirm_bars": 6,
+      "entry_start": "09:35",
+      "entry_end": "15:30",
+      "stop_basis": "session",
+      "atr_period": 14,
+      "exit_model": "pct_ladder",
+      "sizing": "risk1pct",
+      "regime_gate": "none",
+      "max_entries_per_symbol_per_day": null,
+      "trend_lock": false,
+      "max_concurrent": 5,
+      "max_entries_per_day": 5,
+      "daily_breaker_usd": -2000
+    },
+    "orb": {
+      "or_bars": 6,
+      "entry_start": "10:00",
+      "entry_end": "12:00",
+      "htf_ema_span": 100,
+      "max_or_height_pct": 3.0,
+      "stop_basis": "or",
+      "exit_model": "partial_be_trail",
+      "sizing": "risk1pct",
+      "regime_gate": "none",
+      "max_entries_per_symbol_per_day": 1,
+      "trend_lock": true,
+      "max_concurrent": 5,
+      "max_entries_per_day": 5,
+      "daily_breaker_usd": -2000
+    },
+    "vwap_pb": {
+      "entry_start": "10:00",
+      "entry_end": "15:00",
+      "vol_mult": 1.2,
+      "vol_lookback": 20,
+      "stop_pad_pct": 0.1,
+      "htf_ema_span": 100,
+      "exit_model": "partial_be_trail",
+      "sizing": "risk1pct",
+      "regime_gate": "none",
+      "max_entries_per_symbol_per_day": 2,
+      "trend_lock": false,
+      "max_concurrent": 5,
+      "max_entries_per_day": 5,
+      "daily_breaker_usd": -2000
+    }
+  },
+  "arms": [
+    {
+      "name": "ext2_base",
+      "strategy": "ext2",
+      "params": {},
+      "purpose": "Ext#2 (SMA10+MACD) as-implemented, no overrides — H1 baseline"
+    },
+    {
+      "name": "ext2_n3",
+      "strategy": "ext2",
+      "params": {"confirm_bars": 3},
+      "purpose": "Tighter cross-confirmation window sensitivity"
+    },
+    {
+      "name": "ext2_n12",
+      "strategy": "ext2",
+      "params": {"confirm_bars": 12},
+      "purpose": "Looser cross-confirmation window sensitivity"
+    },
+    {
+      "name": "ext2_w0945",
+      "strategy": "ext2",
+      "params": {"entry_start": "09:45"},
+      "purpose": "OP's '9:45 rule' entry-window-start sensitivity"
+    },
+    {
+      "name": "ext2_stop_pd",
+      "strategy": "ext2",
+      "params": {"stop_basis": "prev_day"},
+      "purpose": "Stop-basis sensitivity: prior-day low/high instead of session"
+    },
+    {
+      "name": "ext2_stop_atr2",
+      "strategy": "ext2",
+      "params": {"stop_basis": "atr2"},
+      "purpose": "Stop-basis sensitivity: close +/- 2*ATR14 instead of session"
+    },
+    {
+      "name": "ext2_notional10",
+      "strategy": "ext2",
+      "params": {"sizing": "notional10"},
+      "purpose": "OP's stated notional sizing style vs risk1pct"
+    },
+    {
+      "name": "ext2_at_exit",
+      "strategy": "ext2",
+      "params": {"exit_model": "partial_be_trail"},
+      "purpose": "H2 — AutoTrader partial_be_trail exit vs Ext#2's pct_ladder on the same entries"
+    },
+    {
+      "name": "ext2_regime",
+      "strategy": "ext2",
+      "params": {"regime_gate": "weekly_spy"},
+      "purpose": "H3 — weekly SPY regime gate applied to Ext#2 entries"
+    },
+    {
+      "name": "ext2_uncapped",
+      "strategy": "ext2",
+      "params": {"max_concurrent": null, "max_entries_per_day": null},
+      "diagnostic": true,
+      "purpose": "Diagnostic only: lifts the 5-concurrent/5-per-day caps to quantify the cap-priority artefact (not a hypothesis)"
+    },
+    {
+      "name": "orb30_base",
+      "strategy": "orb",
+      "params": {},
+      "purpose": "H4 — ORB-30 + HTF-EMA100 + VWAP trend core, no overrides"
+    },
+    {
+      "name": "orb30_fixed2r",
+      "strategy": "orb",
+      "params": {"exit_model": "fixed_2r"},
+      "purpose": "H5 — fixed-2R exit vs partial_be_trail for ORB"
+    },
+    {
+      "name": "orb5",
+      "strategy": "orb",
+      "params": {"or_bars": 1},
+      "purpose": "Opening-range-length sensitivity: 5-minute OR"
+    },
+    {
+      "name": "orb15",
+      "strategy": "orb",
+      "params": {"or_bars": 3},
+      "purpose": "Opening-range-length sensitivity: 15-minute OR"
+    },
+    {
+      "name": "vwap_pb_base",
+      "strategy": "vwap_pb",
+      "params": {},
+      "purpose": "H6 — VWAP pullback-bounce entry, no overrides"
+    }
+  ]
+}
