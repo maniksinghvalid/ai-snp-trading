@@ -302,7 +302,91 @@ def main(argv=None) -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
-    # Task 2 (run loop) lands here.
+    try:
+        return _run_arms(
+            args, start, end, symbols, defaults, arms, overrides, commission, slippage, massive,
+        )
+    except Exception as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_arms(args, start, end, symbols, defaults, arms, overrides, commission, slippage,
+              massive) -> int:
+    """One shared feed + one shared day-grouping pass, every selected arm run
+    against them (10-RESEARCH Pitfall 6). Function-local imports of
+    backtester.experimental.{engine,strategies} only (parallelism contract)."""
+    from backtester.run import _trading_days
+    from backtester.experimental.engine import build_frame, group_by_day
+    from backtester.experimental.strategies import ext2_signals, orb_signals, vwap_pb_signals
+
+    strategy_fns = {"ext2": ext2_signals, "orb": orb_signals, "vwap_pb": vwap_pb_signals}
+
+    feed = SimulatedBarFeed(symbols, start, end, source="massive", massive=massive)
+    days = _trading_days(start, end)
+    day_groups = group_by_day(feed, days)
+
+    resolved_arms = [(arm, _resolve_params(defaults, arm, overrides)) for arm in arms]
+
+    regime_labels = None
+    if any(p.get("regime_gate") == "weekly_spy" for _, p in resolved_arms):
+        regime_labels = _load_regime_labels(args.regime_csv)
+
+    window_label = args.window or f"{start}_{end}"
+    git_sha = _git_sha()
+
+    # build_frame(feed, code, params) does not consume `params` today -- cache
+    # by code alone gives every arm maximal frame reuse without ever risking a
+    # stale frame for a future params-sensitive build_frame.
+    frame_cache: dict = {}
+
+    for arm, params in resolved_arms:
+        frames = {}
+        for code in symbols:
+            if code not in frame_cache:
+                frame_cache[code] = build_frame(feed, code, params)
+            frame = frame_cache[code]
+            if not frame.empty:
+                frames[code] = frame
+
+        signal_fn = strategy_fns[arm["strategy"]]
+        signals = {code: signal_fn(frame, params) for code, frame in frames.items()}
+
+        regime_fn = None
+        if params.get("regime_gate") == "weekly_spy" and regime_labels is not None:
+            from backtester.experimental.indicators import regime_for_day
+
+            def regime_fn(day, _labels=regime_labels):
+                return regime_for_day(_labels, day)
+
+        engine = _build_engine(frames, signals, params, feed, slippage, args.stop_fill, regime_fn)
+        trades = engine.run(day_groups)
+
+        out_dir = os.path.join(args.out, window_label, args.cost, arm["name"])
+        metrics = write_report(
+            trades, out_dir, starting_capital=100_000.0, commission_per_share=commission,
+            start=start, end=end,
+            extra_assumptions={
+                "slippage_per_share_usd": slippage, "cost_profile": args.cost,
+                "stop_fill": args.stop_fill, "arm": arm["name"], "strategy": arm["strategy"],
+                "window": window_label, "gap_through_entries": engine.gap_through_entries,
+            },
+            extra_fields=["side", "strategy", "arm", "n_legs", "regime"],
+        )
+
+        params_doc = {
+            "arm": arm["name"], "strategy": arm["strategy"], "params": params,
+            "window": window_label, "start": start, "end": end,
+            "cost_profile": args.cost, "commission_per_share_usd": commission,
+            "slippage_per_share_usd": slippage, "stop_fill": args.stop_fill,
+            "symbols": symbols, "git_sha": git_sha,
+            "gap_through_entries": engine.gap_through_entries,
+        }
+        with open(os.path.join(out_dir, "params.json"), "w", encoding="utf-8") as f:
+            json.dump(params_doc, f, indent=2)
+
+        print(f"{arm['name']}: trades={metrics['total_trades']} profit_factor={metrics['profit_factor']}")
+
     return 0
 
 

@@ -14,6 +14,10 @@ in this file (parallelism contract, 10-03-PLAN.md).
 
 Plain def test_* functions, no pytest markers (project convention).
 """
+import json
+
+import pandas as pd
+
 import backtester.experimental.run as run_mod
 
 _ARMS_PATH = "backtester/experimental/arms.json"
@@ -164,3 +168,159 @@ def test_git_sha_never_raises(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _boom)
     assert run_mod._git_sha() == "unknown"
+
+
+# ============================================================
+# Task 2: per-window arm loop
+# ============================================================
+
+_CANNED_TRADES = [
+    {
+        "code": "US.AAPL", "opened_at": "2024-09-03 10:00:00", "entry_price": 100.0,
+        "exit_price": 101.0, "quantity": 10, "exit_reason": "force_close",
+        "r_multiple": 0.5, "closed_at": "2024-09-03 15:51:00", "side": "long",
+        "n_legs": 1,
+    },
+    {
+        "code": "US.MSFT", "opened_at": "2024-09-03 10:05:00", "entry_price": 50.0,
+        "exit_price": 49.0, "quantity": 20, "exit_reason": "stop",
+        "r_multiple": -1.0, "closed_at": "2024-09-03 11:00:00", "side": "short",
+        "n_legs": 1,
+    },
+]
+
+
+class _CannedEngine:
+    gap_through_entries = 3
+
+    def __init__(self, trades):
+        self._trades = trades
+
+    def run(self, days):
+        return self._trades
+
+
+def _fake_build_engine_factory(trades):
+    def _fake(frames, signals, params, feed, slippage, stop_fill, regime_fn=None):
+        rows = []
+        for t in trades:
+            row = dict(t)
+            row["strategy"] = params.get("strategy")
+            row["arm"] = params.get("arm")
+            row["regime"] = "none"
+            rows.append(row)
+        return _CannedEngine(rows)
+    return _fake
+
+
+def _patch_arm_loop_seams(monkeypatch, group_calls=None, feed_calls=None, trades=None):
+    """Bypasses the cache guard, patches the feed constructor + group_by_day +
+    build_frame + every strategy signal fn + _build_engine so the arm loop
+    runs with zero network access and zero dependency on 10-02's real
+    frame/signal shapes."""
+    monkeypatch.setattr(run_mod, "_assert_cache", lambda *a, **kw: True)
+    monkeypatch.setattr(run_mod, "MassiveDataSource", lambda *a, **kw: object())
+
+    class _FakeFeed:
+        def __init__(self, *a, **kw):
+            if feed_calls is not None:
+                feed_calls["n"] += 1
+
+        def next_bar(self, code, after):
+            return None
+
+    monkeypatch.setattr(run_mod, "SimulatedBarFeed", _FakeFeed)
+
+    def _fake_group_by_day(feed, days):
+        if group_calls is not None:
+            group_calls["n"] += 1
+        return {d: [] for d in days}
+
+    monkeypatch.setattr("backtester.experimental.engine.group_by_day", _fake_group_by_day)
+    monkeypatch.setattr(
+        "backtester.experimental.engine.build_frame",
+        lambda feed, code, params: pd.DataFrame({"close": [1.0, 2.0]}),
+    )
+    fake_signals = lambda frame, p: frame
+    monkeypatch.setattr("backtester.experimental.strategies.ext2_signals", fake_signals)
+    monkeypatch.setattr("backtester.experimental.strategies.orb_signals", fake_signals)
+    monkeypatch.setattr("backtester.experimental.strategies.vwap_pb_signals", fake_signals)
+
+    monkeypatch.setattr(run_mod, "_build_engine", _fake_build_engine_factory(trades if trades is not None else _CANNED_TRADES))
+
+
+def test_multi_arm_run_one_feed_one_grouping_four_files_per_arm(monkeypatch, tmp_path):
+    group_calls, feed_calls = {"n": 0}, {"n": 0}
+    _patch_arm_loop_seams(monkeypatch, group_calls=group_calls, feed_calls=feed_calls)
+
+    out = tmp_path / "out"
+    rc = run_mod.main([
+        "--window", "C", "--only", "ext2_base,ext2_n3,ext2_n12",
+        "--arms", _ARMS_PATH, "--out", str(out),
+    ])
+    assert rc == 0
+    assert feed_calls["n"] == 1
+    assert group_calls["n"] == 1
+
+    for arm_name in ("ext2_base", "ext2_n3", "ext2_n12"):
+        arm_dir = out / "C" / "base" / arm_name
+        for fname in ("trades.csv", "equity_curve.csv", "summary.json", "params.json"):
+            assert (arm_dir / fname).exists(), f"{arm_dir / fname} missing"
+
+
+def test_trades_csv_header_end_to_end(monkeypatch, tmp_path):
+    _patch_arm_loop_seams(monkeypatch)
+    out = tmp_path / "out"
+    rc = run_mod.main([
+        "--window", "C", "--only", "ext2_base", "--arms", _ARMS_PATH, "--out", str(out),
+    ])
+    assert rc == 0
+    with open(out / "C" / "base" / "ext2_base" / "trades.csv", newline="", encoding="utf-8") as f:
+        header = f.readline().strip()
+    assert header == (
+        "code,opened_at,entry_price,exit_price,quantity,exit_reason,r_multiple,"
+        "closed_at,side,strategy,arm,n_legs,regime"
+    )
+
+
+def test_params_json_has_all_required_keys(monkeypatch, tmp_path):
+    _patch_arm_loop_seams(monkeypatch)
+    out = tmp_path / "out"
+    rc = run_mod.main([
+        "--window", "C", "--only", "ext2_base", "--cost", "stress", "--stop-fill", "intrabar",
+        "--arms", _ARMS_PATH, "--out", str(out),
+    ])
+    assert rc == 0
+    with open(out / "C" / "stress" / "ext2_base" / "params.json", encoding="utf-8") as f:
+        params_doc = json.load(f)
+    for key in (
+        "arm", "strategy", "params", "window", "start", "end", "cost_profile",
+        "commission_per_share_usd", "slippage_per_share_usd", "stop_fill",
+        "symbols", "git_sha", "gap_through_entries",
+    ):
+        assert key in params_doc, key
+    assert params_doc["arm"] == "ext2_base"
+    assert params_doc["strategy"] == "ext2"
+    assert params_doc["window"] == "C"
+    assert params_doc["start"] == "2024-09-02"
+    assert params_doc["end"] == "2024-12-31"
+    assert params_doc["cost_profile"] == "stress"
+    assert params_doc["commission_per_share_usd"] == 0.005
+    assert params_doc["slippage_per_share_usd"] == 0.05
+    assert params_doc["stop_fill"] == "intrabar"
+    assert params_doc["gap_through_entries"] == 3
+
+
+def test_zero_trade_arm_still_writes_all_four_files_and_main_returns_0(monkeypatch, tmp_path):
+    _patch_arm_loop_seams(monkeypatch, trades=[])
+    out = tmp_path / "out"
+    rc = run_mod.main([
+        "--window", "C", "--only", "ext2_base", "--arms", _ARMS_PATH, "--out", str(out),
+    ])
+    assert rc == 0
+    arm_dir = out / "C" / "base" / "ext2_base"
+    for fname in ("trades.csv", "equity_curve.csv", "summary.json", "params.json"):
+        assert (arm_dir / fname).exists()
+    with open(arm_dir / "summary.json", encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["total_trades"] == 0
