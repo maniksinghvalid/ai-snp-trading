@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 10-02-PLAN.md (indicators/strategies/exits/engine.py + report.py side-aware patch, 1087 tests green)
-last_updated: "2026-08-18T19:33:00.616Z"
+stopped_at: Completed 10-03-PLAN.md (backtester/experimental/run.py cache-only CLI + tests, 1114 tests green)
+last_updated: "2026-08-18T19:50:52.004Z"
 last_activity: 2026-08-18 -- Phase 10 execution started
 progress:
   total_phases: 12
   completed_phases: 10
   total_plans: 54
-  completed_plans: 51
+  completed_plans: 52
   percent: 83
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 10 (external-strategy-research) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-08-18 -- Phase 10 execution started
 
@@ -76,6 +76,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 09-options-backtester P05 | 55min | 3 tasks | 11 files |
 | Phase 10 P01 | 10min | 3 tasks | 5 files |
 | Phase 10-external-strategy-research P02 | 35min | 3 tasks | 10 files |
+| Phase 10-external-strategy-research P03 | 25min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -168,6 +169,8 @@ Recent decisions affecting current work:
 - [Phase 10]: 10-01: SPY regime series fetched via bot.scanner.fetcher._download_batch (yfinance), zero Massive requests, cached to gitignored backtester/cache/SPY_1d_regime.csv with sha256 provenance recorded in the committed doc
 - [Phase 10-external-strategy-research]: 10-02: engine.py imports swing_low_2_2 directly and precomputes the swing pivot per bar, passing it into exits.py as new_swing_low/new_swing_high (mirrors bot.position.manager's compute-then-pass-in convention; satisfies the plan's key_link and the exactly-2-from-bot-imports grep) while exits.py keeps a bars-based fallback
 - [Phase 10-external-strategy-research]: 10-02: strategies.py signal functions compute indicators internally per call (not pre-attached by build_frame) so they are independently testable/prefix-invariant before engine.py exists in the same plan
+- [Phase ?]: 10-03: run.py frame cache in _run_arms keyed by code alone (not a params signature) -- build_frame(feed, code, params) verified to not consume params in 10-02's implementation, so code-only caching is maximally efficient and provably correct
+- [Phase ?]: 10-03: run.py --tjl-regime is an early return in main() before window resolution/cache guard -- reads baseline trades.csv read-only, day-filters via regime_for_day(opened_at[:10]) string slicing only, never invokes the TJL replay harness
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -205,6 +208,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-18T19:33:00.611Z
-Stopped at: Completed 10-02-PLAN.md (indicators/strategies/exits/engine.py + report.py side-aware patch, 1087 tests green)
+Last session: 2026-08-18T19:50:51.999Z
+Stopped at: Completed 10-03-PLAN.md (backtester/experimental/run.py cache-only CLI + tests, 1114 tests green)
 Resume file: None
