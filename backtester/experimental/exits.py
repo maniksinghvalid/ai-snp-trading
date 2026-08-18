@@ -117,14 +117,24 @@ def partial_be_trail(position: dict, bar: dict, params: dict = None) -> list:
         return []
 
     if phase in ("breakeven", "trailing"):
-        bars = position.get("bars", [])[-50:]
+        # The caller (Engine) may pass an already-computed pivot ("new_swing_low"/
+        # "new_swing_high" -- mirrors bot.position.manager's own
+        # _compute_swing_low-then-pass-in convention); fall back to computing it
+        # from "bars" directly so this function stays independently testable
+        # without an engine (Task 2 predates engine.py).
         if position["side"] == "long":
-            pivot = swing_low_2_2([b["low"] for b in bars])
+            pivot = position.get("new_swing_low")
+            if pivot is None:
+                bars = position.get("bars", [])[-50:]
+                pivot = swing_low_2_2([b["low"] for b in bars])
             if pivot is not None and pivot > position["stop"]:
                 position["stop"] = pivot
                 position["state"] = "trailing"
         else:
-            pivot = swing_high_2_2([b["high"] for b in bars])
+            pivot = position.get("new_swing_high")
+            if pivot is None:
+                bars = position.get("bars", [])[-50:]
+                pivot = swing_high_2_2([b["high"] for b in bars])
             if pivot is not None and pivot < position["stop"]:
                 position["stop"] = pivot
                 position["state"] = "trailing"
