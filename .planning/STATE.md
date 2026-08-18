@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: "Phase 9: 5/5 plans executed incl. gap-closure 09-05; VERIFICATION gaps 2+3 closed in code, gap 1 (hypothesis evidence) pending background run warm-cache-pool (started 2026-08-17, Massive free tier 5 req/min) — re-verify after the 12 arm runs"
-last_updated: "2026-08-17T20:11:24.556Z"
-last_activity: 2026-08-17 -- Phase 9 built (1038 tests); background cache-warming run started for hypothesis evidence
+status: executing
+stopped_at: "Completed 10-01-PLAN.md (pre-registration: hypotheses doc H1-H8 + arms.json committed f8439aa, SPY regime CSV cached)"
+last_updated: "2026-08-18T19:00:50.736Z"
+last_activity: 2026-08-18 -- Phase 10 execution started
 progress:
-  total_phases: 11
+  total_phases: 12
   completed_phases: 10
-  total_plans: 48
-  completed_plans: 49
-  percent: 91
+  total_plans: 54
+  completed_plans: 50
+  percent: 83
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 9 — Options backtester
+**Current focus:** Phase 10 — external-strategy-research
 
 ## Current Position
 
-Phase: 9 (Options backtester) — EXECUTING
-Plan: 4 of 4
-Status: Awaiting evidence run (background) → then 12 arm runs from cache → results doc verdicts → re-verify
-Last activity: 2026-08-17 -- Phase 9 built (1038 tests); background cache-warming run started for hypothesis evidence; merged quick task 260817-asl (force_close armed on mid-session restart) from origin
+Phase: 10 (external-strategy-research) — EXECUTING
+Plan: 2 of 6
+Status: Ready to execute
+Last activity: 2026-08-18 -- Phase 10 execution started
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -74,6 +74,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 09-options-backtester P03 | ~50 minutes | 3 tasks | 4 files |
 | Phase 09 P04 | 90 minutes | 3 tasks | 4 files |
 | Phase 09-options-backtester P05 | 55min | 3 tasks | 11 files |
+| Phase 10 P01 | 10min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -162,6 +163,8 @@ Recent decisions affecting current work:
 - [Phase 09-options-backtester]: 09-05: lazy per-decision-day fetch (rows_for) replaces eager contracts_for_day -- ~7.5k SPY contracts for the full 2024-08..2026-08 history at +/-10% band vs 58,366+ for one IS window; VERIFICATION gap 3 closed
 - [Phase 09-options-backtester]: 09-05: CR-01 closed -- close_open_at_end() settles positions still open at --end with exit_reason=end_of_window; no longer silently dropped from reported metrics
 - [Phase 09-options-backtester]: 09-05: root cause corrected -- Massive is a hard 5-req/min server-side tier cap (0.23s raw latency), not a gradual rate; free tier ~25h once for all of SPY, paid tier ~5min with --workers 8; all 3 hypotheses remain INSUFFICIENT-EVIDENCE (no live fetch run in this offline-only plan)
+- [Phase 10]: 10-01: pre-registration doc + arms.json committed in ONE commit (f8439aa) before any experimental run artifact -- plan-mandated falsifiability discipline, not per-task commits — T-10-01 threat mitigation requires provable git ordering: doc+arms.json commit must precede backtester/results/experimental/
+- [Phase 10]: 10-01: SPY regime series fetched via bot.scanner.fetcher._download_batch (yfinance), zero Massive requests, cached to gitignored backtester/cache/SPY_1d_regime.csv with sha256 provenance recorded in the committed doc
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -199,6 +202,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T20:11:24.551Z
-Stopped at: Completed 09-05-PLAN.md (gap-closure: lazy fetch VERIFICATION gap 3, CR-01/WR-01/WR-02/WR-05, results doc correction; Phase 9 ready for re-verification)
+Last session: 2026-08-18T19:00:50.725Z
+Stopped at: Completed 10-01-PLAN.md (pre-registration: hypotheses doc H1-H8 + arms.json committed f8439aa, SPY regime CSV cached)
 Resume file: None

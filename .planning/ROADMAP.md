@@ -278,7 +278,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
-| 10. External Strategy Research | 0/5 waves | Planned; design approved 2026-08-18 | - |
+| 10. External Strategy Research | 1/6 | In Progress|  |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -402,7 +402,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 10-01-PLAN.md — Pre-registration: hypotheses doc (H1–H8, universe, windows, evidence floor, metric of record), frozen 15-arm `backtester/experimental/arms.json`, SPY daily regime series via yfinance (cached, provenance recorded), committed before any run [Wave 1]
+- [x] 10-01-PLAN.md — Pre-registration: hypotheses doc (H1–H8, universe, windows, evidence floor, metric of record), frozen 15-arm `backtester/experimental/arms.json`, SPY daily regime series via yfinance (cached, provenance recorded), committed before any run [Wave 1]
 
 **Wave 2** *(blocked on Wave 1)*
 
