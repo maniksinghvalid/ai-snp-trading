@@ -38,7 +38,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Backtester** - Offline historical replay through the shared strategy and FSM code (9/9 plans executed 2026-07-07; gap-closure 06-07..06-09 closed all 7 original multi-day BLOCKERs, but re-verification gaps_found — 2 NEW BLOCKERs: NaN union-index bars crash multi-ticker replay; Gate 7 -2R circuit breaker can never trip during replay) (completed 2026-07-07)
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 - [x] **Phase 8: Options Premium Selling (tasty_credit_spreads)** - Successor strategy after Trend Join Long was validated as no-edge (2026-08-13): tastylive-derived defined-risk iron condors / put credit spreads on liquid ETFs (45 DTE, IVR≥30 gate, 20Δ shorts, 50% profit target, 21-DTE exit), self-contained `bot/options/` package + `python -m bot --rules rules_options.json` dispatch (built 2026-08-17 via quick tasks 260817-0ph/155/1ie + UAT batch ad41cd5; 961 tests; live paper UAT `--live-1lot` pending operator run)
-- [ ] **Phase 10: External Strategy Research** - Two Reddit-sourced day-trading strategies critically extracted and compared against Trend Join Long; backtest-only research package (`backtester/experimental/`) implementing their automatable cores, pre-registered hypotheses, cache-only cost-realistic backtests across 5 windows/9 regime slices, and a 14-section report — production code changed only on a separate branch if a hypothesis is SUPPORTED (started 2026-08-18)
+- [x] **Phase 10: External Strategy Research** - Two Reddit-sourced day-trading strategies critically extracted and compared against Trend Join Long; backtest-only research package (`backtester/experimental/`) implementing their automatable cores, pre-registered hypotheses, cache-only cost-realistic backtests across 5 windows/9 regime slices, and a 14-section report — production code changed only on a separate branch if a hypothesis is SUPPORTED (started 2026-08-18) (completed 2026-08-18)
 
 ## Phase Details
 
@@ -278,7 +278,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Strategy Optimization | 5/6 | In Progress|  |
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
-| 10. External Strategy Research | 5/6 | In Progress|  |
+| 10. External Strategy Research | 6/6 | Complete   | 2026-08-18 |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -419,4 +419,4 @@ Plans:
 
 **Wave 5** *(conditional — only if a hypothesis is SUPPORTED in both IS and OOS)*
 
-- [ ] 10-06-PLAN.md — Gate task reads the Wave-4 verdict table; if triggered: operator scope checkpoint, then `feature/phase10-<arm>` integration (`strategy_name`/`direction` loaded, `SignalEngine(strategy=...)` seam, new `StrategyCore` subclass, default-off, suite green) — not merged [Wave 5]
+- [x] 10-06-PLAN.md — Gate task reads the Wave-4 verdict table; if triggered: operator scope checkpoint, then `feature/phase10-<arm>` integration (`strategy_name`/`direction` loaded, `SignalEngine(strategy=...)` seam, new `StrategyCore` subclass, default-off, suite green) — not merged [Wave 5]

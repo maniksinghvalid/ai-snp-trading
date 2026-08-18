@@ -185,3 +185,14 @@ path's Task 3 never ran, so none of `bot/config/loader.py`, `bot/main.py`,
   accurate, concrete file list for a future phase to pick up if a genuinely profitable arm
   (PF >= 1.3, clearing the full H8 bar) ever emerges from further research.
 - No feature branch, no new dependency, no `bot/`/`rules.json`/`rules_options.json` change.
+
+## Task Commits
+
+1. **Task 1: GATE — TRIGGERED via H2** — `5cfc0bc`
+2. **Task 2/3: defer decision recorded, Task 3 skipped, results doc Section 12 updated** — `fdb27a3`
+
+## Self-Check: PASSED
+
+`10-06-SUMMARY.md` found on disk; commits `5cfc0bc` and `fdb27a3` confirmed in
+`git log --oneline --all`; `git status --porcelain -- bot rules.json rules_options.json`
+empty at plan end.
