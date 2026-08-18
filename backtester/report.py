@@ -39,8 +39,10 @@ _TRADING_DAYS_PER_YEAR = 252
 
 
 def _net_pnl(trade: dict, commission_per_share: float) -> float:
-    """Realized pnl net of commissions; derived, never read from a stored field."""
-    gross = (trade["exit_price"] - trade["entry_price"]) * trade["quantity"]
+    """Realized pnl net of commissions; side-aware (short flips gross sign;
+    missing/"long" side is backward compatible), derived, never stored."""
+    sign = -1 if trade.get("side") == "short" else 1
+    gross = sign * (trade["exit_price"] - trade["entry_price"]) * trade["quantity"]
     return gross - commission_per_share * trade["quantity"] * 2
 
 
@@ -299,7 +301,7 @@ _CSV_FIELDS = ["code", "opened_at", "entry_price", "exit_price", "quantity",
 
 def write_report(trades: list, output_dir: str, starting_capital: float = 100_000.0,
                  commission_per_share: float = 0.0, start=None, end=None,
-                 extra_assumptions: dict = None) -> dict:
+                 extra_assumptions: dict = None, extra_fields: list = None) -> dict:
     """Write trades.csv + equity_curve.csv + summary.json to output_dir.
 
     Creates output_dir if absent (operator-chosen local path, T-06-08).
@@ -310,6 +312,8 @@ def write_report(trades: list, output_dir: str, starting_capital: float = 100_00
         merged with extra_assumptions — see compute_metrics). json.dump
         defaults to allow_nan=True, so profit_factor == inf round-trips as
         the JSON token `Infinity`.
+    extra_fields: optional trade dict keys appended AFTER _CSV_FIELDS in the
+        header, via a LOCAL `fieldnames` list — _CSV_FIELDS is never mutated.
 
     Returns the metrics dict.
     """
@@ -319,11 +323,12 @@ def write_report(trades: list, output_dir: str, starting_capital: float = 100_00
                               extra_assumptions)
     curve = build_equity_curve(trades, starting_capital, commission_per_share, start, end)
 
+    fieldnames = list(_CSV_FIELDS) + list(extra_fields or [])
     with open(os.path.join(output_dir, "trades.csv"), "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for trade in trades:
-            writer.writerow({k: trade.get(k) for k in _CSV_FIELDS})
+            writer.writerow({k: trade.get(k) for k in fieldnames})
 
     with open(os.path.join(output_dir, "equity_curve.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)

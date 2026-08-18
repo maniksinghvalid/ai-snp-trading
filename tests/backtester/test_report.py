@@ -224,6 +224,48 @@ def test_assumptions_block_merges_extra_keys_from_caller():
     }
 
 
+# ============================================================
+# Side-aware P&L + extra_fields (Phase 10, XSR-04)
+# ============================================================
+
+def test_net_pnl_short_side_sign_and_backward_compat():
+    short_trade = {"entry_price": 100.0, "exit_price": 95.0, "quantity": 100, "side": "short"}
+    assert mod._net_pnl(short_trade, 0.0) == pytest.approx(500.0)
+
+    # Missing "side" key -> unchanged long-only-implicit behaviour (backward compat).
+    no_side_trade = {"entry_price": 100.0, "exit_price": 95.0, "quantity": 100}
+    assert mod._net_pnl(no_side_trade, 0.0) == pytest.approx(-500.0)
+
+
+def test_write_report_extra_fields_header_order_and_no_csv_fields_mutation(tmp_path):
+    trades = make_trade_log()
+    for t in trades:
+        t["side"] = "long"
+        t["strategy"] = "ext2"
+        t["arm"] = "ext2_base"
+        t["n_legs"] = 1
+        t["regime"] = "neutral"
+
+    with_extra_dir = tmp_path / "with-extra"
+    write_report(
+        trades, str(with_extra_dir),
+        extra_fields=["side", "strategy", "arm", "n_legs", "regime"],
+    )
+    header = (with_extra_dir / "trades.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert header.split(",") == list(mod._CSV_FIELDS) + [
+        "side", "strategy", "arm", "n_legs", "regime",
+    ]
+    assert len(header.split(",")) == 13
+
+    # A second call WITHOUT extra_fields, same process -> original 8-column header
+    # (proves _CSV_FIELDS was never mutated by the prior call).
+    without_extra_dir = tmp_path / "without-extra"
+    write_report(make_trade_log(), str(without_extra_dir))
+    header2 = (without_extra_dir / "trades.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert header2.split(",") == list(mod._CSV_FIELDS)
+    assert len(mod._CSV_FIELDS) == 8
+
+
 def test_write_report_summary_json_contains_assumptions(tmp_path):
     write_report(
         make_trade_log(), str(tmp_path), starting_capital=60_000.0, commission_per_share=0.02,
