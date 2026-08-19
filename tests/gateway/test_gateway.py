@@ -1502,6 +1502,120 @@ class TestOrphanOwnershipGuard:
         mock_store.insert_orphan_position.assert_called_once()
 
 
+class TestOptionCodesSkippedByReconcile:
+    """Regression tests: _reconcile_core's orphan-adoption loop must never
+    classify the options bot's own iron-condor legs as external equity
+    positions (root cause: qty>0/bot-ownership checks assume equity-only
+    codes; option legs live in OptionsStore, not the equity StateStore).
+
+    Option codes are structurally out of scope for the equity StateStore /
+    PositionManager -- OptionsService.reconcile() is their sole owner
+    (CLAUDE.md Phase 8 invariant). They must be skipped BEFORE the
+    ownership/long guard, with no reconcile_external_position_ignored
+    warning and no adoption attempt.
+
+    Also covers the secondary fix: the legit external-equity warning
+    (SAFE-OG-01, manual operator holdings) must be logged once per code
+    per process, not once per ~75s reconcile cycle.
+    """
+
+    def _run_reconcile_once(self, gw, broker_df):
+        """Drive reconcile_once with empty-store/empty-manager mocks and
+        return (result, warning_event_names) captured under a patched
+        module-level _logger."""
+        gw.get_positions = AsyncMock(return_value=(0, broker_df))
+        gw._derive_lod_for_orphan = AsyncMock(return_value=1.0)
+        gw._compute_orphan_stop = MagicMock(return_value=0.5)
+        gw.subscribe = AsyncMock()
+
+        mock_manager = MagicMock()
+        mock_manager._positions = {}
+        mock_manager._exiting = set()
+        mock_manager.adopt_orphan = MagicMock()
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = []
+        mock_store.has_pending_intent.return_value = False
+        mock_store.insert_orphan_position = MagicMock(return_value=1)
+
+        mock_alerter = MagicMock()
+        mock_alerter.send = AsyncMock()
+
+        async def _run():
+            return await gw.reconcile_once(
+                store=mock_store, manager=mock_manager, alerter=mock_alerter
+            )
+
+        with patch("bot.gateway.gateway._logger") as mock_logger:
+            result = asyncio.run(_run())
+            events = [c.args[0] for c in mock_logger.warning.call_args_list]
+
+        return result, events, mock_store, mock_manager
+
+    def test_option_short_leg_not_flagged_and_not_adopted(self):
+        """A real short leg (US.SLV260918P50500, qty=-1) must be skipped
+        silently -- no reconcile_external_position_ignored warning, no
+        adoption attempt. This is the leg that currently fails as 'not_long'.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.SLV260918P50500", "qty": -1, "average_cost": 0.55,
+        }])
+        result, events, mock_store, mock_manager = self._run_reconcile_once(gw, broker_df)
+
+        assert "reconcile_external_position_ignored" not in events, (
+            f"Option short leg must not trigger external-position warning; got {events}"
+        )
+        mock_store.insert_orphan_position.assert_not_called()
+        mock_manager.adopt_orphan.assert_not_called()
+        assert result["adopted"] == []
+
+    def test_option_long_wing_not_flagged_and_not_adopted(self):
+        """A real long wing (US.SLV260918P49500, qty=+1) must also be
+        skipped silently -- this is the leg that currently fails as
+        'not_bot_owned' (option legs live in OptionsStore, not StateStore).
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.SLV260918P49500", "qty": 1, "average_cost": 0.30,
+        }])
+        result, events, mock_store, mock_manager = self._run_reconcile_once(gw, broker_df)
+
+        assert "reconcile_external_position_ignored" not in events, (
+            f"Option long wing must not trigger external-position warning; got {events}"
+        )
+        mock_store.insert_orphan_position.assert_not_called()
+        mock_manager.adopt_orphan.assert_not_called()
+        assert result["adopted"] == []
+
+    def test_manual_equity_still_ignored_and_warned_once(self):
+        """SAFE-OG-01 preserved: a manual operator equity position
+        (US.NIO, not bot-owned) is still skipped AND still warned about --
+        but only once per code per process, not every reconcile cycle.
+        """
+        gw = _make_gateway_with_mocks()
+        broker_df = pd.DataFrame([{
+            "code": "US.NIO", "qty": 100, "average_cost": 4.20,
+        }])
+
+        result, events, mock_store, mock_manager = self._run_reconcile_once(gw, broker_df)
+
+        # SAFE-OG-01 preserved: still skipped.
+        mock_store.insert_orphan_position.assert_not_called()
+        mock_manager.adopt_orphan.assert_not_called()
+        assert result["adopted"] == []
+        assert "reconcile_external_position_ignored" in events, (
+            f"Manual equity position must still warn on first cycle; got {events}"
+        )
+
+        # Second cycle on the SAME gateway instance -- must NOT re-emit.
+        result2, events2, mock_store2, mock_manager2 = self._run_reconcile_once(gw, broker_df)
+        assert "reconcile_external_position_ignored" not in events2, (
+            f"External-position warning must not repeat on the second cycle "
+            f"for the same code (per-code, per-process dedup); got {events2}"
+        )
+
+
 def test_set_handler_delegates_to_quote_ctx():
     """set_handler() must call _quote_ctx.set_handler(handler) exactly once (BLOCKER-01).
 
