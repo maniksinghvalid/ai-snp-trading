@@ -403,6 +403,12 @@ class MoomooGateway:
         # asyncio.create_task results are added here and removed via
         # add_done_callback(self._bg_tasks.discard) to prevent GC before send.
         self._bg_tasks: set = set()
+        # T-bjv-02: session-scope dedup set for reconcile_external_position_ignored
+        # -- a code's classification (manual/external vs bot-owned) does not
+        # change within a process run, so warn once per code, not every ~75s cycle.
+        # ponytail: unbounded set, never cleared -- fine, it's bounded by the
+        # number of distinct broker codes on one paper account.
+        self._external_ignored_logged: set = set()
         # Finding 2.8: orphan-adoption stop percentage (CFG-01 — rules.json
         # single source of truth via StrategyConfig.initial_stop_pct). Defaults
         # to 1.0 (the pre-fix lod*0.99 behavior) as a safe fallback when the
@@ -1523,19 +1529,33 @@ class MoomooGateway:
             if code in exiting_codes:
                 continue
 
+            # T-bjv-01: option codes are structurally out of scope for the
+            # equity StateStore / PositionManager this function serves --
+            # OptionsService.reconcile() is their sole owner (CLAUDE.md
+            # Phase 8 invariant). Skip BEFORE the ownership/long guard below
+            # so it can never misclassify an option leg as an external
+            # equity position, even if that guard's checks ever loosen.
+            # Reuses the same module-level predicate get_option_positions
+            # already uses -- no second regex.
+            if _OPTION_CODE_RE.match(code):
+                _logger.debug("reconcile_skip_option_code", code=code)
+                continue
+
             # SAFE-OG-01: ownership + long-only guard.
             # Never adopt a position the bot has no DB record for (manual operator
-            # holdings) or a short/option position the strategy cannot manage.
+            # holdings) or a short position the strategy cannot manage.
             _is_long = bp["qty"] > 0
             _bot_owned = store.has_pending_intent(code) or code in open_pos_codes
             if not _is_long or not _bot_owned:
                 _reason = "not_long" if not _is_long else "not_bot_owned"
-                _logger.warning(
-                    "reconcile_external_position_ignored",
-                    code=code,
-                    broker_qty=bp["qty"],
-                    reason=_reason,
-                )
+                if code not in self._external_ignored_logged:
+                    self._external_ignored_logged.add(code)
+                    _logger.warning(
+                        "reconcile_external_position_ignored",
+                        code=code,
+                        broker_qty=bp["qty"],
+                        reason=_reason,
+                    )
                 continue
 
             # Finding 2.5: application-layer SELECT-before-INSERT guard. The DB
