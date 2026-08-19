@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 10
 Plan: Not started
 Status: Phase complete — ready for verification
-Last activity: 2026-08-18
+Last activity: 2026-08-19 - Completed quick task 260819-bjv: fix gateway reconcile misclassifying options-bot legs as external
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -206,6 +206,7 @@ None yet.
 | 260817-1ie | Phase 8 options strategy Wave 4: OptionsBot service (entry scan/manage/eod jobs, reconcile, alerts, report), bot/main.py strategy_name dispatch + --rules, tests | 2026-08-17 | 35194ed | [260817-1ie-phase-8-options-strategy-wave-4-optionsb](./quick/260817-1ie-phase-8-options-strategy-wave-4-optionsb/) |
 | 260817-ask | screen_options per-underlying requests (escapes moomoo 1000-row/request cap that starved SPY/QQQ/DIA/FXI) + 3.5s inter-call throttle (SDK 10/30s limit), 4 tests, live RTH probe re-verified | 2026-08-17 | f44837e | [260817-ask-fix-screen-options-1000-row-server-cap-s](./quick/260817-ask-fix-screen-options-1000-row-server-cap-s/) |
 | 260817-asl | Fix force_close job never armed on mid-session (re)start: _register_jobs reschedules to today's calendar-aware close when started after 08:30 ET; _reschedule_force_close helper; regression test | 2026-08-17 | 8043243 | [260817-asl-fix-force-close-job-never-firing-when-bo](./quick/260817-asl-fix-force-close-job-never-firing-when-bo/) |
+| 260819-bjv | Fix gateway _reconcile_core misclassifying options-bot legs as external: skip option codes (via _OPTION_CODE_RE) in orphan-adoption loop — OptionsService.reconcile() is their sole owner; dedupe reconcile_external_position_ignored to once/code/process (was 4 lines every ~75s); 3 regression tests | 2026-08-19 | 6ca0d36 | [260819-bjv-fix-gateway-py-reconcile-core-misclassif](./quick/260819-bjv-fix-gateway-py-reconcile-core-misclassif/) |
 
 ## Deferred Items
 
