@@ -805,6 +805,38 @@ class TestUnsubscribe:
         with pytest.raises(GatewayError):
             asyncio.run(gw.unsubscribe(["US.AAPL"]))
 
+    def test_unsubscribe_not_subscribed_is_benign(self):
+        """260824-avx Fix B: OpenD's benign 'has not been subscribed' reply must
+        not raise — it aborted the whole intraday rescan mid-flight in production.
+        """
+        import bot.gateway.gateway as gateway_mod
+
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.unsubscribe.return_value = (
+            -1, "KL_5Min for US.DLR has not been subscribed. Cannot unsubscribe.",
+        )
+
+        with patch.object(gateway_mod, "_logger", MagicMock()) as mock_logger:
+            asyncio.run(gw.unsubscribe(["US.DLR"]))
+
+        warning_events = [
+            call for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "unsubscribe_not_subscribed"
+        ]
+        assert len(warning_events) == 1, (
+            f"Expected one unsubscribe_not_subscribed warning, got {len(warning_events)}"
+        )
+
+    def test_unsubscribe_raises_on_other_error_with_same_ret(self):
+        """A different message on the same ret=-1 must still raise GatewayError —
+        the benign-path match is on the message substring, not the ret code.
+        """
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.unsubscribe.return_value = (-1, "quota exceeded")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(gw.unsubscribe(["US.AAPL"]))
+
 
 # ============================================================
 # MoomooGateway.get_equity() — live equity read (RISK-01, D-04/D-05)
