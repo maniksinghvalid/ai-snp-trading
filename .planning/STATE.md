@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 06.2 (code-review-remediation) — COMPLETE
 Plan: 3 of 3 (all plans complete)
 Status: Phase complete — all 16 code-review findings closed (Tier 1/2/3)
-Last activity: 2026-08-17 - Completed quick task 260817-asl: force_close armed on mid-session (re)start (962 tests, 8043243); Phase 8 live paper UAT (--live-1lot) still pending operator
+Last activity: 2026-08-24 - Completed quick task 260824-avx: intraday rescan crash fixed — managed codes unconditionally protected from eviction, gateway.unsubscribe idempotent (964 tests, 7cf526c + b1962ef)
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -169,6 +169,7 @@ None yet.
 | 260817-155 | Phase 8 options strategy Wave 2-3: gateway option methods (get_stock_ids/screen_options/get_option_positions), OptionsStore, LegExecutor + tests | 2026-08-17 | 7624ea9 | [260817-155-phase-8-options-strategy-wave-2-3-gatewa](./quick/260817-155-phase-8-options-strategy-wave-2-3-gatewa/) |
 | 260817-1ie | Phase 8 options strategy Wave 4: OptionsBot service (entry scan/manage/eod jobs, reconcile, alerts, report), bot/main.py strategy_name dispatch + --rules, tests | 2026-08-17 | 35194ed | [260817-1ie-phase-8-options-strategy-wave-4-optionsb](./quick/260817-1ie-phase-8-options-strategy-wave-4-optionsb/) |
 | 260817-asl | Fix force_close job never armed on mid-session (re)start: _register_jobs reschedules to today's calendar-aware close when started after 08:30 ET; _reschedule_force_close helper; regression test | 2026-08-17 | 8043243 | [260817-asl-fix-force-close-job-never-firing-when-bo](./quick/260817-asl-fix-force-close-job-never-firing-when-bo/) |
+| 260824-avx | Fix intraday rescan crash: run_intraday_rescan unconditionally protects managed active codes (open positions/pending intents) from eviction/unsubscribe; gateway.unsubscribe treats "not been subscribed" as benign so cleanup never aborts the rescan or skips premarket-high seeding | 2026-08-24 | b1962ef | [260824-avx-fix-intraday-rescan-crash-protect-manage](./quick/260824-avx-fix-intraday-rescan-crash-protect-manage/) |
 
 ## Deferred Items
 
