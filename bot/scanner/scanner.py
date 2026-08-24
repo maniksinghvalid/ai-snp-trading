@@ -590,6 +590,13 @@ def _unsubscribe_evicted_codes(gateway, result: List[str], active_codes: Set[str
     cap the subscribe path is built around. The eviction set is the active codes that
     are no longer present in result.
 
+    # ponytail: since 260824-avx Fix A, `active_codes` means "managed" (open
+    # position / pending intent) rather than "subscribed", and run_intraday_rescan
+    # unconditionally appends every managed code to `result`. So `evicted` here is
+    # now always empty for managed codes — this no longer releases quota slots for
+    # genuinely dropped (non-managed) watchlist codes. Kept as a safety net; out of
+    # scope to restore quota-slot release for non-managed evictions.
+
     gateway:      MoomooGateway instance (or None — skipped).
     result:       Final protected watchlist (moomoo codes) after the rescan.
     active_codes: Set of currently-subscribed moomoo codes.
@@ -704,15 +711,18 @@ def run_intraday_rescan(
 
     Implements D-04 (active candidate protection) and D-05 (idempotent upsert):
       - Re-ranks the union of newly-qualifying candidates by gap_pct DESC.
-      - Active candidates that still pass filters are guaranteed in the top-20
-        even if their gap ranks below position 20 (D-04).
+      - Active candidates are guaranteed in the top-20 even if their gap ranks
+        below position 20, or they no longer pass the re-filter at all (D-04,
+        260824-avx Fix A) — a managed symbol must never lose its 5m feed.
       - Calls _persist_watchlist for idempotent upsert — never DELETEs rows (D-05).
       - Subscribes ONLY codes not already in active_codes (avoids re-subscription).
 
     store:            Open StateStore (migrations applied).
     gateway:          MoomooGateway instance; None is accepted (skips subscribe).
     cfg:              StrategyConfig — all thresholds config-driven.
-    active_codes:     Set of moomoo codes with active 5m feed (protected from eviction).
+    active_codes:     Set of moomoo codes (open position or pending intent) with
+                      an active 5m feed; unconditionally protected from eviction
+                      regardless of whether they still pass the re-filter.
     scan_date:        Optional date override (defaults to now_et().date()).
     scan_pass:        Label for this re-scan pass (e.g. "intraday_1", "intraday_2").
     daily_bars_cache: Optional caller-owned dict keyed on scan_date (Finding 3.2).
@@ -748,10 +758,21 @@ def run_intraday_rescan(
     # Step 4: sort all passing candidates by gap_pct DESC
     passing.sort(key=lambda c: c["gap_pct"], reverse=True)
 
-    # Step 5: build protected top-20 (D-04):
-    #   a) First, add all active_codes that still qualify (they are protected).
-    #   b) Then fill remaining slots (up to _WATCHLIST_CAP) with the highest-gap
+    # Step 5: build protected top-20 (D-04), with unconditional managed-code
+    # protection (260824-avx Fix A):
+    #   a) First, add all active_codes that still qualify (they carry a real
+    #      candidate dict and are front-loaded into `protected`).
+    #   b) Fill remaining slots (up to _WATCHLIST_CAP) with the highest-gap
     #      non-active candidates that haven't already been included.
+    #   c) Active codes that FAILED the re-filter (absent from `passing`) have
+    #      no candidate dict — they are never persisted (would fabricate
+    #      gap_pct/rank and clobber the code's real premarket daily_scan row)
+    #      but are still appended to the returned watchlist so they keep their
+    #      K_5M feed. SAFE-OG-01 exclusion can never resurrect an externally
+    #      held code here: `active_codes` is bot-DB-owned (open positions +
+    #      pending intents) and `get_external_codes` returns exactly the
+    #      complement, so the two sets never contend.
+    passing_codes = {c["code"] for c in passing}
     protected: List[dict] = []
     filled_codes: Set[str] = set()
 
@@ -760,7 +781,10 @@ def run_intraday_rescan(
             protected.append(candidate)
             filled_codes.add(candidate["code"])
 
-    remaining_slots = _WATCHLIST_CAP - len(protected)
+    carried_active = sorted(c for c in active_codes if c not in passing_codes)
+    filled_codes.update(carried_active)
+
+    remaining_slots = _WATCHLIST_CAP - len(protected) - len(carried_active)
     for candidate in passing:
         if remaining_slots <= 0:
             break
@@ -769,32 +793,21 @@ def run_intraday_rescan(
             filled_codes.add(candidate["code"])
             remaining_slots -= 1
 
-    # Cap total at _WATCHLIST_CAP (active codes that exceed cap are truncated last)
-    # Active codes are front-loaded, so they are preserved up to the cap.
-    if len(protected) > _WATCHLIST_CAP:
-        protected = protected[:_WATCHLIST_CAP]
-
-    # Step 6: assign rank over the final protected list (by gap_pct DESC)
+    # Step 6: assign rank over the final protected (persisted) list (by gap_pct DESC)
     protected.sort(key=lambda c: c["gap_pct"], reverse=True)
     for rank_idx, candidate in enumerate(protected, start=1):
         candidate["rank"] = rank_idx
 
-    # Step 7: upsert (idempotent — never DELETE, D-05)
+    # Step 7: upsert (idempotent — never DELETE, D-05). carried_active codes are
+    # deliberately excluded — they have no candidate dict to persist.
     store.persist_watchlist(scan_date, protected, scan_pass)
 
-    result = [c["code"] for c in protected]
+    result = [c["code"] for c in protected] + carried_active
 
-    # WR-02: D-04 protection only re-includes active codes that still pass the
-    # re-filter. An active code whose gap collapses intraday is simply absent from
-    # `passing` and silently drops out. Make that eviction explicit and auditable —
-    # log each evicted active code rather than leaving the drop as an emergent
-    # side effect of "active code happens to still pass".
-    result_set = set(result)
-    evicted_active = sorted(c for c in active_codes if c not in result_set)
-    for evicted_code in evicted_active:
+    for carried_code in carried_active:
         _logger.warning(
-            "active_code_evicted",
-            code=evicted_code,
+            "active_code_carried",
+            code=carried_code,
             scan_date=str(scan_date),
             scan_pass=scan_pass,
         )
@@ -804,7 +817,7 @@ def run_intraday_rescan(
         scan_date=str(scan_date),
         candidates_passing=len(passing),
         protected_active=len([c for c in protected if c["code"] in active_codes]),
-        evicted_active=len(evicted_active),
+        carried_active=len(carried_active),
         watchlist_count=len(result),
         scan_pass=scan_pass,
     )

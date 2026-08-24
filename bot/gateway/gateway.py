@@ -952,12 +952,19 @@ class MoomooGateway:
         live K_5M feeds and the cumulative subscribed set grows unbounded,
         eventually exceeding the 20-slot cap the subscribe path is built around.
 
+        Unsubscribing a code OpenD does not consider subscribed (benign
+        "... has not been subscribed. Cannot unsubscribe." reply) is treated as
+        a no-op, not a failure — raising there previously aborted the entire
+        intraday rescan mid-flight before it could return its watchlist
+        (260824-avx Fix B).
+
         Parameters:
             codes: List of Moomoo-format codes to release (e.g. ["US.AAPL"]).
             subtypes: List of SubType values. Defaults to [SubType.K_5M].
 
         Raises:
-            GatewayError: if unsubscribe() returns non-RET_OK.
+            GatewayError: if unsubscribe() returns non-RET_OK for a genuine
+                failure (not the benign "not been subscribed" case).
         """
         # Deferred import — mirrors subscribe() (avoids top-level moomoo import
         # failure when moomoo-api is not installed in the test environment).
@@ -973,6 +980,9 @@ class MoomooGateway:
 
         def _unsubscribe_blocking():
             ret, msg = self._quote_ctx.unsubscribe(codes, subtypes)
+            if ret != RET_OK and "not been subscribed" in str(msg).lower():
+                _logger.warning("unsubscribe_not_subscribed", codes=codes, msg=str(msg))
+                return
             _check_ret(ret, msg, "unsubscribe")
 
         await loop.run_in_executor(None, _unsubscribe_blocking)

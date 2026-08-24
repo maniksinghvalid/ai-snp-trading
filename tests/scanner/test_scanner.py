@@ -1009,17 +1009,18 @@ class TestIntradayRescan:
             "New code US.MSFT must be subscribed"
         )
 
-    def test_rescan_unsubscribes_evicted_active_code(self, tmp_state_db):
-        """WR-01 regression: an active code evicted from the watchlist (its gap
-        collapses and it no longer passes the re-filter) must be UNSUBSCRIBED, so
-        the cumulative subscribed set never exceeds the top-20 cap across rescans.
+    def test_rescan_never_evicts_managed_active_code(self, tmp_state_db):
+        """260824-avx Fix A regression: a managed active code that no longer passes
+        the re-filter (its gap collapses) must NEVER be evicted or unsubscribed —
+        it stays in the watchlist and keeps its K_5M feed. Nothing fabricated is
+        persisted to daily_scan for it (no candidate dict exists for a carried code).
         """
         from bot.scanner.scanner import run_intraday_rescan
 
         scan_date = date(2026, 6, 23)
         cfg = _make_cfg(d3_min_gap_pct=3.0)
 
-        # KEEP passes (gap 4%); DROP fails D3 (gap 1% < 3%) so it is evicted.
+        # KEEP passes (gap 4%); DROP fails D3 (gap 1% < 3%) but is managed (active).
         passing_frame = _make_daily_frame(
             prior_close=100.0, today_open=104.0, today_close=106.0,
             prior_high=105.0, scan_date=scan_date,
@@ -1034,7 +1035,7 @@ class TestIntradayRescan:
         gw = _make_mock_gateway()
         gw.unsubscribe = AsyncMock()
 
-        # Both KEEP and DROP are currently active (subscribed).
+        # Both KEEP and DROP are currently active (managed — open position/pending intent).
         active_codes = {"US.KEEP", "US.DROP"}
 
         with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=["KEEP", "DROP"]), \
@@ -1051,21 +1052,30 @@ class TestIntradayRescan:
                 active_codes=active_codes, scan_date=scan_date, scan_pass="intraday_1",
             )
 
+        persisted_codes = {
+            row[0] for row in store.conn.execute(
+                "SELECT code FROM daily_scan WHERE scan_date=?",
+                (scan_date.isoformat(),),
+            ).fetchall()
+        }
         store.close()
 
         assert "US.KEEP" in result, "Still-passing active code must remain in watchlist"
-        assert "US.DROP" not in result, "Collapsed active code must be evicted from watchlist"
+        assert "US.DROP" in result, "Managed code failing the re-filter must remain in watchlist"
 
-        # The evicted active code must be unsubscribed to free its quota slot.
-        gw.unsubscribe.assert_called_once()
-        unsubscribed_codes = gw.unsubscribe.call_args[0][0]
-        assert "US.DROP" in unsubscribed_codes, "Evicted US.DROP must be unsubscribed (WR-01)"
-        assert "US.KEEP" not in unsubscribed_codes, "Protected US.KEEP must NOT be unsubscribed"
+        # The managed code must never be unsubscribed.
+        gw.unsubscribe.assert_not_called()
 
-    def test_rescan_logs_active_code_eviction(self, tmp_state_db):
-        """WR-02 regression: evicting an active code that no longer passes must emit
-        an explicit, auditable `active_code_evicted` warning rather than dropping it
-        silently.
+        # No fabricated daily_scan row for the carried code; KEEP's real row exists.
+        assert "US.DROP" not in persisted_codes, (
+            "Carried active code must NOT get a fabricated daily_scan row"
+        )
+        assert "US.KEEP" in persisted_codes, "Still-passing code keeps its persisted row"
+
+    def test_rescan_logs_carried_active_code(self, tmp_state_db):
+        """260824-avx Fix A regression: carrying a managed active code that no
+        longer passes the re-filter must emit an explicit, auditable
+        `active_code_carried` warning, and never the old `active_code_evicted`.
         """
         import bot.scanner.scanner as scanner_mod
         from bot.scanner.scanner import run_intraday_rescan
@@ -1103,16 +1113,21 @@ class TestIntradayRescan:
 
         store.close()
 
+        carried_events = [
+            call for call in mock_logger.warning.call_args_list
+            if call.args and call.args[0] == "active_code_carried"
+        ]
         evicted_events = [
             call for call in mock_logger.warning.call_args_list
             if call.args and call.args[0] == "active_code_evicted"
         ]
-        assert len(evicted_events) == 1, (
-            f"Exactly one active_code_evicted event expected, got {len(evicted_events)}"
+        assert len(carried_events) == 1, (
+            f"Exactly one active_code_carried event expected, got {len(carried_events)}"
         )
-        assert evicted_events[0].kwargs.get("code") == "US.DROP", (
-            "active_code_evicted must name the evicted code US.DROP"
+        assert carried_events[0].kwargs.get("code") == "US.DROP", (
+            "active_code_carried must name the carried code US.DROP"
         )
+        assert len(evicted_events) == 0, "active_code_evicted must never fire"
 
     def test_rescan_reuses_daily_download_cache(self, tmp_state_db):
         """Finding 3.2 regression: run_intraday_rescan must reuse a caller-owned,
