@@ -1338,6 +1338,35 @@ class TestRegisterPosition:
         rows = open_store.get_open_positions()
         assert any(r["code"] == "US.NVDA" for r in rows)
 
+    def test_register_position_without_timestamps_does_not_crash(self, manager, open_store):
+        """A PositionState built the way bot.py:301 builds it — no opened_at /
+        updated_at — must still persist (positions.opened_at is NOT NULL).
+
+        Regression: 2026-08-27 US.CRM. register_position raised IntegrityError,
+        so on_fill() and arm_stop_protection() never ran and 20 filled shares
+        sat at the broker unmanaged. _make_pos always supplied timestamps, which
+        is why the existing test never caught this.
+        """
+        pos = PositionState(
+            position_id="POS-CRM-001",
+            code="US.CRM",
+            phase=PositionPhase.AWAITING_FILL,
+            entry_price=252.0,
+            initial_stop=203.5638,
+            trail_stop=203.5638,
+            full_quantity=20,
+            remaining_quantity=20,
+            entry_order_id="861672",
+        )
+        assert pos.opened_at is None and pos.updated_at is None
+
+        manager.register_position(pos)
+
+        assert pos.opened_at is not None, "register_position must stamp opened_at"
+        assert pos.updated_at is not None, "register_position must stamp updated_at"
+        rows = open_store.get_open_positions()
+        assert any(r["code"] == "US.CRM" for r in rows), "position was not persisted"
+
 
 # ============================================================
 # Test: order_id-only matching — source inspection

@@ -1368,6 +1368,17 @@ class PositionManager:
         Args:
             pos: PositionState with phase=AWAITING_FILL and entry_order_id set.
         """
+        # positions.opened_at/updated_at are NOT NULL (migration 0001), but the
+        # AWAITING_FILL caller (bot.py _process_bar) has no timestamps to give —
+        # opened_at is only assigned later by _on_entry_fill. Stamp a placeholder
+        # here, before the DB-first write, so registration cannot raise and abort
+        # on_fill()/arm_stop_protection() (2026-08-27 US.CRM: a filled position
+        # left unmanaged at the broker). Same convention as adopt_orphan.
+        if pos.opened_at is None or pos.updated_at is None:
+            _stamp = now_et()
+            pos.opened_at = pos.opened_at or _stamp
+            pos.updated_at = pos.updated_at or _stamp
+
         self._positions[pos.code] = pos
         self._persist_position(pos, event="position_registered")
         _logger.info(
