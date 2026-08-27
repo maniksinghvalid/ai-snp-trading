@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 10
 Plan: Not started
 Status: Phase complete — ready for verification
-Last activity: 2026-08-24 - Completed quick task 260824-avx: intraday rescan crash fixed — managed codes unconditionally protected from eviction, gateway.unsubscribe idempotent (964 tests, 7cf526c + b1962ef)
+Last activity: 2026-08-27 - Completed quick task 260827-j29: filled positions no longer crash on register (opened_at NOT NULL) and force_close re-arms after firing (1134 tests, 1f3f30f + 247da3d)
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -208,6 +208,7 @@ None yet.
 | 260817-asl | Fix force_close job never armed on mid-session (re)start: _register_jobs reschedules to today's calendar-aware close when started after 08:30 ET; _reschedule_force_close helper; regression test | 2026-08-17 | 8043243 | [260817-asl-fix-force-close-job-never-firing-when-bo](./quick/260817-asl-fix-force-close-job-never-firing-when-bo/) |
 | 260819-bjv | Fix gateway _reconcile_core misclassifying options-bot legs as external: skip option codes (via _OPTION_CODE_RE) in orphan-adoption loop — OptionsService.reconcile() is their sole owner; dedupe reconcile_external_position_ignored to once/code/process (was 4 lines every ~75s); 3 regression tests | 2026-08-19 | 6ca0d36 | [260819-bjv-fix-gateway-py-reconcile-core-misclassif](./quick/260819-bjv-fix-gateway-py-reconcile-core-misclassif/) |
 | 260824-avx | Fix intraday rescan crash: run_intraday_rescan unconditionally protects managed active codes (open positions/pending intents) from eviction/unsubscribe; gateway.unsubscribe treats "not been subscribed" as benign so cleanup never aborts the rescan or skips premarket-high seeding | 2026-08-24 | b1962ef | [260824-avx-fix-intraday-rescan-crash-protect-manage](./quick/260824-avx-fix-intraday-rescan-crash-protect-manage/) |
+| 260827-j29 | Fix opened_at NOT NULL crash in register_position (filled position left unmanaged: no stop/trail/force-close, 2026-08-27 US.CRM) + re-create the one-shot force_close job after it fires (no force-close armed 2026-08-26/27) | 2026-08-27 | 247da3d | [260827-j29-fix-opened-at-not-null-crash-on-position](./quick/260827-j29-fix-opened-at-not-null-crash-on-position/) |
 
 ## Deferred Items
 
