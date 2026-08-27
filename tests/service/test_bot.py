@@ -100,6 +100,34 @@ def test_force_close_job_called():
     )
 
 
+def test_reschedule_force_close_recreates_a_fired_job():
+    """_reschedule_force_close must re-create the job after it has already fired.
+
+    Regression: force_close is a one-shot DateTrigger, so APScheduler removes it
+    once it runs ("Removed job force_close", 2026-08-25 19:51). The bot stays up
+    across days, so the next morning reschedule_job() raised JobLookupError —
+    swallowed by the except — and 2026-08-26 and 2026-08-27 ran with no
+    force-close armed at all.
+    """
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from bot.position.manager import get_force_close_time_et
+
+    bot, _, _ = _make_bot_with_mocks()
+    bot._register_jobs()
+    bot._scheduler.remove_job("force_close")  # simulate the fired one-shot job
+    assert "force_close" not in [j.id for j in bot._scheduler.get_jobs()]
+
+    today = _dt.date(2026, 8, 27)  # Thursday, a regular trading day
+    bot._reschedule_force_close(today)
+
+    jobs = {j.id: j for j in bot._scheduler.get_jobs()}
+    assert "force_close" in jobs, "force_close was not re-created after firing"
+    assert jobs["force_close"].trigger.run_date == _dt.datetime.combine(
+        today, get_force_close_time_et(today), tzinfo=ZoneInfo("America/New_York")
+    )
+
+
 @pytest.mark.asyncio
 async def test_readiness_gate_blocks_entries():
     """_readiness_gate must set entries_enabled=False until reconcile completes (D-08, SVC-01)."""

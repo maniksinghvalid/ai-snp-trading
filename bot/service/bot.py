@@ -17,6 +17,7 @@ from datetime import time as _time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -617,10 +618,28 @@ class TradingBot:
                 get_force_close_time_et(today),
                 tzinfo=ZoneInfo("America/New_York"),
             )
-            self._scheduler.reschedule_job(
-                "force_close",
-                trigger=DateTrigger(run_date=run_at),
-            )
+            try:
+                self._scheduler.reschedule_job(
+                    "force_close",
+                    trigger=DateTrigger(run_date=run_at),
+                )
+            except JobLookupError:
+                # force_close is a one-shot DateTrigger, so APScheduler removes it
+                # once it fires ("Removed job force_close", 2026-08-25 19:51). The
+                # bot stays up across days, so every later reschedule_job raised
+                # JobLookupError — swallowed below — and the session ran with no
+                # force-close armed (observed 2026-08-26 and 2026-08-27). Re-create
+                # it instead. add_job is not used unconditionally because a pending
+                # (scheduler-not-yet-started) job is not deduplicated by
+                # replace_existing, which would leave two force_close jobs.
+                self._scheduler.add_job(
+                    self._job_force_close,
+                    DateTrigger(run_date=run_at),
+                    id="force_close",
+                    coalesce=True,
+                    misfire_grace_time=self._cfg.force_close_misfire_grace_s,
+                )
+                _logger.warning("force_close_job_recreated", date=str(today))
             _logger.info(
                 "force_close_job_rescheduled",
                 date=str(today),
