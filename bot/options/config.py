@@ -63,6 +63,34 @@ _RELOCATED = (
     ("manage", "manage_interval_min", "service"),
 )
 
+# D-04: the only valid universe_source value.
+_UNIVERSE_SOURCES = ("equity_watchlist",)
+
+# Structures whose risk is a debit (vs. a credit received).
+_DEBIT_STRUCTURES = ("bull_call_spread",)
+
+# Fields required for credit structures (iron_condor, put_credit_spread) and
+# forbidden for debit structures (D-05) — an ignored IV gate or stop would
+# otherwise silently mislead the operator. (block, key) pairs.
+_CREDIT_KEYS = (
+    ("entry", "ivr_min"),
+    ("entry", "ivp_min"),
+    ("entry", "fear_drop_pct"),
+    ("entry", "fear_ivr_min"),
+    ("structure", "short_delta"),
+    ("structure", "min_credit_to_width"),
+    ("manage", "profit_target_pct_of_credit"),
+    ("manage", "stop_loss_credit_multiple"),
+)
+
+# Fields required for debit structures and forbidden for credit structures
+# (D-05). (block, key) pairs.
+_DEBIT_KEYS = (
+    ("structure", "long_delta"),
+    ("structure", "max_debit_to_width"),
+    ("manage", "profit_target_pct_of_max"),
+)
+
 
 # ============================================================
 # OptionsConfig Dataclass
@@ -245,20 +273,84 @@ def _wrap_legacy(data: dict) -> dict:
 
 def _check_strategy(s: dict) -> None:
     """
-    Fail-closed guard for the implemented-structure set (T-11-05).
+    Fail-closed business rules for one strategy block (D-04, D-05, D-11).
 
-    Schema validation already rejected unknown strings via enum. This guard
-    is defense-in-depth for any structure added to the enum before
-    pick_strikes/size_position learn to build it. Read at call time (tests
-    monkeypatch _IMPLEMENTED_STRUCTURES) — a schema-valid but unimplemented
-    structure still fails closed.
+    Raises ConfigError, prefixed "strategy '<name>': ", on:
+      - a relocated global knob (sizing_equity_usd, max_bp_usage_pct,
+        daily_loss_limit_pct, manage_interval_min) set inside this strategy
+        instead of the shared risk/service block (D-02; T-11-02 — a
+        per-strategy override would otherwise be silently ignored)
+      - both or neither of universe / universe_source present (D-01)
+      - an unsupported universe_source value (D-04)
+      - a debit structure (bull_call_spread) missing a required debit key,
+        or carrying a credit-only key (D-05)
+      - a credit structure missing a required credit key (including a null
+        manage.manage_dte), or carrying a debit-only key (D-05)
+
+    The implemented-structure guard (unprefixed message, T-11-05) is kept
+    exactly as before: schema validation already rejected unknown strings
+    via enum; this is defense-in-depth for any structure added to the enum
+    before pick_strikes/size_position learn to build it. Read at call time
+    (tests monkeypatch _IMPLEMENTED_STRUCTURES) — a schema-valid but
+    unimplemented structure still fails closed.
     """
+    name = s.get("name", "?")
+    prefix = f"strategy '{name}': "
+
+    for block, key, dest in _RELOCATED:
+        if key in s.get(block, {}):
+            raise ConfigError(
+                f"{prefix}{block}.{key} is global — set it once in the "
+                f"top-level '{dest}' block"
+            )
+
+    has_universe = "universe" in s
+    has_universe_source = "universe_source" in s
+    if has_universe == has_universe_source:
+        raise ConfigError(
+            f"{prefix}exactly one of 'universe' or 'universe_source' is required"
+        )
+    if has_universe_source:
+        source = s["universe_source"]
+        if source not in _UNIVERSE_SOURCES:
+            raise ConfigError(
+                f"{prefix}universe_source '{source}' is not supported; "
+                f"expected one of: {', '.join(_UNIVERSE_SOURCES)}"
+            )
+
     structure_type = str(s["structure"]["type"])
     if structure_type not in _IMPLEMENTED_STRUCTURES:
         raise ConfigError(
             f"structure.type '{structure_type}' is not implemented; "
             f"expected one of: {', '.join(_IMPLEMENTED_STRUCTURES)}"
         )
+
+    if structure_type in _DEBIT_STRUCTURES:
+        for block, key in _DEBIT_KEYS:
+            if key not in s.get(block, {}):
+                raise ConfigError(
+                    f"{prefix}{block}.{key} is required for {structure_type}"
+                )
+        for block, key in _CREDIT_KEYS:
+            if key in s.get(block, {}):
+                raise ConfigError(
+                    f"{prefix}{block}.{key} does not apply to {structure_type}"
+                )
+    else:
+        for block, key in _CREDIT_KEYS:
+            if key not in s.get(block, {}):
+                raise ConfigError(
+                    f"{prefix}{block}.{key} is required for {structure_type}"
+                )
+        if s["manage"].get("manage_dte") is None:
+            raise ConfigError(
+                f"{prefix}manage.manage_dte is required for credit structures"
+            )
+        for block, key in _DEBIT_KEYS:
+            if key in s.get(block, {}):
+                raise ConfigError(
+                    f"{prefix}{block}.{key} does not apply to {structure_type}"
+                )
 
 
 def _flatten(s: dict, risk: dict, execution: dict, service: dict) -> OptionsConfig:
@@ -345,7 +437,11 @@ def load_options_book(path: str = "rules_options.json") -> OptionsBook:
       - malformed JSON (see _read_json)
       - jsonschema violation of STRATEGIES_SCHEMA (strategies-shape) or
         OPTIONS_SCHEMA (legacy shape) — includes field context
-      - a structure.type that is schema-valid but not implemented (_check_strategy)
+      - a duplicate strategy name (D-11)
+      - every per-strategy business rule in _check_strategy (D-04, D-05, D-11)
+      - service.equity_state_db resolving to the same path as the options
+        bot's own service.state_db (T-11-01 — the options store must never
+        be opened on the equity DB)
 
     Legacy files (no top-level "strategies" key) are wrapped via _wrap_legacy
     into a one-strategy book and flow through the identical mapping path
@@ -359,8 +455,24 @@ def load_options_book(path: str = "rules_options.json") -> OptionsBook:
         _validate(data, OPTIONS_SCHEMA)
         data = _wrap_legacy(data)
 
+    names = [s["name"] for s in data["strategies"]]
+    seen: set = set()
+    for n in names:
+        if n in seen:
+            raise ConfigError(f"duplicate strategy name '{n}'")
+        seen.add(n)
+
     for s in data["strategies"]:
         _check_strategy(s)
+
+    equity_db = os.path.abspath(
+        data["service"].get("equity_state_db", _DEFAULT_EQUITY_STATE_DB)
+    )
+    options_db = os.path.abspath(data["service"]["state_db"])
+    if equity_db == options_db:
+        raise ConfigError(
+            "service.equity_state_db must not be the options bot's own state_db"
+        )
 
     return OptionsBook(
         strategies=tuple(

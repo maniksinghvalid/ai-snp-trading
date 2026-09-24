@@ -377,3 +377,149 @@ class TestLegacyView:
         book_cfg = options_book.strategies[0]
         for field in _PRE_EXISTING_FIELDS:
             assert getattr(roundtrip_cfg, field) == getattr(book_cfg, field), field
+
+
+# ============================================================
+# Fail-closed rules for the strategies shape (D-04, D-05, D-11)
+# ============================================================
+
+class TestStrategiesShapeFailsClosed:
+    """Every D-11 misconfiguration raises ConfigError with the offending key named."""
+
+    def test_duplicate_names_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][1]["name"] = "tasty_credit_spreads"
+        with pytest.raises(ConfigError, match="duplicate"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_both_universe_and_universe_source_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["universe_source"] = "equity_watchlist"
+        with pytest.raises(ConfigError, match="exactly one"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_neither_universe_nor_universe_source_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["strategies"][0]["universe"]
+        with pytest.raises(ConfigError, match="exactly one"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_unknown_universe_source_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][1]["universe_source"] = "sp500"
+        with pytest.raises(ConfigError, match="sp500"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_unimplemented_structure_monkeypatched_raises(self, options_book_rules, tmp_path, monkeypatch):
+        """Defense-in-depth: a schema-valid bull_call_spread not yet implemented still fails."""
+        import bot.options.config as config_mod
+        monkeypatch.setattr(config_mod, "_IMPLEMENTED_STRUCTURES", ("iron_condor", "put_credit_spread"))
+        with pytest.raises(ConfigError, match="bull_call_spread"):
+            load_options_book(_write(tmp_path, options_book_rules))
+
+    def test_unknown_structure_type_in_strategies_shape_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["structure"]["type"] = "strangle"
+        with pytest.raises(ConfigError):
+            load_options_book(_write(tmp_path, rules))
+
+    @pytest.mark.parametrize("key", ["ivr_min", "ivp_min", "fear_drop_pct", "fear_ivr_min"])
+    def test_credit_missing_entry_key_raises(self, options_book_rules, tmp_path, key):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["strategies"][0]["entry"][key]
+        with pytest.raises(ConfigError, match=key):
+            load_options_book(_write(tmp_path, rules))
+
+    @pytest.mark.parametrize("key", ["short_delta", "min_credit_to_width"])
+    def test_credit_missing_structure_key_raises(self, options_book_rules, tmp_path, key):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["strategies"][0]["structure"][key]
+        with pytest.raises(ConfigError, match=key):
+            load_options_book(_write(tmp_path, rules))
+
+    @pytest.mark.parametrize("key", ["profit_target_pct_of_credit", "stop_loss_credit_multiple"])
+    def test_credit_missing_manage_key_raises(self, options_book_rules, tmp_path, key):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["strategies"][0]["manage"][key]
+        with pytest.raises(ConfigError, match=key):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_credit_manage_dte_null_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["manage"]["manage_dte"] = None
+        with pytest.raises(ConfigError, match="manage_dte"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_credit_carrying_long_delta_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["structure"]["long_delta"] = 0.30
+        with pytest.raises(ConfigError, match="long_delta"):
+            load_options_book(_write(tmp_path, rules))
+
+    @pytest.mark.parametrize("key", ["long_delta", "max_debit_to_width"])
+    def test_bull_missing_structure_key_raises(self, options_book_rules, tmp_path, key):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["strategies"][1]["structure"][key]
+        with pytest.raises(ConfigError, match=key):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_bull_missing_profit_target_pct_of_max_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["strategies"][1]["manage"]["profit_target_pct_of_max"]
+        with pytest.raises(ConfigError, match="profit_target_pct_of_max"):
+            load_options_book(_write(tmp_path, rules))
+
+    @pytest.mark.parametrize("block,key,value", [
+        ("entry", "ivr_min", 30),
+        ("structure", "short_delta", 0.20),
+        ("manage", "stop_loss_credit_multiple", None),
+    ])
+    def test_bull_carrying_credit_key_raises(self, options_book_rules, tmp_path, block, key, value):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][1][block][key] = value
+        with pytest.raises(ConfigError, match=key):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_sizing_equity_usd_inside_strategy_sizing_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["sizing"]["sizing_equity_usd"] = 50000
+        with pytest.raises(ConfigError, match="risk"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_manage_interval_min_inside_strategy_manage_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["manage"]["manage_interval_min"] = 5
+        with pytest.raises(ConfigError, match="service"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_missing_top_level_risk_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        del rules["risk"]
+        with pytest.raises(ConfigError, match="risk"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_empty_strategies_list_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"] = []
+        with pytest.raises(ConfigError):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_empty_name_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["strategies"][0]["name"] = ""
+        with pytest.raises(ConfigError):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_equity_state_db_equal_to_state_db_raises(self, options_book_rules, tmp_path):
+        rules = copy.deepcopy(options_book_rules)
+        rules["service"]["equity_state_db"] = rules["service"]["state_db"]
+        with pytest.raises(ConfigError, match="equity_state_db"):
+            load_options_book(_write(tmp_path, rules))
+
+    def test_valid_book_fixture_still_loads(self, options_book_rules, tmp_path):
+        book = load_options_book(_write(tmp_path, options_book_rules))
+        assert len(book.strategies) == 2
+
+    def test_valid_legacy_fixture_still_loads(self, options_rules, tmp_path):
+        book = load_options_book(_write(tmp_path, options_rules))
+        assert len(book.strategies) == 1
