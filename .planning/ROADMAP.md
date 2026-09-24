@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 | 10. External Strategy Research | 6/6 | Complete    | 2026-08-18 |
-| 11. Multi-strategy options bot (bull_call_spread) | 6/6 | Complete   | 2026-09-24 |
+| 11. Multi-strategy options bot (bull_call_spread) | 7/7 | Complete   | 2026-09-24 |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -440,7 +440,7 @@ Plans:
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
 
-**Plans:** 6/7 plans complete (11-07 gap closure pending)
+**Plans:** 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -460,4 +460,4 @@ Plans:
 
 **Gap closure** *(11-VERIFICATION.md CR-01 + 11-REVIEW.md WR-01/WR-05 + approved EX-01/Q-01)*
 
-- [ ] 11-07-PLAN.md — _quote_ok gate + near-expiry unquotable escalation + close-exception→NEEDS_ATTENTION in the shared manage path (CR-01, Q-01), close_legs never sells a long once a short failed (EX-01), structure-kind mismatch fail-closed (WR-01), BP headroom/concurrent cap over every ACTIVE row (WR-05) (MSO-05/07/08) [Wave 1, gap_closure]
+- [x] 11-07-PLAN.md — _quote_ok gate + near-expiry unquotable escalation + close-exception→NEEDS_ATTENTION in the shared manage path (CR-01, Q-01), close_legs never sells a long once a short failed (EX-01), structure-kind mismatch fail-closed (WR-01), BP headroom/concurrent cap over every ACTIVE row (WR-05) (MSO-05/07/08) [Wave 1, gap_closure]
