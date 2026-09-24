@@ -1,8 +1,8 @@
 ---
 phase: 11-multi-strategy-options-bot-bull-call-spread
-reviewed: 2026-09-24T17:01:53Z
+reviewed: 2026-09-24T20:15:39Z
 depth: standard
-files_reviewed: 22
+files_reviewed: 23
 files_reviewed_list:
   - backtester/options_run.py
   - bot/main.py
@@ -16,6 +16,7 @@ files_reviewed_list:
   - bot/state/migrations.py
   - docs/research/2026-09-24-super-bull-call-spread.md
   - rules_options.json
+  - scripts/uat_options_probe.py
   - tests/backtester/options/test_options_run.py
   - tests/options/conftest.py
   - tests/options/test_config.py
@@ -29,217 +30,219 @@ files_reviewed_list:
 findings:
   critical: 1
   warning: 7
-  info: 7
-  total: 15
+  info: 11
+  total: 19
 status: issues_found
 ---
 
-# Phase 11: Code Review Report (re-review after gap closure 11-07)
+# Phase 11: Code Review Report (third review, after gap closure 11-08)
 
-**Reviewed:** 2026-09-24T17:01:53Z
-**Depth:** standard. All 22 files were read. The focus was the 11-07 diff `4a065fd^..38b2538` in `bot/options/service.py` and `bot/options/execution.py`.
-**Files Reviewed:** 22
+**Reviewed:** 2026-09-24T20:15:39Z
+**Depth:** standard. All 23 files were read. The focus was the 11-08 diff `f7ceede..284d0e3` (commits 3f32b6a, 7a6744f, 026844c) in `bot/options/execution.py`, `bot/options/service.py` and `scripts/uat_options_probe.py`.
+**Files Reviewed:** 23
 **Status:** issues_found
 
 ## Summary
 
-The 11-07 plan fixes what it set out to fix:
-- `_quote_ok` now guards the shared manage path, and nothing is marked, decided on, or closed against a missing, `'N/A'`, NaN, or crossed quote.
-- A `close_legs` exception ends in NEEDS_ATTENTION, never CLOSING.
-- `close_legs` never sells a long once a short leg failed.
-- The structure-kind check runs both at startup reconcile and in `_manage_position`.
-- BP headroom and the per-strategy concurrent count now include every ACTIVE row.
+11-08 does what it says for the three findings in scope:
+- `open_position` now returns False when the entry unwind is incomplete.
+- `_try_open` turns that False into an active NEEDS_ATTENTION row, and the same scan counts it against BP headroom.
+- Near-expiry escalation needs a streak of misses or the expiry session's final cycle.
+- `_quote_markable` gates every decision outside the guard window.
 
-`pytest tests/options tests/backtester/options tests/state/test_migrations.py`: 474 passed.
+Checks run:
+- Full suite: `1330 passed, 1 skipped`.
+- `git diff f7ceede..HEAD` touches only the five files the plan lists.
+- There is still exactly one `place_order` call site (LIMIT only), and `close_legs` is byte-unchanged (shorts first, EX-01 long block).
+- `in_guard` uses the same `dte <= cfg.assignment_guard_dte` test, on the same `strat_cfg`, that both decision functions check first (`strategy.py:307, 352`). So the gate choice cannot disagree with the decision.
+- `_quote_miss_streak` is keyed by `position_id` (a uuid4 hex, never reused). It is popped on any fully quoted cycle and on escalation. The close path is only reached after `bad` is empty, so the entry is already popped by then. The only stale entries belong to rows that leave OPEN through reconcile. They are bounded, as the `ponytail:` note says, and harmless unless a NEEDS_ATTENTION row is hand-edited back to OPEN.
 
-One BLOCKER remains. It is the deferred backlog item **EX-02**, and it is more serious than the 11-07 plan says. The plan calls it a "misleading ABORTED report". I reproduced it with a scratch script. When the entry unwind fails, `open_position` still returns None. The service then marks the row ABORTED, a status that BP headroom, `busy`, and reconcile all ignore. So live broker legs become invisible to the bot, and the same underlying can be traded again on top of them.
-
-The new code also adds four WARNINGs:
-- The Q-01 escalation fires on the first bad cycle, with no retry.
-- `_quote_ok` still accepts one-sided or arbitrarily wide quotes.
-- A partially closed short is recorded as `CLOSED`.
-- NEEDS_ATTENTION rows now permanently use up BP and strategy slots, and there is no way to resolve them other than editing SQLite by hand.
+The fixes open or expose three new problems. Each is reproduced with a scratch script under the session scratchpad (`repro_unwind_resting.py`, `test_repro_streak.py`):
+1. **CR-03 (BLOCKER).** 11-08 now catches an exception raised during the unwind and alerts "UNWIND INCOMPLETE — close manually". But `fill_leg` leaves its aggressive unwind order **working on the broker** when the status poll raises. If the operator follows the alert, that order can still fill afterwards and create a naked short.
+2. **WR-10.** The expiry-day "final cycle" escalation fires only if some manage cycle actually lands in the last 5 minutes. A skipped fire, which `max_instances=1` makes likely during a slow close, lets the position expire with no alert.
+3. **WR-11.** Snapshot outages are never counted and never alerted. A snapshot failure that persists while OpenD stays connected (for example a quote-rights error, or one code that fails the whole chunk) therefore leaves every affected position unmanaged through expiry, and nothing is sent. The acceptance of T-11-46 relies on OpenDWatchdog, but the watchdog only polls `get_global_state` and cannot see this failure.
 
 ## Disposition of prior findings
 
 | Prior ID | Status | Evidence |
 |----------|--------|----------|
-| CR-01 (unusable quote marked as $0) | **RESOLVED** | `service.py:132-151` `_quote_ok` rejects None, `''`, `'N/A'`, NaN/inf, `ask<=0`, `bid<0`, and `ask<bid`. It is applied to every leg before `mark_spread` (`service.py:974`). The `close_legs` exception now leads to NEEDS_ATTENTION (`service.py:1021-1031`). Tests: `test_quote_ok_accepts_only_two_sided_numeric_quotes`, `test_manage_skips_*_on_invalid_quote`, `test_manage_invalid_long_quote_does_not_trip_breaker`, `test_manage_close_exception_flags_needs_attention`. The residual gap is WR-07 below: one-sided and wide quotes still pass. |
-| Q-01 (skipped forever near expiry) | **RESOLVED, with a new defect** | `service.py:974-998`. It escalates on the first failed cycle with no retry. See WR-06. |
-| WR-01 (structure-kind change leaves positions unmanaged) | **RESOLVED** | Startup reconcile (`service.py:415-457`) and manage (`service.py:963-970`) both compare the debit/credit kind. Iron condor and PCS deliberately share one kind. The `ponytail:` comment explains why that is safe today. |
-| WR-02 (entry premium recorded at mid, not fill) | **STILL OPEN (deferred)** | `service.py:771-782` is unchanged. Carried below. |
-| WR-03 (non-deterministic `daily_scan` rank order) | **STILL OPEN (deferred)** | `universe.py:87` is unchanged. Carried below. |
-| WR-04 (`legacy_view` unvalidated; KeyError; silent override) | **STILL OPEN (deferred)** | `config.py:514-554` and `options_run.py:228-232` are unchanged. Carried below. |
-| WR-05 (BP headroom ignores NEEDS_ATTENTION/CLOSING) | **RESOLVED, with a new consequence** | `service.py:687, 693`. It sums and counts every ACTIVE row. See WR-09: those rows can never be released. |
-| EX-01 (close sells long after short failed) | **RESOLVED** | `execution.py:249-292`. Longs are blocked once `open_shorts` is non-empty. There are 3 parametrized cases plus a test for a failed long. |
-| EX-02 (entry-unwind failure reported as "legs unwound", ABORTED) | **STILL OPEN (deferred), escalated to BLOCKER** | See CR-02. |
-| IN-01 … IN-06 | **STILL OPEN** | None of the touched lines changed. Carried below. |
+| CR-02 (EX-02: failed entry unwind left legs in an ABORTED row) | **RESOLVED, with a residual** | `execution.py:218-240` propagates the unwind result, and an exception counts as incomplete. `service.py:902-930` sets NEEDS_ATTENTION with no `closed_at`, sends a truthful alert, and returns `pos`, so the current scan counts the row (`service.py:777-781`). NEEDS_ATTENTION is in `_ACTIVE_STATUSES`, so later scans count it too. The clean-unwind ABORTED contract is unchanged. The probe honours False (`uat_options_probe.py:209-212`). Tests: `test_open_position_incomplete_unwind_returns_false` (3 cases), `test_entry_scan_incomplete_unwind_flags_needs_attention`, `test_incomplete_unwind_counts_against_bp_in_the_same_scan`, `test_clean_unwind_keeps_aborted_contract`. Residual: the exception branch hands the operator a position that may still have a working order. See CR-03. |
+| WR-06 (Q-01 escalated after one bad cycle) | **RESOLVED, with new edge defects** | `service.py:1080-1124` implements the streak of `_QUOTE_MISS_ESCALATE_CYCLES = 3` plus the final-cycle rule. Failed chunks are skipped per position at `service.py:983-1006`. Edge defects: WR-10 (the final cycle can be skipped), WR-11 (a persistent outage is never escalated) and IN-08 (the streak carries overnight). |
+| WR-07 (`_quote_ok` accepted one-sided or wide quotes) | **RESOLVED** | `service.py:174-188` adds `_quote_markable`. `service.py:1077-1079` selects the gate once. One-sided quotes with ask ≤ $0.10 are accepted on purpose (operator decision; not re-raised). The 14 gate cases, 4 manage cases, the breaker case and the 2 guard-window preservation cases all pass. |
+| WR-02 (entry premium recorded at mid, not fill) | **STILL OPEN (deferred)** | `service.py:826-833` is unchanged. It also bounds T-11-45's under-count. |
+| WR-03 (`daily_scan` order has no tie-break) | **STILL OPEN (deferred)** | `universe.py:87` is unchanged. |
+| WR-04 (`legacy_view` runs before validation) | **STILL OPEN (deferred)** | `config.py:514`, `options_run.py:229-230` are unchanged. |
+| WR-05 | RESOLVED (prior review) | Unchanged. |
+| WR-08 (partial short close recorded as CLOSED) | **STILL OPEN (deferred)** | `service.py:1147-1149` is unchanged. |
+| WR-09 (NEEDS_ATTENTION rows cannot be resolved and permanently use BP and slots) | **STILL OPEN (deferred), priority raised** | 11-08 adds two more ways into NEEDS_ATTENTION: the CR-02 unwind and the WR-06 escalation. |
+| IN-01 … IN-07 | **STILL OPEN (deferred)** | None of the touched lines changed. IN-07 is now reached more often: every WR-07 reject and every outage skip also contributes $0 to the breaker. |
+| EX-03 (a `fill_leg` exception while opening propagates, row stays OPENING) | **STILL OPEN (deferred)** | Unchanged. The resting-order defect in CR-03 applies to this path too. |
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-02 (EX-02): A failed entry unwind leaves live broker legs in an ABORTED row that BP, `busy`, and reconcile all ignore
+### CR-03: A failed status poll leaves the unwind order live on the broker, and the new "UNWIND INCOMPLETE — close manually" alert says nothing about it
 
-**File:** `bot/options/execution.py:209-216`; `bot/options/service.py:835-849`, `92`, `405`, `509`
+**File:** `bot/options/execution.py:93-120` (`fill_leg`), `218-240` (new unwind `except` branch); `bot/options/service.py:902-930`, `1156-1170`
 
-**Issue:** `open_position` discards the return value of `close_legs(filled, quotes, aggressive=True)`. It logs `open_position_unwound` and returns None whether or not the unwind worked. EX-01 made `close_legs` return False on purpose when a short could not be bought back, and its docstring (`execution.py:231-234`) says the caller escalates. `open_position` does not.
+**Issue:** `fill_leg` places a LIMIT order (l.93) and then awaits `on_placed` (l.95), `_poll` → `gateway.get_order_status` (l.105, 120) and `cancel_order` (l.116). None of that is inside a try/finally. `get_order_status` raises `GatewayError` in two cases: any non-rate-limit error (for example an OpenD hiccup), or a rate limit that is still hit after the retries run out. The order_list_query budget is 10 requests per 30 s and is shared with the equity bot on account 1727266, while this loop polls every 4 s. When the poll raises, the working order is **never cancelled**.
 
-Reproduced with a scratch script. A 2-lot bull call:
-1. The long leg fills 2.
-2. The short leg fills 1 of 2.
-3. The short buy-back fills 0.
+This defect predates 11-08. What 11-08 changed:
+- Before 11-08, an unwind exception propagated. The row stayed OPENING, and startup reconcile flagged it.
+- Now `open_position` catches the exception (l.224-230), returns False, and `_try_open` alerts: "UNWIND INCOMPLETE — legs still open (...); close manually."
+- T-11-38 records this path as mitigated.
 
-The log shows `close_longs_skipped_short_open`, then `open_position_unwound unwound_legs=2`, then the call returns `None`. The broker is left holding +2 long calls and -1 short call.
+The operator is told to close the legs by hand, while an aggressive order the bot placed may still be resting at the natural price.
 
-`_try_open` then:
-- sets the row `ABORTED`;
-- sends "legs unwound, position aborted".
+**Reproduced** (`scratchpad/repro_unwind_resting.py`):
+- Setup: the WING fills; the SHORT never fills on O2-O4; the unwind's `get_order_status` raises.
+- Result: `result: False`. `placed` shows O5 = SELL WING. `cancelled: ['O2','O3','O4']`. **O5 is never cancelled.**
+- Consequence: if the operator sells the wing manually and O5 then fills, the account is short one put with no protection. That is a naked short opened by the bot's own order, which breaks the defined-risk invariant.
 
-After that:
-- ABORTED is not in `_ACTIVE_STATUSES` (`service.py:92`). The position adds nothing to `open_max_loss_total` or `open_count`, and it is not in `busy` (`service.py:682`). The next scan can open another spread on the **same underlying**, on top of the stranded legs.
-- Reconcile only loads OPEN/OPENING/CLOSING (`service.py:405`). The stranded codes are therefore not in `known_codes` and are logged at debug level as "external / ignored" (`service.py:509`). Nothing alerts, and the P&L of those legs never reaches the daily breaker.
-- The operator receives a Telegram message saying the legs were unwound, which is false.
+Other paths with the same exposure:
+- The 11-07 close-exception path (`options_close_error` → "close incomplete — check the account", `service.py:1156-1170`).
+- EX-03 (the opening legs).
+- Task cancellation during `fill_leg`. `asyncio.run` cancels pending job tasks at shutdown, and the row is then flagged "restarted mid-opening" while the order stays live.
 
-The 11-07 plan treats this as a cosmetic reporting issue. In fact it is unmonitored live exposure, plus a way to double up on an underlying. Before EX-01 the leftover was a naked short. After EX-01 it is defined-risk, but it is still invisible to the bot. The same thing happens when unwinding a long-only `filled` list and the long sale fails.
-
-No test covers `open_position` when `close_legs` returns False.
-
-**Fix:** Propagate the unwind result and escalate, rather than abort:
+**Fix:** Guarantee the cancel on every exit path from `fill_leg`, not only the TTL path, and name any order that may still be live in the escalation:
 ```python
-# execution.py, open_position
-unwound = await self.close_legs(filled, quotes, aggressive=True)
-...
-return None if unwound else False     # or raise / return a sentinel
-
-# service.py, _try_open
-if filled is None or filled is False:
-    status = "ABORTED" if filled is None else "NEEDS_ATTENTION"
-    self._store.set_position_status(position_id, status,
-        closed_at=now_et().isoformat() if status == "ABORTED" else None,
-        close_reason="open_failed")
-    await self._alerter.send(
-        f"<b>Options entry failed</b> {_esc(code)} — "
-        + ("legs unwound, position aborted." if status == "ABORTED"
-           else "UNWIND INCOMPLETE — legs still open; close manually."))
+order_id = await self._gw.place_order(code, int(qty), price, trd_side)
+try:
+    if on_placed is not None:
+        await on_placed(order_id)
+    ...poll loop / TTL cancel / re-read (unchanged)...
+except BaseException:
+    try:
+        await asyncio.shield(self._gw.cancel_order(order_id))
+    except Exception:
+        _logger.error("leg_cancel_on_error_failed", code=code, order_id=order_id)
+    raise
 ```
-A NEEDS_ATTENTION row is active, so it keeps the underlying busy and counts against BP (WR-05). Add one test in which the short buy-back fills 0.
+In the `_try_open` False alert and the `options_close_error` alert, add "check for working orders before closing manually". Better still, pass along the order_ids from the `open_position_unwound` audit. Add an executor test in which `get_order_status` raises on the unwind order, and assert that `cancel_order` was called with it.
 
 ## Warnings
 
-### WR-06: Q-01 permanently hands a position to manual control after one bad snapshot cycle
+### WR-10: Expiry-day escalation depends on one cycle that APScheduler can skip, so an unquotable position can expire with no alert
 
-**File:** `bot/options/service.py:974-998`
+**File:** `bot/options/service.py:1091-1096`; job registration `service.py:589` (`max_instances=1`)
 
-**Issue:** The first cycle with any `_quote_ok` failure while `dte <= assignment_guard_dte` sets NEEDS_ATTENTION. That row then leaves the manage loop for good, because only OPEN rows are managed. Both shipped strategies use `assignment_guard_dte: 1` (`rules_options.json`). The bull call has `manage_dte: null`, so at DTE 1 the assignment guard is its only automated exit.
+**Issue:** On expiry day (dte 0), a position whose streak is still below 3 escalates only if some cycle satisfies `now + 5 min >= cutoff`, which means it runs in [15:50, 15:55). There is exactly one such scheduled fire. It is lost in any of these cases:
+- **The previous cycle overruns.** `options_manage` has `max_instances=1`, and APScheduler drops a fire while the previous run is still going. A non-aggressive close (for example a profit_target on another position) can take up to `(max_retries+1) × ttl_s` = 4 × 45 s = 3 min **per leg**, so one 2-leg close already exceeds the 5-minute interval.
+- **The snapshot chunk fails on that cycle.** The position is skipped as an outage (l.997-1006) and never reaches the final-cycle test.
+- **The bot restarts between about 15:50 and 15:55.** The first IntervalTrigger fire then lands after the cutoff.
 
-The first manage cycle runs at 09:35 ET (`service.py:84`). That is when quotes on single-name options are most likely to be briefly missing or crossed. Also, when `get_market_snapshot` fails for a whole chunk (`service.py:903-905`), `quotes` has no entries for up to 400 codes. In that case every position in the window escalates at once.
+**Reproduced** (`scratchpad/test_repro_streak.py::test_final_cycle_missed_never_escalates`):
+- An expiry-day position is unquotable at 15:43 and at 15:48. Both are retries, because 15:48 + 5 = 15:53 < 15:55.
+- With the 15:53 fire skipped, the position is still OPEN, 0 alerts have been sent, and `_is_rth_now()` is False at 15:58. It expires unmanaged, and the only trace is `..._retry` log warnings.
+- For a bull call, the risk is exercise or assignment of 100 × qty shares per contract, which is exactly what the guard window exists to prevent.
 
-The result: one transient OpenD or quote hiccup cancels the automated aggressive close that would have run 5 minutes later. The operator then has to close by hand on the day before expiry. The 11-07 plan states "retries next cycle" outside the window, but inside the window there is no retry at all.
+The `ponytail:` note considers only the opposite error (a delayed cycle reading as final one cycle early).
 
-**Fix:** Escalate only after N consecutive failed cycles, or only in the last cycle before the manage cutoff. For example, keep a per-position counter in meta or on the instance:
+**Fix:** On expiry day, stop depending on a single cycle. The simplest option is to widen the final window by one missed cycle: `now + 2 * interval >= cutoff`. The more robust option is to send a one-time heads-up alert (no status change) on the **first** counted miss when `dte <= 0`, so the operator is never silent at expiry. Also let an outage on an expiry-day position count once `final_cycle` is true (see WR-11).
+
+### WR-11: A persistent snapshot failure is treated as transient forever, so near-expiry positions are never escalated and never alerted
+
+**File:** `bot/options/service.py:983-1006`; plan threat T-11-46
+
+**Issue:** Any chunk with `ret != _RET_OK` puts all of its codes (up to 400, which in practice is the whole book) into `unsnapped`. Every position with a leg in that set is skipped, and the only signal is a log warning. There is no counter and no alert, and the skip happens even on the final cycle of expiry day.
+
+Before 11-08, a failed chunk produced `bad` for every leg, so positions inside the guard window escalated and the operator was alerted. 11-08 removed that last alerting path. T-11-46 accepts the risk on the grounds that "OpenDWatchdog alerts on OpenD disconnect". But `bot/service/watchdog.py` polls only `get_global_state()`, which reports connection and login state. The failures that plausibly **persist while OpenD stays connected** are the ones it cannot see:
+- a US-options quote-rights or subscription error;
+- a code that makes the SDK reject the whole snapshot request.
+
+In either case every OPEN position goes unmanaged through its assignment-guard window and expiry with zero Telegram messages. The same failure also blinds the breaker (IN-07).
+
+**Fix:** Keep outages from counting toward the per-position streak (operator scope), but make them visible:
 ```python
-misses = self._quote_misses[pid] = self._quote_misses.get(pid, 0) + 1
-if dte <= strat_cfg.assignment_guard_dte and (misses >= 3 or self._last_manage_cycle_today()):
-    ...escalate...
+if unsnapped:
+    self._snapshot_outage_cycles += 1
+    if self._snapshot_outage_cycles == _QUOTE_MISS_ESCALATE_CYCLES:
+        await self._alerter.send("<b>Options NEEDS ATTENTION</b> — option snapshot failing for "
+                                 f"{self._snapshot_outage_cycles} manage cycles; positions unmanaged.")
+else:
+    self._snapshot_outage_cycles = 0
 ```
-Clear the counter whenever `bad` is empty. Also skip the escalation completely when the snapshot chunk itself failed, and log that as a snapshot outage instead.
-
-### WR-07: `_quote_ok` accepts one-sided (`bid=0`) and arbitrarily wide quotes, so a spurious exit is still possible
-
-**File:** `bot/options/service.py:148-151`; test `tests/options/test_service.py:1117`
-
-**Issue:** The gate is described as "two-sided", but `{"bid": 0, "ask": X}` passes for any X, and nothing bounds `ask - bid`. Consider an illiquid single-name long call quoted `0.10 / 9.00`:
-- It gets a mid of 4.55.
-- `manage_decision_debit` fires `profit_target`.
-- `close_legs` buys the short back, which succeeds, and then works the long at 4.53, then 4.50, 4.47, 4.44.
-- The long order is never filled, and the row goes to NEEDS_ATTENTION.
-
-So a bad quote turned a managed spread into an unmanaged naked long, plus a manual-intervention alert. On the credit side, a wide ask on a short leg inflates the mark and can falsely trip the global daily-loss breaker. This is the same failure CR-01 fixed, now caused by a wide quote rather than a missing one. The entry path already rejects these through `leg_is_liquid` (`bid <= 0`, width limits).
-
-**Fix:** For *decisions* other than `assignment_guard`, require `bid > 0` and a sane width. For example, reuse the strategy's `max_spread_pct_of_mid` with a looser multiplier, or `spread <= max(0.5 * mid, 0.10)`. Keep the looser `_quote_ok` only for the guard-window close, where closing at any price beats pin risk.
-
-### WR-08: A partially closed short leg is recorded as `status='CLOSED'` with an exit price
-
-**File:** `bot/options/service.py:1017-1019`; `bot/options/execution.py:294-295`
-
-**Issue:** `close_legs` calls `on_leg_filled` for partial fills (`result is not None`). `_on_exit_filled` then writes `status="CLOSED"` and the exit price, whatever `filled_qty` was. EX-01 makes "short partially bought back, longs held" an expected outcome. In that case the DB says the short is CLOSED, but the broker still holds `qty - filled_qty` short contracts.
-
-The position goes to NEEDS_ATTENTION, and reconcile never checks NEEDS_ATTENTION rows again. The operator's only record of what is still open is therefore wrong on exactly the leg that carries the risk.
-
-**Fix:** Pass `filled_qty` through and record it:
-```python
-async def _on_exit_filled(leg, order_id, price, filled_qty):
-    full = filled_qty >= int(leg.get("filled_qty") or leg.get("qty"))
-    exits[leg["code"]] = price
-    self._store.set_leg_exit(leg["leg_id"], price=price,
-                             status="CLOSED" if full else "PARTIAL")
-```
-Alternatively, store the closed quantity in a column.
-
-### WR-09: NEEDS_ATTENTION rows are terminal with no way to resolve them, and they now permanently use up BP and strategy slots
-
-**File:** `bot/options/service.py:683-693`
-
-**Issue:** After WR-05, every NEEDS_ATTENTION row counts against `open_max_loss_total` and the strategy's `open_count`, and (as before) keeps its underlying in `busy`. The code comment says "the operator clears it by resolving the row". However:
-- nothing in `bot/`, `scripts/`, or the docs changes a NEEDS_ATTENTION row to a terminal status;
-- no runbook describes how to do it.
-
-After the operator closes the legs in moomoo, the row still counts against BP and slots until someone hand-edits `data/options_state.db`. With `max_concurrent_positions: 4` for `super_bull_call`, four stuck rows turn the strategy off with no alert. `options_entry_scan` simply breaks out on the cap. 11-07 also adds two new ways into NEEDS_ATTENTION: Q-01 and the close-exception path. Those rows' realized P&L is never recorded either.
-
-**Fix:** Add a small operator command, for example `python3 -m bot.options.resolve <position_id> --realized <usd>`. It would set `CLOSED`, `close_reason='manual'`, and `realized_pnl_usd`, and write an audit entry. Document it in CLAUDE.md next to the options-bot run instructions. At minimum, log `options_entry_scan_skipped reason=concurrent_cap` when the cap is reached.
+In addition, when `dte <= 0` and `final_cycle` is true, handle an outage the same way as a counted miss.
 
 ### WR-02 (carried, deferred): Entry premium recorded at the pre-trade mid instead of the fill
+**File:** `bot/options/service.py:826-833`
+**Issue:** Unchanged. `credit_per_spread` and `max_loss_usd` come from chain mids, not fills. That biases the debit gate, BP headroom and realized P&L in the bot's favour. It also bounds the T-11-45 under-count on CR-02 rows.
+**Fix:** After `open_position` returns a list, recompute the premium from `filled[*]["entry_price"]` before setting the row OPEN.
 
-**File:** `bot/options/service.py:771-782`, `1000-1043`
-**Issue:** Unchanged since the prior review. `credit_per_spread` and `max_loss_usd` come from chain mids. The executor fills at the mid ± $0.02 or worse, and escalation can add up to $0.11 per leg. As a result, the 1/4-rule debit gate, BP headroom, and realized P&L are all biased in the bot's favour. The per-leg `entry_price` values are persisted but never used.
-**Fix:** After `open_position` succeeds, recompute the net premium from `filled[*]["entry_price"]`, and update `credit_per_spread` and `max_loss_usd` before setting the row OPEN (see the prior report for the snippet).
-
-### WR-03 (carried, deferred): `daily_scan` read has no tie-break when premarket and intraday rows share a rank
-
+### WR-03 (carried, deferred): `daily_scan` read has no tie-break
 **File:** `bot/options/universe.py:87`
-**Issue:** Unchanged. `ORDER BY rank ASC LIMIT ?` has no tie-breaker. The equity bot's intraday rescans reuse rank numbers, so which 20 names are returned, and in what order, depends on SQLite row order.
-**Fix:** Use `ORDER BY rank ASC, gap_pct DESC, code ASC` at minimum. Better, filter explicitly to `scan_pass='premarket'`, and update D-17 to match.
+**Issue:** Unchanged. `ORDER BY rank ASC LIMIT ?` is non-deterministic when premarket and intraday rows share a rank.
+**Fix:** `ORDER BY rank ASC, gap_pct DESC, code ASC`, or filter on `scan_pass='premarket'`.
 
 ### WR-04 (carried, deferred): `legacy_view` runs before validation
+**File:** `bot/options/config.py:514`; `backtester/options_run.py:229-230`
+**Issue:** Unchanged. It can raise a raw `KeyError` that is not caught, and a per-strategy override is silently replaced by a global knob.
+**Fix:** Validate through `load_options_book` before projecting, and catch `KeyError`/`TypeError` in `options_run`.
 
-**File:** `bot/options/config.py:514-554`; `backtester/options_run.py:228-232`
-**Issue:** Unchanged. A missing `risk` or `service` key raises a raw `KeyError`, and `options_run` only catches `ConfigError`. A per-strategy override of a global knob is silently replaced, even though the live loader rejects the same file. So the backtest can run a config the bot refuses to start with.
-**Fix:** Validate with `load_options_book` or the same `_validate` path before projecting, and catch `KeyError`/`TypeError` in `options_run`.
+### WR-08 (carried, deferred): A partially closed short leg is recorded as `status='CLOSED'`
+**File:** `bot/options/service.py:1147-1149`
+**Issue:** Unchanged. `_on_exit_filled` writes CLOSED whatever `filled_qty` was.
+**Fix:** Compare `filled_qty` with the leg qty, and record `PARTIAL` or the closed quantity.
+
+### WR-09 (carried, deferred, priority raised): NEEDS_ATTENTION rows cannot be resolved and permanently use BP and slots
+**File:** `bot/options/service.py:733-741`
+**Issue:** Unchanged. 11-08 adds two more ways into NEEDS_ATTENTION (the CR-02 unwind and the WR-06 escalation). With `max_concurrent_positions: 4`, four such rows switch `super_bull_call` off with no alert.
+**Fix:** Add an operator resolve command (`CLOSED`, `close_reason='manual'`, `realized_pnl_usd`, plus an audit entry), and log `options_entry_scan_skipped reason=concurrent_cap`.
 
 ## Info
 
-### IN-01 (carried): The EOD HTML "Credit" column prints a negative credit for debit positions
-**File:** `bot/options/service.py:267, 293`
-**Fix:** Render `_premium_label(p.get("credit_per_spread") or 0)` and rename the header to "Premium".
+### IN-08 (new): The near-expiry streak carries overnight, so the first 09:35 miss on expiry day can escalate at once
+**File:** `bot/options/service.py:1085-1086, 390-397`
+**Issue:** The streak is not tied to a session. Suppose a late start on the day before expiry records 2 misses (for example at 15:45 and 15:50). The first 09:35 miss on expiry day is then streak 3, and it escalates. That is the exact price-discovery gap WR-06 was meant to ride out. Reproduced in `test_repro_streak.py::test_streak_carries_overnight_and_first_0935_miss_escalates`: the alert text says "at 0 DTE after 3 manage cycle(s)". The error is toward the human (manual close instead of the automated close 5 minutes later), so it is Info.
+**Fix:** Store `(date, streak)` and start the count over when the date changes, or pop every streak on the first cycle of a new session.
+
+### IN-09 (new): The CR-02 NEEDS_ATTENTION record and alert do not say which legs are actually open
+**File:** `bot/options/service.py:908-913`; `bot/options/execution.py:218-219`
+**Issue:** The alert lists **every** leg code, including legs that never filled. The unwind calls `close_legs` with no callbacks, so its order ids and fills never reach the DB. `on_leg_filled` is also never called for the failing leg's partial fill, so that leg's row stays `WORKING` with no price. The operator's DB record therefore cannot tell them what to close. The `ponytail:` comment states that the broker is the source of truth for quantities.
+**Fix:** Pass the `open_position_unwound` audit's order ids and per-leg filled quantities into the alert. Alternatively, return them together with False once WR-08 adds partial-quantity persistence.
+
+### IN-10 (new): `options_manage_missing_quote` now also fires for present but wide or one-sided quotes
+**File:** `bot/options/service.py:1126`
+**Issue:** After WR-07, a leg rejected by `_quote_markable` for its width is logged with the same event name as a leg that has no quote at all. That makes it hard to tell a data problem from a liquidity problem during triage.
+**Fix:** Add `reason="unmarkable"` or `"invalid"`, for example by logging `_quote_ok(q)` for each bad code.
+
+### IN-11 (pre-existing, probe): The UAT probe closes against an unvalidated snapshot
+**File:** `scripts/uat_options_probe.py:226, 238`
+**Issue:** `q2` is built straight from the raw snapshot. A `'N/A'` bid or ask makes `fill_leg`'s `float(bid)` raise in the middle of `close_legs`. If the short has already been bought back, the script crashes with the long still held and the scratch row left `OPEN`, not `NEEDS_ATTENTION`.
+**Fix:** Before the close, filter `q2` through `service._quote_ok` and fall back to `quotes`, or abort. Wrap `close_legs` in try/except and set NEEDS_ATTENTION on any exception.
+
+### IN-01 (carried): The EOD HTML "Credit" column is negative for debit rows
+**File:** `bot/options/service.py:312, 338`
+**Fix:** Render `_premium_label(...)` and rename the header to "Premium".
 
 ### IN-02 (carried): `insert_option_position` silently defaults a missing `strategy_name` to tasty
 **File:** `bot/options/store.py:59-73`
-**Fix:** Raise `ValueError` when `strategy_name` is missing for new inserts.
+**Fix:** Raise `ValueError` for new inserts that have no strategy_name. The UAT probe insert at `uat_options_probe.py:184-190` also omits it.
 
 ### IN-03 (carried): `main.py` dispatch assumes the rules JSON is an object
 **File:** `bot/main.py:80`
 **Fix:** `if not isinstance(data, dict): print("[ERROR] ...", file=sys.stderr); sys.exit(1)`.
 
-### IN-04 (carried): `equity_state_db` ignores the `BOT_STATE_DB` override that the equity bot honours
-**File:** `bot/options/config.py`; `bot/options/universe.py:51`; `bot/options/service.py:639`
-**Fix:** Document the coupling in CLAUDE.md, or log the resolved absolute path at startup.
+### IN-04 (carried): `equity_state_db` ignores `BOT_STATE_DB`
+**File:** `bot/options/config.py`; `bot/options/universe.py:51`
+**Fix:** Document the coupling, or log the resolved absolute path at startup.
 
-### IN-05 (carried): The provenance doc does not list the 60% vs the video's 40–50% profit target as a deviation
-**File:** `docs/research/2026-09-24-super-bull-call-spread.md:21, 56`
-**Fix:** Add a Deviations bullet for the fixed-target percentage.
+### IN-05 (carried): The provenance doc does not list the 60% vs 40–50% profit-target deviation
+**File:** `docs/research/2026-09-24-super-bull-call-spread.md`
+**Fix:** Add a Deviations bullet.
 
-### IN-06 (carried): Blocking sqlite read with a 5 s busy timeout on the event loop
-**File:** `bot/options/universe.py:58`; `bot/options/service.py:639`
-**Fix:** Lower `timeout_s` to about 0.5 s, or run the read in an executor.
+### IN-06 (carried): A blocking sqlite read with a 5 s busy timeout runs on the event loop
+**File:** `bot/options/universe.py:58`; `bot/options/service.py:687`
+**Fix:** Lower `timeout_s` to about 0.5 s, or use `run_in_executor`.
 
-### IN-07 (new): A quote-skipped position counts as $0 unrealized, so the daily breaker cannot see its loss
-**File:** `bot/options/service.py:997, 912-923`
-**Issue:** CR-01 correctly stops false breaker trips. The trade-off is that every skipped position, including every position during a snapshot outage, contributes 0.0 to `unrealized_total`. The breaker fails open for as long as the quotes stay bad. This is acceptable as a trade-off, but it is not documented.
-**Fix:** Log `unquoted_positions=len(skipped)` on the breaker check, or reuse the last good mark (with a staleness bound) for the breaker sum only.
+### IN-07 (carried, now reached more often): A skipped position counts as $0 unrealized for the breaker
+**File:** `bot/options/service.py:997-1006, 1126-1127`
+**Issue:** Every WR-07 reject, every WR-06 retry and every outage skip now contribute 0.0 to `unrealized_total`. During a persistent outage (WR-11), the breaker sees only realized P&L.
+**Fix:** Log `unquoted_positions=` on the breaker check, or reuse the last good mark within a staleness bound.
 
 ---
 
-_Reviewed: 2026-09-24T17:01:53Z_
+_Reviewed: 2026-09-24T20:15:39Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
