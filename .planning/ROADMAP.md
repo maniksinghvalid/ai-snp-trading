@@ -440,7 +440,7 @@ Plans:
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
 
-**Plans:** 6/6 plans complete
+**Plans:** 6/7 plans complete (11-07 gap closure pending)
 
 Plans:
 **Wave 1**
@@ -457,3 +457,7 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 11-06-PLAN.md — Service manage side: per-strategy manage dispatch, debit close/%-of-max, D-29 unknown-strategy guard, strategy name in exit/EOD, book-based main(); phase gate (MSO-08/07/05/09) [Wave 3]
+
+**Gap closure** *(11-VERIFICATION.md CR-01 + 11-REVIEW.md WR-01/WR-05 + approved EX-01/Q-01)*
+
+- [ ] 11-07-PLAN.md — _quote_ok gate + near-expiry unquotable escalation + close-exception→NEEDS_ATTENTION in the shared manage path (CR-01, Q-01), close_legs never sells a long once a short failed (EX-01), structure-kind mismatch fail-closed (WR-01), BP headroom/concurrent cap over every ACTIVE row (WR-05) (MSO-05/07/08) [Wave 1, gap_closure]
