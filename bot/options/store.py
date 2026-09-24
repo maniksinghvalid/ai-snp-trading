@@ -11,6 +11,14 @@ Every method follows the StateStore house pattern (IN-01): writes take
 same lock and reset it before returning plain dicts. All values are bound with
 '?' placeholders — no SQL string interpolation.
 
+Phase 11 (D-18/D-19/D-22): option_positions carries a strategy_name column
+(NOT NULL DEFAULT 'tasty_credit_spreads', migration 0007). insert_option_position
+omits any column whose value is None so an unset/None strategy_name falls back
+to that SQL default rather than raising a NOT NULL violation. credit_per_spread
+stores a signed net premium: positive for credit structures (unchanged), negative
+for a debit structure like bull_call_spread — no new column. count_opened_on
+takes an optional strategy_name filter for per-strategy daily entry caps.
+
 The leg option right lives in a column named `right`, quoted as "right" in every
 statement (it is a SQLite join keyword).
 
@@ -22,11 +30,12 @@ from typing import Optional
 from bot.state.store import StateStore
 
 
-# Column order matches _migration_0006 (bot/state/migrations.py).
+# Column order matches _migration_0006 + _migration_0007 (bot/state/migrations.py).
 _POSITION_COLUMNS = (
     "position_id", "underlying", "structure", "expiry", "dte_at_entry",
     "ivr_at_entry", "credit_per_spread", "width", "qty", "max_loss_usd",
     "status", "opened_at", "closed_at", "close_reason", "realized_pnl_usd",
+    "strategy_name",
 )
 
 _LEG_COLUMNS = (
@@ -51,14 +60,19 @@ class OptionsStore(StateStore):
         """Insert one option_positions row.
 
         Values are read with pos.get(), so a caller may omit any nullable column
-        (it lands as NULL).
+        (it lands as NULL). Columns whose value is None (including an omitted or
+        explicitly-None strategy_name) are left out of the INSERT entirely — for
+        strategy_name this means the SQL DEFAULT 'tasty_credit_spreads' applies
+        instead of failing the NOT NULL constraint (D-18); every other nullable
+        column still lands NULL as before, since it was never in `cols`.
         """
+        cols = [c for c in _POSITION_COLUMNS if pos.get(c) is not None]
         sql = (
-            f"INSERT INTO option_positions ({', '.join(_POSITION_COLUMNS)}) "
-            f"VALUES ({', '.join('?' * len(_POSITION_COLUMNS))})"
+            f"INSERT INTO option_positions ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' * len(cols))})"
         )
         with self._lock:
-            self._conn.execute(sql, tuple(pos.get(c) for c in _POSITION_COLUMNS))
+            self._conn.execute(sql, tuple(pos.get(c) for c in cols))
             self._conn.commit()
 
     def insert_option_leg(self, leg: dict) -> None:
@@ -180,13 +194,25 @@ class OptionsStore(StateStore):
             ).fetchone()
         return float(row[0] or 0.0)
 
-    def count_opened_on(self, date_iso: str) -> int:
-        """Count positions opened on the given ET date (per-day entry cap)."""
+    def count_opened_on(self, date_iso: str, strategy_name: Optional[str] = None) -> int:
+        """Count positions opened on the given ET date (per-day entry cap).
+
+        strategy_name: when None (default), counts positions opened that day
+        across every strategy (unchanged pre-Phase-11 behavior). When given,
+        counts only that strategy's positions (D-22 per-strategy entry cap).
+        """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM option_positions WHERE opened_at LIKE ? || '%'",
-                (date_iso,),
-            ).fetchone()
+            if strategy_name is None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM option_positions WHERE opened_at LIKE ? || '%'",
+                    (date_iso,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM option_positions "
+                    "WHERE opened_at LIKE ? || '%' AND strategy_name=?",
+                    (date_iso, strategy_name),
+                ).fetchone()
         return int(row[0] or 0)
 
     # --------------------------------------------------------

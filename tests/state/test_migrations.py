@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from bot.state.migrations import run_migrations, CURRENT_VERSION, MIGRATIONS
+from bot.state.migrations import run_migrations, CURRENT_VERSION, MIGRATIONS, _migration_0007
 
 
 # ============================================================
@@ -545,10 +545,14 @@ class TestMigration0006FreshDb:
     """Migration 0006 adds the option_positions and option_legs tables."""
 
     def test_migration_0006_user_version_is_6(self, in_memory_conn):
-        """PRAGMA user_version must equal 6 == CURRENT_VERSION == len(MIGRATIONS)."""
+        """PRAGMA user_version must equal CURRENT_VERSION == len(MIGRATIONS).
+
+        Note: originally tested for version==6; updated to CURRENT_VERSION after
+        migration 0007 was added in Phase 11. The test name is preserved for git
+        history continuity; CURRENT_VERSION now equals 7.
+        """
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6
         assert version == CURRENT_VERSION == len(MIGRATIONS)
 
     def test_migration_0006_option_tables_exist(self, in_memory_conn):
@@ -620,11 +624,16 @@ class TestMigration0006Idempotency:
     """Running run_migrations twice after 0006 must be a no-op (WR-03)."""
 
     def test_migration_0006_idempotent_run_twice_no_raise(self, in_memory_conn):
-        """Second run_migrations call must not raise and must stay at version 6."""
+        """Second run_migrations call must not raise and must stay at CURRENT_VERSION.
+
+        Note: originally asserted version==6; updated to CURRENT_VERSION after
+        migration 0007 was added in Phase 11. The test name is preserved for git
+        history continuity; CURRENT_VERSION now equals 7.
+        """
         run_migrations(in_memory_conn)
         run_migrations(in_memory_conn)  # second call — idempotent (WR-03)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6
+        assert version == CURRENT_VERSION
 
     def test_migration_0006_existing_rows_survive_second_run(self, in_memory_conn):
         """A row written between two runs must survive (no DROP + re-CREATE)."""
@@ -659,7 +668,13 @@ class TestUpgradeFromV5Db:
     """A DB at user_version=5 gains both option tables on the next run_migrations."""
 
     def test_upgrade_from_v5_db(self, in_memory_conn):
-        """Simulated v5 DB must gain option_positions and option_legs at v6."""
+        """Simulated v5 DB must gain option_positions and option_legs at CURRENT_VERSION.
+
+        Note: originally asserted the post-upgrade version==6; updated to
+        CURRENT_VERSION after migration 0007 was added in Phase 11 (an upgrade
+        from v5 now runs all the way through 0007). The test name is preserved
+        for git history continuity.
+        """
         # Apply 0001-0005 only, then pin user_version to 5.
         in_memory_conn.executescript(MIGRATIONS[0])
         for migration in MIGRATIONS[1:5]:
@@ -683,4 +698,58 @@ class TestUpgradeFromV5Db:
         }
         assert {"option_positions", "option_legs"}.issubset(names_after)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6
+        assert version == CURRENT_VERSION
+
+
+# ============================================================
+# Migration 0007 tests (Phase 11: strategy_name on option_positions)
+# ============================================================
+
+class TestMigration0007:
+    """Migration 0007 adds a guarded, idempotent strategy_name column."""
+
+    def test_migration_0007_fresh_db_column_notnull_default(self, in_memory_conn):
+        """Fresh DB: strategy_name is NOT NULL DEFAULT 'tasty_credit_spreads'; version==7."""
+        run_migrations(in_memory_conn)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == CURRENT_VERSION == 7 == len(MIGRATIONS)
+
+        info = in_memory_conn.execute("PRAGMA table_info(option_positions)").fetchall()
+        row = next(r for r in info if r[1] == "strategy_name")
+        # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+        assert row[3] == 1
+        assert row[4] == "'tasty_credit_spreads'"
+
+    def test_migration_0007_double_apply_no_raise_no_duplicate(self, in_memory_conn):
+        """Calling _migration_0007 directly a second time must not raise or duplicate."""
+        run_migrations(in_memory_conn)
+        _migration_0007(in_memory_conn)  # direct second application
+        info = in_memory_conn.execute("PRAGMA table_info(option_positions)").fetchall()
+        col_list = [r[1] for r in info]
+        assert col_list.count("strategy_name") == 1
+
+    def test_upgrade_from_v6_db_fills_default_on_existing_row(self, in_memory_conn):
+        """A v6 DB with a pre-existing row gains strategy_name defaulted on upgrade."""
+        # Apply 0001-0006 (MIGRATIONS[0] script + callables 1..5), pin user_version to 6.
+        in_memory_conn.executescript(MIGRATIONS[0])
+        for migration in MIGRATIONS[1:6]:
+            migration(in_memory_conn)
+        in_memory_conn.execute("PRAGMA user_version = 6")
+        in_memory_conn.commit()
+
+        in_memory_conn.execute(
+            "INSERT INTO option_positions (position_id, underlying, structure, "
+            "expiry, status) VALUES ('legacy-1', 'US.SPY', 'iron_condor', "
+            "'2026-09-18', 'CLOSED')"
+        )
+        in_memory_conn.commit()
+
+        run_migrations(in_memory_conn)
+
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == CURRENT_VERSION == 7
+
+        row = in_memory_conn.execute(
+            "SELECT strategy_name FROM option_positions WHERE position_id='legacy-1'"
+        ).fetchone()
+        assert row[0] == "tasty_credit_spreads"

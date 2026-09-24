@@ -230,3 +230,54 @@ def test_meta_does_not_collide_with_circuit_breaker_helper(store):
     store.set_meta("options_breaker_date", "2026-08-18")
     assert store.get_circuit_breaker_date() == "2026-08-17"
     assert store.get_meta("options_breaker_date") == "2026-08-18"
+
+
+# ============================================================
+# strategy_name (Phase 11, D-18/D-19/D-22)
+# ============================================================
+
+def test_insert_without_strategy_name_defaults_to_tasty_credit_spreads(store):
+    store.insert_option_position(_pos())  # no strategy_name key at all
+    row = store.get_option_positions(("OPEN",))[0]
+    assert row["strategy_name"] == "tasty_credit_spreads"
+
+
+def test_insert_with_strategy_name_none_defaults_to_tasty_credit_spreads(store):
+    store.insert_option_position(_pos(strategy_name=None))
+    row = store.get_option_positions(("OPEN",))[0]
+    assert row["strategy_name"] == "tasty_credit_spreads"
+
+
+def test_insert_with_explicit_strategy_name_round_trips(store):
+    store.insert_option_position(_pos(strategy_name="super_bull_call"))
+    row = store.get_option_positions(("OPEN",))[0]
+    assert row["strategy_name"] == "super_bull_call"
+
+
+def test_debit_position_negative_credit_and_max_loss_round_trip_exactly(store):
+    store.insert_option_position(_pos(
+        structure="bull_call_spread",
+        strategy_name="super_bull_call",
+        credit_per_spread=-1.96,
+        width=10.0,
+        max_loss_usd=980.0,
+    ))
+    row = store.get_option_positions(("OPEN",))[0]
+    assert row["credit_per_spread"] == -1.96
+    assert row["max_loss_usd"] == 980.0
+
+
+def test_count_opened_on_filters_by_strategy_name(store):
+    store.insert_option_position(_pos(
+        "P1", opened_at="2026-08-17T10:00:00-04:00", strategy_name="tasty_credit_spreads",
+    ))
+    store.insert_option_position(_pos(
+        "P2", opened_at="2026-08-17T11:00:00-04:00", strategy_name="super_bull_call",
+    ))
+    store.insert_option_position(_pos(
+        "P3", opened_at="2026-08-17T12:00:00-04:00", strategy_name="super_bull_call",
+    ))
+
+    assert store.count_opened_on("2026-08-17", strategy_name="super_bull_call") == 2
+    assert store.count_opened_on("2026-08-17", strategy_name="tasty_credit_spreads") == 1
+    assert store.count_opened_on("2026-08-17") == 3   # unfiltered: all strategies (unchanged)

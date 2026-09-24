@@ -359,6 +359,48 @@ def _migration_0006(conn: sqlite3.Connection) -> None:
     )
 
 
+# ============================================================
+# Migration 0007 — Phase 11 strategy_name on option_positions
+# ============================================================
+#
+# New column on option_positions:
+#   strategy_name — TEXT NOT NULL, defaulted to the tasty_credit_spreads book.
+#                    Every position written before Phase 11 was opened by that
+#                    book (the only strategy that existed), so the default is
+#                    historically correct for every existing row, not a guess.
+#
+# This runner also migrates the equity DB (data/bot_state.db) on its next
+# StateStore.open() — the same shared-runner behavior as migration 0006, which
+# already created the (equity-unused) option_positions/option_legs tables there.
+# 0007 adds one more unused column to that already-unused table; no equity table
+# is touched.
+#
+# WR-03: callable (not SQL string) so the guarded ALTER commits atomically with
+# the PRAGMA user_version bump in run_migrations() (same pattern as 0002/0004/0005).
+
+_OPTION_POSITIONS_0007_COLUMNS = (
+    ("strategy_name", "TEXT NOT NULL DEFAULT 'tasty_credit_spreads'"),
+)
+
+
+def _migration_0007(conn: sqlite3.Connection) -> None:
+    """Add strategy_name to option_positions, idempotently (D-18).
+
+    Guarded via PRAGMA table_info so a second call (or a partial-failure
+    re-run) is a no-op rather than "duplicate column name" (same shape as
+    _migration_0002/_migration_0004/_migration_0005). Existing rows inherit
+    the column's SQL default value — correct for every pre-Phase-11 row,
+    since tasty_credit_spreads was the only strategy that could have written
+    an option_positions row before this migration existed.
+
+    D-08: never edit shipped migrations 0001-0006 — new objects always in 0007.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(option_positions)")}
+    for col, decl in _OPTION_POSITIONS_0007_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE option_positions ADD COLUMN {col} {decl}")
+
+
 MIGRATIONS = [
     _MIGRATION_0001,
     _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
@@ -366,10 +408,11 @@ MIGRATIONS = [
     _migration_0004,   # adds entry_order_id, exit_order_id, avg_fill_price (Phase 4)
     _migration_0005,   # Phase 7: tod_baselines table + broker_stop_order_id on positions
     _migration_0006,   # Phase 8: option_positions + option_legs (+ legs index)
+    _migration_0007,   # Phase 11: strategy_name on option_positions
 ]
 
 
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 
 
 # ============================================================
