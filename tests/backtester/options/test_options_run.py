@@ -233,3 +233,56 @@ def test_help_exits_0(capsys):
     out = capsys.readouterr().out
     for flag in ("--rules", "--symbols", "--start", "--end", "--set", "--out", "--workers"):
         assert flag in out
+
+
+# ============================================================
+# --strategy / legacy_view projection (D-10)
+# ============================================================
+
+def test_strategy_flag_selects_named_strategy(monkeypatch, tmp_path):
+    _patch_offline(monkeypatch)
+    monkeypatch.setattr(run_mod, "OptionsBacktestEngine", _FakeEngine)
+
+    exit_code = run_mod.main(
+        _base_args(tmp_path, **{"--strategy": "tasty_credit_spreads"})
+        + ["--set", "entry.ivr_min=20"]
+    )
+
+    assert exit_code == 0
+    effective = json.loads((tmp_path / "config.json").read_text())
+    assert effective["strategy_name"] == "tasty_credit_spreads"
+    assert effective["entry"]["ivr_min"] == 20
+    assert "strategies" not in effective
+
+
+def test_unknown_strategy_exits_1(tmp_path, capsys):
+    exit_code = run_mod.main(_base_args(tmp_path, **{"--strategy": "nope"}))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[ERROR]" in captured.err
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_debit_structure_override_rejected(monkeypatch, tmp_path, capsys):
+    def _boom(_path):
+        raise AssertionError("load_options_config must not run for a rejected debit structure")
+
+    monkeypatch.setattr(run_mod, "load_options_config", _boom)
+
+    exit_code = run_mod.main(
+        _base_args(tmp_path) + ["--set", "structure.type=bull_call_spread"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[ERROR]" in captured.err
+    assert "bull_call_spread" in captured.err
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_help_lists_strategy_flag(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        run_mod.main(["--help"])
+    assert exc_info.value.code == 0
+    assert "--strategy" in capsys.readouterr().out

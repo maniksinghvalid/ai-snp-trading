@@ -14,6 +14,15 @@ StateStore anywhere in this module — a backtest run is provably broker-free (m
 backtester/run.py's stated invariant). The options backtester keeps its state in memory
 only; there is no live options DB for a run to collide with.
 
+Multi-strategy projection (D-10): `--strategy NAME` selects one strategy from a
+strategies-shape rules file (default: the first strategy); `legacy_view(raw, args.strategy)`
+projects it to the legacy flat shape BEFORE `--set` overrides are applied, so every
+documented `--set entry.*`/`structure.*` arm command keeps working verbatim against either
+file shape. A debit structure (`structure.type == "bull_call_spread"`) is rejected with
+`[ERROR]` and exit 1 immediately after overrides are applied — the credit-only leg model in
+`backtester/options/engine.py` cannot replay a debit spread (a bull-call backtest arm is a
+deferred phase).
+
 Warm-up handling (D-10): `--iv-warmup-days` NYSE trading days immediately before
 --start are used ONLY to prime each underlying's ATM-IV series (`_prime_iv_series`,
 mirroring OptionsBacktestEngine.run_day's own IV-update loop) so `iv_rank` has already
@@ -32,7 +41,7 @@ import uuid
 from datetime import date, datetime, timedelta
 
 from bot.config.loader import ConfigError
-from bot.options.config import load_options_config
+from bot.options.config import legacy_view, load_options_config
 
 from backtester.massive import MassiveApiError, MassiveDataSource, load_massive_api_key
 from backtester.options.data import OptionChainSource, trading_days
@@ -46,9 +55,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """CLI flags (CLAUDE.md dash-separated long-option convention)."""
     parser = argparse.ArgumentParser(
         prog="backtester.options_run",
-        description="Replay tasty_credit_spreads against historical Massive option data.",
+        description="Replay a credit-spread strategy from rules_options.json against historical Massive option data.",
     )
     parser.add_argument("--rules", default="rules_options.json", help="Path to rules_options.json")
+    parser.add_argument(
+        "--strategy", default=None,
+        help="Strategy name in a strategies-shape rules file (default: the first strategy); "
+             "projected to the legacy flat shape before --set",
+    )
     parser.add_argument("--symbols", required=True, help="Comma-separated US.XXX codes, e.g. US.SPY,US.QQQ")
     parser.add_argument("--start", required=True, help="Replay start date, YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="Replay end date, YYYY-MM-DD")
@@ -179,9 +193,11 @@ def main(argv=None) -> int:
     Returns a process-style exit code (0 success, 1 on any validation/config/network
     failure) rather than calling sys.exit directly, so it is trivially testable.
 
-    Ordering (WR-05): every argument, the effective config (schema-validated
-    via a throwaway temp file), and the Massive API key are all checked
-    BEFORE the run directory is created — a rejected `--set` override or a
+    Ordering (WR-05): every argument, the `--strategy` projection to the legacy
+    shape (`legacy_view`), the `--set` overrides, the debit-structure rejection,
+    the effective config (schema-validated via a throwaway temp file), and the
+    Massive API key are all checked BEFORE the run directory is created — a
+    rejected `--set` override, an unknown `--strategy`, a debit structure, or a
     missing API key must never leave a half-populated
     `backtester/results/options/<run-id>/` behind. Chain load, replay and
     report writing are wrapped in one exception boundary so a malformed
@@ -206,10 +222,30 @@ def main(argv=None) -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
+    # D-10: project the chosen strategy to the legacy flat shape BEFORE --set
+    # overrides so every documented `--set entry.*`/`structure.*` arm command
+    # keeps working verbatim against either file shape.
+    try:
+        raw = legacy_view(raw, args.strategy)
+    except ConfigError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
     try:
         effective = apply_overrides(raw, args.set_args)
     except ValueError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    # The credit-only leg model in backtester/options/engine.py cannot replay a
+    # debit spread -- reject before any run dir can exist (WR-05).
+    if effective.get("structure", {}).get("type") == "bull_call_spread":
+        print(
+            "[ERROR] structure.type 'bull_call_spread' is a debit structure; the "
+            "options backtester replays credit structures only (a bull-call "
+            "backtest arm is a deferred phase)",
+            file=sys.stderr,
+        )
         return 1
 
     # Schema-validate the EFFECTIVE config through a throwaway temp file --
