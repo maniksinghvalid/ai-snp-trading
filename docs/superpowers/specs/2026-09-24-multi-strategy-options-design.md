@@ -97,7 +97,7 @@ New top-level shape of `rules_options.json`:
   "risk":      { "sizing_equity_usd": 100000, "max_bp_usage_pct": 25,
                  "daily_loss_limit_pct": 2.0 },
   "execution": { "unchanged from today": "limit_buffer_usd, poll_interval_s, ttl_s, escalation_step_usd, max_retries" },
-  "service":   { "unchanged from today, plus": "equity_state_db: data/state.db, manage_interval_min: 5" }
+  "service":   { "unchanged from today, plus": "equity_state_db: data/bot_state.db, manage_interval_min: 5" }
 }
 ```
 
@@ -127,6 +127,10 @@ Phase 9 options backtester keep loading unmodified files. Both shapes validate; 
 config migration is forced.
 
 ## 5. Loader (`bot/options/config.py`)
+
+> **Superseded in mechanism by §12a A1** (`load_options_config` keeps returning one
+> flat per-strategy `OptionsConfig`; the multi-strategy view is `load_options_book`).
+> The flattening and fail-closed rules below still hold.
 
 `load_options_config` returns an `OptionsConfig` carrying the shared
 `risk`/`execution`/`service` fields plus `strategies: tuple[StrategyConfig, ...]`.
@@ -234,11 +238,49 @@ LIMIT orders only; long legs before shorts on open, shorts first on close
 - 0DTE / multi-expiry variants; calendars; anything undefined-risk.
 - Any change to the equity bot.
 
+## 12a. Amendment — planning-time findings (2026-09-24, after rebase onto develop)
+
+The spec was written on a worktree 85 commits behind local `develop`. After rebasing
+(Phase 9 options backtester now present), four corrections apply. They preserve the
+approved intent (existing consumers keep working unchanged); only the mechanism in
+§4/§5/§7 is refined:
+
+- **A1 — Loader API split.** Converting the live `rules_options.json` to the
+  `strategies` shape would break every consumer that calls
+  `load_options_config("rules_options.json")` and reads flat fields: the Phase 9
+  backtester (`backtester/options_run.py`, `backtester/options/engine.py`), the UAT
+  probe (`scripts/uat_options_probe.py`), and ~6 backtester test files. Therefore:
+  `load_options_config(path, strategy=None) -> OptionsConfig` **keeps its name and
+  return type** and returns the flat per-strategy view (shared
+  `risk`/`execution`/`service` values flattened in; default = the first strategy in
+  the list, i.e. `tasty_credit_spreads`). A new `load_options_book(path) ->
+  OptionsBook` returns all strategies plus the shared blocks; only the service uses
+  it. `OptionsConfig` gains defaulted fields (`name`, `universe_source`,
+  `long_delta`, `max_debit_to_width`, `profit_target_pct_of_max`); the IV-gate
+  fields become Optional (None for `bull_call_spread`).
+- **A2 — Backtester projection.** `options_run` gains `--strategy NAME` (default:
+  first strategy). Before `apply_overrides`, the raw file is projected to the legacy
+  flat shape for that strategy via a new `bot.options.config.legacy_view(raw, name)`,
+  so every documented arm command (`--set entry.ivr_min=20`,
+  `structure.short_delta=0.16`, `structure.type=put_credit_spread`) keeps working
+  verbatim. A debit structure is rejected with a clear error (bull-call backtest is
+  out of scope, §12). `legacy_view` output is itself a valid legacy file, so the
+  existing temp-file validation path is unchanged.
+- **A3 — Equity DB path.** The equity bot's DB is `data/bot_state.db`
+  (`bot.state.store.DEFAULT_DB_PATH`), not `data/state.db`; `service.equity_state_db`
+  defaults to that. The 20-code cap is load-bearing: the live `daily_scan` table held
+  23 rows for 2026-09-17; take the first 20 by `rank ASC`.
+- **A4 — No behavior drift for the credit book.** The shipped `rules_options.json`
+  is converted to the `strategies` shape; a test asserts the `tasty_credit_spreads`
+  per-strategy view equals the pre-change flat config field-for-field, and the
+  existing backtester tests pass unmodified.
+
 ## 13. Ops notes
 
-- **Push local develop before dispatching execution**: this worktree forked from
-  origin/develop and lacks Phase 9 (options backtester); executing from a stale
-  base risks divergence.
+- **Branch base**: this branch was rebased onto local `develop` (bb3ee92) during
+  planning. Local `develop` is 87 commits ahead of `origin/develop` (unpushed), so
+  push `develop` before any worktree-dispatched execution (worktrees fork from
+  origin).
 - Implementation enters through a GSD command (CLAUDE.md workflow enforcement);
   this spec is the input to that planning step.
 - New DB column ships with the code that reads it; restart the options bot only

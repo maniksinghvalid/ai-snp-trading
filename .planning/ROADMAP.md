@@ -39,6 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 - [x] **Phase 8: Options Premium Selling (tasty_credit_spreads)** - Successor strategy after Trend Join Long was validated as no-edge (2026-08-13): tastylive-derived defined-risk iron condors / put credit spreads on liquid ETFs (45 DTE, IVR≥30 gate, 20Δ shorts, 50% profit target, 21-DTE exit), self-contained `bot/options/` package + `python -m bot --rules rules_options.json` dispatch (built 2026-08-17 via quick tasks 260817-0ph/155/1ie + UAT batch ad41cd5; 961 tests; live paper UAT `--live-1lot` pending operator run)
 - [x] **Phase 10: External Strategy Research** - Two Reddit-sourced day-trading strategies critically extracted and compared against Trend Join Long; backtest-only research package (`backtester/experimental/`) implementing their automatable cores, pre-registered hypotheses, cache-only cost-realistic backtests across 5 windows/9 regime slices, and a 14-section report — production code changed only on a separate branch if a hypothesis is SUPPORTED (started 2026-08-18) (completed 2026-08-18)
+- [ ] **Phase 11: Multi-strategy options bot (bull_call_spread)** - `strategies` array in `rules_options.json`; one options process runs `tasty_credit_spreads` (unchanged) + new `super_bull_call` bull call debit spread on the equity premarket watchlist; per-strategy sizing, global breaker/BP cap; loader keeps the flat `load_options_config` contract for the backtester/probe (planned 2026-09-24)
 
 ## Phase Details
 
@@ -265,7 +266,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -279,6 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 | 10. External Strategy Research | 6/6 | Complete    | 2026-08-18 |
+| 11. Multi-strategy options bot (bull_call_spread) | 0/? | Planning | - |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -420,3 +422,25 @@ Plans:
 **Wave 5** *(conditional — only if a hypothesis is SUPPORTED in both IS and OOS)*
 
 - [x] 10-06-PLAN.md — Gate task reads the Wave-4 verdict table; if triggered: operator scope checkpoint, then `feature/phase10-<arm>` integration (`strategy_name`/`direction` loaded, `SignalEngine(strategy=...)` seam, new `StrategyCore` subclass, default-off, suite green) — not merged [Wave 5]
+
+### Phase 11: Multi-strategy options bot (bull_call_spread)
+
+**Goal:** `rules_options.json` defines multiple option strategies in a `strategies` array and the ONE options-bot process runs all of them concurrently: the existing `tasty_credit_spreads` credit book (behavior unchanged) plus a new `super_bull_call` debit book — a bull call spread (~30Δ long call, short call one width higher, ≤30% of width debit, no stop, full close at a % of max profit) sourced from "Super Bull Call Spread" (Options With Ravish, youtube VZ1MbM3UQ5Q), whose daily bullish universe is the equity bot's Trend Join Long premarket watchlist (read-only). Per-strategy sizing; global daily-loss breaker and BP cap.
+**Requirements**: MSO-01, MSO-02, MSO-03, MSO-04, MSO-05, MSO-06, MSO-07, MSO-08, MSO-09 (see REQUIREMENTS.md § Multi-Strategy Options)
+**Depends on:** Phase 8 (options bot, `rules_options.json` schema, pure strategy core), Phase 9 (options backtester — a consumer of `load_options_config` that must keep working unchanged), Phase 2 (premarket scanner watchlist in `daily_scan`)
+**Design:** `docs/superpowers/specs/2026-09-24-multi-strategy-options-design.md` (operator-approved 2026-09-24; §12a amendment = planning-time findings after rebase onto develop)
+**Success Criteria** (what must be TRUE):
+
+  1. `rules_options.json` ships in the `strategies` shape with both `tasty_credit_spreads` and `super_bull_call`; `python3 -m bot --rules rules_options.json` registers one entry-scan job per strategy plus one shared manage job and one EOD job
+  2. `load_options_config(path)` still returns a flat `OptionsConfig` (default strategy = first); the `tasty_credit_spreads` view equals the pre-change config field-for-field; the Phase 9 backtester, UAT probe and all pre-existing tests pass without modification to their call sites
+  3. `backtester.options_run` accepts `--strategy NAME` and every documented `--set` arm command keeps working verbatim; a debit structure is rejected with a clear error
+  4. Pure-function tests prove the bull-call strike selection, the ≤`max_debit_to_width` gate, `debit × 100` sizing, and `manage_decision_debit` sign math and check ordering (assignment guard → profit target → optional DTE exit; no stop)
+  5. The equity watchlist is read via a read-only SQLite URI, capped at 20 codes by rank; missing/locked/empty → zero bull-call entries that day; no write path to the equity DB exists
+  6. Positions carry `strategy_name` (idempotent migration, legacy rows default `tasty_credit_spreads`); debit positions store negative `credit_per_spread` and the existing close math yields correct realized P&L for both kinds
+  7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
+  8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 11 to break down)

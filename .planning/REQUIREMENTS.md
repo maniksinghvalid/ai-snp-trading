@@ -120,6 +120,20 @@ Added 2026-08-18. Backtest-only research comparing two externally-sourced (Reddi
 - [x] **XSR-05**: Each hypothesis is reported as SUPPORTED / REJECTED / INSUFFICIENT-EVIDENCE with numbers; `rules.json`/`rules_options.json` are unchanged as part of this phase regardless of verdict
 - [x] **XSR-06**: If a hypothesis is SUPPORTED in both IS and OOS, the exact production integration (default-off, schema-valid) is implemented and tested on a separate feature branch, not merged to `develop` as part of this phase
 
+### Multi-Strategy Options (Phase 11)
+
+Added 2026-09-24. Operator-approved scope lift of the "Multiple strategies / strategy framework" out-of-scope item **for the options bot only** (the equity bot stays single-strategy Trend Join Long). Design: `docs/superpowers/specs/2026-09-24-multi-strategy-options-design.md`.
+
+- [ ] **MSO-01**: `rules_options.json` supports a `strategies` array (unique `name`; per-strategy `universe` XOR `universe_source`, `entry`, `structure`, `sizing`, `manage`) plus shared `risk`/`execution`/`service` blocks; `load_options_book(path)` returns every strategy as a flat `OptionsConfig` with the shared values flattened in; the legacy flat file shape still loads
+- [ ] **MSO-02**: `load_options_config(path, strategy=None)` keeps its name and return type (flat per-strategy view, default = first strategy) so the Phase 9 backtester, UAT probe and existing tests keep working unmodified; `backtester.options_run` gains `--strategy` and projects the chosen strategy to the legacy flat shape via `legacy_view(raw, name)` before `--set` overrides, rejecting debit structures
+- [ ] **MSO-03**: Config fails closed (`ConfigError`) on duplicate names, both/neither universe keys, unknown `universe_source`, an unimplemented `structure.type`, or IV-gate keys missing for a credit structure
+- [ ] **MSO-04**: `bull_call_spread` structure in the pure strategy core: long call at |Δ| closest to `long_delta`, short call = listed strike closest to long + width strictly above, both legs liquid, `0 < debit ≤ max_debit_to_width × width`, BUY leg first; sized via `size_position` with per-spread risk `debit × 100`
+- [ ] **MSO-05**: `manage_decision_debit` exits in order assignment guard → profit target (`profit_target_pct_of_max` of `width − debit`) → optional DTE exit; no stop loss; the debit sign convention is handled in exactly one place
+- [ ] **MSO-06**: The `equity_watchlist` universe source reads today's `daily_scan` codes from the equity bot's DB (`data/bot_state.db`) through a read-only SQLite URI, capped at 20 by `rank ASC`; missing/locked/empty → zero entries for that strategy that day; no write path exists
+- [ ] **MSO-07**: `option_positions.strategy_name` (idempotent guarded migration; legacy rows default `tasty_credit_spreads`); debit positions store negative `credit_per_spread` so the existing close math yields correct realized P&L for both credit and debit structures
+- [ ] **MSO-08**: The ONE options process runs every strategy: per-strategy entry-scan jobs, one manage job dispatching on each position's `strategy_name`, per-strategy caps (entries/day, concurrent), global daily-loss breaker + global BP headroom + global one-position-per-underlying; alerts and the EOD report show the strategy name
+- [ ] **MSO-09**: Shipped `rules_options.json` converted to the `strategies` shape with `tasty_credit_spreads` (behavior identical, proven field-for-field) and `super_bull_call`; strategy provenance doc (transcript-distilled rules, source URL, deviations) committed under `docs/research/`; all Phase 8 safety invariants unchanged
+
 ## v2 Requirements
 
 Acknowledged but deferred — not in the current roadmap.
@@ -141,7 +155,7 @@ Explicitly excluded. Documented to prevent scope creep.
 |---------|--------|
 | Live / real-money trading | Paper (SIMULATE) only this milestone; real capital is a deliberate future decision after validation. No `TrdEnv.REAL` code path. |
 | LLM/AI in the trade-decision loop | The brain is a deterministic mechanical screener; cost/latency/non-determinism unacceptable in the trade loop. Existing `/trade` AI skills stay a separate manual toolkit. |
-| Multiple strategies / strategy framework | One strategy (Trend Join Long) for now; a framework is premature abstraction. |
+| Multiple strategies / strategy framework | One strategy (Trend Join Long) for now; a framework is premature abstraction. **Lifted for the options bot only by operator decision 2026-09-24 (Phase 11, MSO-01..09); the equity bot stays single-strategy.** |
 | Short selling | Strategy is long-only by definition. |
 | Non-S&P 500 universes (broad market, crypto, options) | Single universe keeps scope and quota manageable. |
 | Web dashboard / UI | Telegram is the v1 interface; no UI to build. |
@@ -219,6 +233,15 @@ Which phases cover which requirements.
 | XSR-04 | Phase 10 | Complete — cache-only held throughout, zero new equity fetches |
 | XSR-05 | Phase 10 | Complete — H1-H8 verdicted; only H2 SUPPORTED (not a profitable arm — both exit variants PF&lt;1) |
 | XSR-06 | Phase 10 | Complete (conditional) — gate mechanically TRIGGERED via H2; operator selected `defer` at the Task 2 checkpoint given both exit variants are losing configurations. No feature branch created, `bot/`/`rules.json`/`rules_options.json` untouched — this is the gate correctly closing on informed judgment, not the "nothing SUPPORTED" case |
+| MSO-01 | Phase 11 | Pending |
+| MSO-02 | Phase 11 | Pending |
+| MSO-03 | Phase 11 | Pending |
+| MSO-04 | Phase 11 | Pending |
+| MSO-05 | Phase 11 | Pending |
+| MSO-06 | Phase 11 | Pending |
+| MSO-07 | Phase 11 | Pending |
+| MSO-08 | Phase 11 | Pending |
+| MSO-09 | Phase 11 | Pending |
 | CB-01 | — (v2) | Deferred — superseded by RISK-CIRCUIT (Phase 7), reframed as realized-only −2R |
 | REP-01 | — (v2) | Deferred — not in current roadmap |
 | ALERT-05 | — (v2) | Deferred — not in current roadmap |
@@ -234,6 +257,7 @@ Which phases cover which requirements.
 - Phase 7 strategy-optimization requirements (added 2026-07-03): SIG-RVOL-TOD, RISK-TICK-STOP, RISK-CIRCUIT, EXIT-MODEL — 4 total, all mapped to Phase 7 ✓ — all Complete (EXIT-MODEL's evidence-based selection sub-criterion remains deferred, see row above)
 - Phase 9 options-backtesting requirements (added 2026-08-17): OBT-01..OBT-07 — 7 total, all mapped to Phase 9 ✓ — infrastructure Complete; phase goal (real evidence) not yet achieved, see note above
 - Phase 10 external-strategy-research requirements (added 2026-08-18): XSR-01..XSR-06 — 6 total, all mapped to Phase 10 ✓ — all Complete
+- Phase 11 multi-strategy-options requirements (added 2026-09-24): MSO-01..MSO-09 — 9 total, all mapped to Phase 11 ✓ — Pending
 - v2 requirements: 6 total, all deferred (not in current roadmap) — listed above for traceability completeness, not phase-mapped
 
 ---
