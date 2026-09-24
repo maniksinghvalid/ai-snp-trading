@@ -1221,35 +1221,6 @@ def test_manage_close_exception_flags_needs_attention(
     assert incomplete[0]["position_id"] == "P1"
 
 
-def test_manage_unquotable_leg_inside_guard_window_flags_needs_attention(
-    options_book, make_bot, store, alerter, monkeypatch,
-):
-    audit_events = []
-    monkeypatch.setattr(service, "append_audit", audit_events.append)
-    _seed_bull_spread(store, expiry="2026-08-18")   # 1 DTE on TODAY
-    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
-    bot._executor = _fake_executor()
-    pos = store.get_option_positions(("OPEN",))[0]
-
-    quotes = {LONG_C: {"bid": 3.56, "ask": 3.60}, SHORT_C: {"bid": "N/A", "ask": "N/A"}}
-    result = _run(bot._manage_position(pos, quotes, TODAY))
-
-    assert result == 0.0
-    bot._executor.close_legs.assert_not_awaited()
-    assert _statuses(store, "NEEDS_ATTENTION") == ["B1"]
-    assert alerter.send.await_count == 1
-    body = alerter.send.await_args[0][0]
-    assert "NEEDS ATTENTION" in body
-    assert SHORT_C in body
-    near_expiry = [
-        e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
-    ]
-    assert len(near_expiry) == 1
-    assert near_expiry[0]["position_id"] == "B1"
-    assert near_expiry[0]["codes"] == [SHORT_C]
-    assert near_expiry[0]["dte"] == 1
-
-
 def test_manage_unquotable_leg_outside_guard_window_stays_open(
     options_book, make_bot, store, alerter, monkeypatch,
 ):
@@ -1368,6 +1339,379 @@ def test_concurrent_cap_counts_needs_attention_and_closing_rows(
 
     bot._executor.open_position.assert_not_awaited()
     assert "US.NVDA" not in {p["underlying"] for p in store.get_option_positions(("OPEN",))}
+
+
+# ============================================================
+# CR-02: a failed entry unwind is live exposure, never ABORTED
+# ============================================================
+
+def test_entry_scan_incomplete_unwind_flags_needs_attention(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = MagicMock(
+        open_position=AsyncMock(return_value=False), close_legs=AsyncMock(),
+    )
+
+    _run(bot._job_entry_scan())
+
+    rows = store.get_option_positions(("NEEDS_ATTENTION",))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["underlying"] == "US.SPY"
+    assert row["closed_at"] is None
+    assert row["close_reason"] is None
+    assert _statuses(store, "ABORTED") == []
+    assert _statuses(store, "OPEN") == []
+    assert len(row["legs"]) == 4
+
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "NEEDS ATTENTION" in body
+    assert "UNWIND INCOMPLETE" in body
+    assert "US.SPY" in body
+    assert "tasty_credit_spreads" in body
+    assert "legs unwound" not in body
+
+    incomplete = [e for e in audit_events if e["event"] == "options_entry_unwind_incomplete"]
+    assert len(incomplete) == 1
+    assert incomplete[0]["position_id"] == row["position_id"]
+    assert incomplete[0]["underlying"] == "US.SPY"
+    assert incomplete[0]["strategy_name"] == "tasty_credit_spreads"
+    assert sorted(incomplete[0]["codes"]) == sorted(leg["code"] for leg in row["legs"])
+    assert not [e for e in audit_events if e["event"] == "options_position_aborted"]
+    assert not [e for e in audit_events if e["event"] == "options_position_opened"]
+
+    # A later scan is still blocked — the stranded underlying stays busy.
+    bot._executor = _fake_executor()
+    _run(bot._job_entry_scan())
+    bot._executor.open_position.assert_not_awaited()
+
+    # Manage never touches the stranded codes (SAFE-OG-01).
+    _run(bot._job_manage())
+    bot._executor.close_legs.assert_not_awaited()
+    gateway.get_market_snapshot.assert_not_awaited()
+
+
+def test_incomplete_unwind_counts_against_bp_in_the_same_scan(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch, codes=("US.NVDA", "US.AMD"))
+    _seed_open_spread(
+        store, "T1", strategy_name="tasty_credit_spreads",
+        underlying="US.QQQ", max_loss_usd=24100.0,
+    )
+    bot._executor = MagicMock(
+        open_position=AsyncMock(return_value=False), close_legs=AsyncMock(),
+    )
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    assert bot._executor.open_position.await_count == 1
+    needs_attention = store.get_option_positions(("NEEDS_ATTENTION",))
+    assert [p["underlying"] for p in needs_attention] == ["US.NVDA"]
+    assert needs_attention[0]["qty"] == 4
+    assert needs_attention[0]["max_loss_usd"] == pytest.approx(784.0)
+    assert [p for p in store.get_option_positions(("OPEN",))
+            if p["strategy_name"] == "super_bull_call"] == []
+
+
+def test_clean_unwind_keeps_aborted_contract(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    """PRESERVATION: a clean unwind (None) keeps the ABORTED contract byte-for-byte."""
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor(legs_filled=False)
+
+    _run(bot._job_entry_scan())
+
+    aborted = store.get_option_positions(("ABORTED",))
+    assert len(aborted) == 1
+    assert aborted[0]["close_reason"] == "open_failed"
+    assert aborted[0]["closed_at"]
+    assert (
+        alerter.send.await_args[0][0]
+        == "<b>Options entry failed</b> US.SPY — legs unwound, position aborted."
+    )
+    aborted_events = [e for e in audit_events if e["event"] == "options_position_aborted"]
+    assert aborted_events == [{
+        "event": "options_position_aborted",
+        "position_id": aborted[0]["position_id"],
+        "underlying": "US.SPY",
+    }]
+    assert not [e for e in audit_events if e["event"] == "options_entry_unwind_incomplete"]
+    assert _statuses(store, "NEEDS_ATTENTION") == []
+
+
+# ============================================================
+# WR-06: near-expiry escalation needs a streak (or the expiry session's final cycle)
+# ============================================================
+
+def test_manage_near_expiry_escalates_after_three_consecutive_bad_cycles(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_bull_spread(store, expiry="2026-08-18")   # 1 DTE
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    _snapshot(gateway, {LONG_C: {"bid": 3.56, "ask": 3.60},
+                        SHORT_C: {"bid": "N/A", "ask": "N/A"}})
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    for streak in (1, 2):
+        _run(bot._job_manage())
+        assert _statuses(store, "OPEN") == ["B1"]
+        alerter.send.assert_not_awaited()
+        log.warning.assert_any_call(
+            "options_manage_unquotable_near_expiry_retry",
+            position_id="B1", codes=[SHORT_C], dte=1, streak=streak,
+        )
+
+    _run(bot._job_manage())
+    assert _statuses(store, "NEEDS_ATTENTION") == ["B1"]
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "NEEDS ATTENTION" in body
+    assert SHORT_C in body
+    near_expiry = [
+        e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
+    ]
+    assert len(near_expiry) == 1
+    assert near_expiry[0]["codes"] == [SHORT_C]
+    assert near_expiry[0]["dte"] == 1
+    assert near_expiry[0]["streak"] == 3
+    assert near_expiry[0]["final_cycle"] is False
+
+    _run(bot._job_manage())
+    assert alerter.send.await_count == 1               # one-time alert
+    bot._executor.close_legs.assert_not_awaited()
+
+
+def test_manage_near_expiry_transient_miss_then_good_quote_closes(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_bull_spread(store, expiry="2026-08-18")
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor(exit_prices={LONG_C: 3.58, SHORT_C: 1.62})
+
+    _snapshot(gateway, {LONG_C: {"bid": 3.56, "ask": 3.60},
+                        SHORT_C: {"bid": "N/A", "ask": "N/A"}})
+    _run(bot._job_manage())
+    assert _statuses(store, "OPEN") == ["B1"]
+    alerter.send.assert_not_awaited()
+
+    _snapshot(gateway, {LONG_C: {"bid": 3.56, "ask": 3.60},
+                        SHORT_C: {"bid": 1.60, "ask": 1.64}})
+    _run(bot._job_manage())
+
+    closed = store.get_option_positions(("CLOSED",))
+    assert len(closed) == 1
+    assert closed[0]["close_reason"] == "assignment_guard"
+    assert bot._executor.close_legs.await_args.kwargs["aggressive"] is True
+    assert alerter.send.await_count == 1
+    assert "Options exit" in alerter.send.await_args[0][0]
+    assert bot._quote_miss_streak == {}
+
+
+@pytest.mark.parametrize(
+    "expiry, escalates",
+    [("2026-08-17", True), ("2026-08-18", False)],
+    ids=["expiry_day_escalates", "day_before_expiry_retries"],
+)
+def test_manage_unquotable_near_expiry_final_cycle(
+    options_book, make_bot, store, alerter, monkeypatch, expiry, escalates,
+):
+    """REPLACES test_manage_unquotable_leg_inside_guard_window_flags_needs_attention:
+    that test encoded the WR-06 defect (first in-window miss escalates)."""
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _freeze(monkeypatch, datetime(2026, 8, 17, 15, 52, tzinfo=_ET))
+    _seed_bull_spread(store, expiry=expiry)
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+    quotes = {LONG_C: {"bid": 3.56, "ask": 3.60}, SHORT_C: {"bid": "N/A", "ask": "N/A"}}
+
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+
+    if escalates:
+        assert _statuses(store, "NEEDS_ATTENTION") == ["B1"]
+        assert alerter.send.await_count == 1
+        body = alerter.send.await_args[0][0]
+        assert "NEEDS ATTENTION" in body
+        assert SHORT_C in body
+        near_expiry = [
+            e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
+        ]
+        assert len(near_expiry) == 1
+        assert near_expiry[0]["codes"] == [SHORT_C]
+        assert near_expiry[0]["dte"] == 0
+        assert near_expiry[0]["streak"] == 1
+        assert near_expiry[0]["final_cycle"] is True
+    else:
+        assert _statuses(store, "OPEN") == ["B1"]
+        alerter.send.assert_not_awaited()
+        assert not [
+            e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
+        ]
+
+
+def test_manage_snapshot_outage_never_escalates_near_expiry(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_bull_spread(store, expiry="2026-08-18")
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    gateway.get_market_snapshot = AsyncMock(return_value=(-1, "snapshot failed"))
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    for _ in range(4):        # more than the escalation threshold
+        _run(bot._job_manage())
+
+    assert _statuses(store, "OPEN") == ["B1"]
+    alerter.send.assert_not_awaited()
+    assert not [
+        e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
+    ]
+    log.warning.assert_any_call(
+        "options_manage_snapshot_outage", position_id="B1", codes=[LONG_C, SHORT_C],
+    )
+    bot._executor.close_legs.assert_not_awaited()
+
+
+# ============================================================
+# WR-07: one-sided / wide quotes never drive a decision outside the guard window
+# ============================================================
+
+@pytest.mark.parametrize("q, expected", [
+    (None, False),
+    ({"bid": "N/A", "ask": 1.0}, False),
+    ({"bid": 0, "ask": 0}, False),
+    ({"bid": 0.30, "ask": 0.20}, False),
+    ({"bid": 0.10, "ask": 9.00}, False),
+    ({"bid": 0, "ask": 9.00}, False),
+    ({"bid": 0, "ask": 0.50}, False),
+    ({"bid": 1.00, "ask": 2.00}, False),
+    ({"bid": 0.55, "ask": 0.65}, True),
+    ({"bid": 7.95, "ask": 8.05}, True),
+    ({"bid": 0, "ask": 0.05}, True),
+    ({"bid": 0, "ask": 0.10}, True),
+    ({"bid": 0.15, "ask": 0.25}, True),
+    ({"bid": 1.00, "ask": 1.50}, True),
+])
+def test_quote_markable_rejects_one_sided_and_wide_quotes(q, expected):
+    assert service._quote_markable(q) is expected
+
+
+@pytest.mark.parametrize("case", [
+    "credit_one_sided_long", "credit_wide_short", "debit_wide_long", "debit_one_sided_long",
+])
+def test_manage_skips_position_on_one_sided_or_wide_quote(
+    options_book, make_bot, store, monkeypatch, case,
+):
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+
+    if case.startswith("credit"):
+        _seed_open_spread(store, "P1", qty=2, expiry=EXPIRY, credit_per_spread=2.0)
+        bot = make_bot()
+        pid = "P1"
+        if case == "credit_one_sided_long":
+            quotes = {SHORT_P: {"bid": 0.55, "ask": 0.65}, LONG_P: {"bid": 0, "ask": 0.50}}
+            bad_code = LONG_P
+        else:  # credit_wide_short
+            quotes = {SHORT_P: {"bid": 0.50, "ask": 9.00}, LONG_P: {"bid": 0.15, "ask": 0.25}}
+            bad_code = SHORT_P
+    else:
+        _seed_bull_spread(store)
+        bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+        pid = "B1"
+        if case == "debit_wide_long":
+            quotes = {LONG_C: {"bid": 0.10, "ask": 16.00}, SHORT_C: {"bid": 1.15, "ask": 1.25}}
+            bad_code = LONG_C
+        else:  # debit_one_sided_long
+            quotes = {LONG_C: {"bid": 0, "ask": 16.10}, SHORT_C: {"bid": 1.15, "ask": 1.25}}
+            bad_code = LONG_C
+
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "OPEN") == [pid]
+    log.warning.assert_any_call(
+        "options_manage_missing_quote", position_id=pid, codes=[bad_code],
+    )
+
+
+def test_manage_wide_short_quote_does_not_trip_breaker(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_open_spread(store, "P1", qty=10, expiry=EXPIRY, credit_per_spread=2.0)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 10, SHORT_P: -10})
+    _snapshot(gateway, {SHORT_P: {"bid": 0.50, "ask": 9.00},
+                        LONG_P: {"bid": 0.15, "ask": 0.25}})
+    bot = make_bot()
+    bot._executor = _fake_executor()
+
+    _run(bot._job_manage())
+
+    assert store.get_meta("options_breaker_date") is None
+    alerter.send.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["P1"]
+
+
+@pytest.mark.parametrize("case", ["credit_far_otm_long_wing", "debit_far_otm_short_call"])
+def test_manage_guard_window_closes_despite_one_sided_far_otm_wing(
+    options_book, make_bot, store, case,
+):
+    """PRESERVATION: WR-07 plus WR-06 must never strand a legitimately one-sided
+    far-OTM wing — the looser _quote_ok gate stays inside the guard window."""
+    if case == "credit_far_otm_long_wing":
+        _seed_open_spread(store, "P1", qty=2, expiry="2026-08-18", credit_per_spread=2.0)
+        bot = make_bot()
+        pid = "P1"
+        quotes = {SHORT_P: {"bid": 0.55, "ask": 0.65}, LONG_P: {"bid": 0, "ask": 0.05}}
+    else:
+        _seed_bull_spread(store, expiry="2026-08-18")
+        bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+        pid = "B1"
+        quotes = {LONG_C: {"bid": 3.56, "ask": 3.60}, SHORT_C: {"bid": 0, "ask": 0.05}}
+
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert _statuses(store, "CLOSED") == [pid]
+    closed = store.get_option_positions(("CLOSED",))[0]
+    assert closed["close_reason"] == "assignment_guard"
+    assert bot._executor.close_legs.await_args.kwargs["aggressive"] is True
+    assert _statuses(store, "NEEDS_ATTENTION") == []
 
 
 # ============================================================

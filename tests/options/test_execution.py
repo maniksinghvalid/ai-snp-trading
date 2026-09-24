@@ -303,6 +303,55 @@ def test_first_leg_failure_unwinds_nothing_and_returns_none():
     assert {c.args[0] for c in gw.place_order.call_args_list} == {WING}
 
 
+@pytest.mark.parametrize(
+    "case", ["short_buyback_unfilled", "long_sell_unfilled", "unwind_raises"],
+)
+def test_open_position_incomplete_unwind_returns_false(monkeypatch, case):
+    """CR-02: an unwind that leaves legs open (or raises) returns False, not None."""
+    from bot.options import execution as execution_module
+    log = MagicMock()
+    monkeypatch.setattr(execution_module, "_logger", log)
+    audit = []
+    monkeypatch.setattr(execution_module, "append_audit", audit.append)
+
+    gw = _gw()
+    ex = LegExecutor(gw, _cfg())
+
+    if case == "short_buyback_unfilled":
+        # WING fills 2/2 (O1). SHORT fills 1/2 (O2, partial at the TTL). The
+        # unwind's buy-back of that 1 short never fills (O3-O5); EX-01 then
+        # blocks the WING sale.
+        gw.get_order_status = AsyncMock(
+            side_effect=lambda oid: [_row(oid, {"O1": 2, "O2": 1}.get(oid, 0), 2)]
+        )
+        result = _run(ex.open_position(_legs(), 2, QUOTES))
+        expected_codes = [WING, SHORT, SHORT, SHORT, SHORT]
+    elif case == "long_sell_unfilled":
+        # WING fills (O1). SHORT never fills (O2-O4). The unwind's WING sale
+        # never fills (O5-O7).
+        gw.get_order_status = AsyncMock(
+            side_effect=lambda oid: [_row(oid, 1 if oid == "O1" else 0, 1)]
+        )
+        result = _run(ex.open_position(_legs(), 1, QUOTES))
+        expected_codes = [WING, SHORT, SHORT, SHORT, WING, WING, WING]
+    else:  # unwind_raises — same fill pattern as long_sell_unfilled
+        gw.get_order_status = AsyncMock(
+            side_effect=lambda oid: [_row(oid, 1 if oid == "O1" else 0, 1)]
+        )
+        ex.close_legs = AsyncMock(side_effect=RuntimeError("gateway down"))
+        result = _run(ex.open_position(_legs(), 1, QUOTES))
+        expected_codes = [WING, SHORT, SHORT, SHORT]
+
+    assert result is False
+    assert [c.args[0] for c in gw.place_order.call_args_list] == expected_codes
+    unwound_events = [e for e in audit if e["event"] == "open_position_unwound"]
+    assert len(unwound_events) == 1
+    assert unwound_events[0]["complete"] is False
+
+    if case == "unwind_raises":
+        assert log.error.call_args_list[0].args[0] == "open_position_unwind_error"
+
+
 # ============================================================
 # close_legs
 # ============================================================

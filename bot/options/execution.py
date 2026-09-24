@@ -11,6 +11,8 @@ placed as sequential single-leg LIMIT orders. This module owns that loop:
                   long wings FIRST, so protection is bought before risk is sold),
                   persists each order_id before the next leg is placed, and
                   aggressively unwinds already-filled legs if any leg fails.
+                  Returns None after a clean unwind, or False when the unwind
+                  itself left legs open on the broker (CR-02).
   close_legs    — buys back the SHORT legs before selling the long wings, so the
                   account is never momentarily naked-short; it never sells a
                   long wing while a short leg is still open (EX-01).
@@ -172,8 +174,15 @@ class LegExecutor:
             on_leg_filled: async callback (leg, order_id, price, filled_qty).
 
         Returns:
-            list of {**leg, order_id, entry_price, filled_qty} on full success,
-            or None when any leg failed (the filled legs have been unwound).
+            - list of {**leg, order_id, entry_price, filled_qty} on full success.
+            - None when a leg failed and every filled leg was unwound cleanly
+              (nothing left open on the broker).
+            - False when a leg failed and the unwind did NOT close every filled
+              leg (close_legs returned False, or raised). Legs are still open
+              on the broker and the caller must escalate (CR-02).
+
+            Both failure values are falsy, so callers must compare with
+            `is None` / `is False`, never rely on truthiness alone.
         """
         filled = []
         for leg in legs:
@@ -206,14 +215,29 @@ class LegExecutor:
                     code=leg["code"], side=leg["side"],
                     filled_qty=(result[2] if result else 0), requested_qty=qty,
                 )
-                await self.close_legs(filled, quotes, aggressive=True)
-                _logger.warning("open_position_unwound", unwound_legs=len(filled))
+                try:
+                    unwound = await self.close_legs(filled, quotes, aggressive=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # An unwind that raises is an incomplete unwind by
+                    # definition — letting it propagate would leave the row
+                    # OPENING with no alert (the caller's per-underlying
+                    # except continues before busy.add).
+                    _logger.error(
+                        "open_position_unwind_error", failed_code=leg["code"], exc_info=True,
+                    )
+                    unwound = False
+                _logger.warning(
+                    "open_position_unwound", unwound_legs=len(filled), complete=unwound,
+                )
                 append_audit({
                     "event": "open_position_unwound",
                     "failed_code": leg["code"],
                     "unwound_legs": len(filled),
+                    "complete": unwound,
                 })
-                return None
+                return None if unwound else False
 
             if on_leg_filled is not None:
                 await on_leg_filled(leg, result[0], result[1], result[2])

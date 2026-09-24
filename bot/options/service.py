@@ -735,7 +735,9 @@ class OptionsBot:
     async def _try_open(self, cfg, code, u_rows, today, open_max_loss_total):
         """Evaluate one underlying and, if it qualifies, open the spread.
 
-        Returns the inserted position dict on a filled open, else None.
+        Returns the inserted position dict on a filled open OR an incomplete
+        unwind (CR-02, so the row's live exposure is counted by the current
+        scan too), else None.
         """
         is_debit = cfg.structure_type == "bull_call_spread"
         head = u_rows[0]
@@ -848,6 +850,36 @@ class OptionsBot:
                 "position_id": position_id, "underlying": code,
             })
             return None
+
+        if filled is False:
+            # The unwind itself left legs open on the broker — this is LIVE
+            # exposure, not a clean abort. NEEDS_ATTENTION (never ABORTED),
+            # no closed_at/close_reason/realized_pnl_usd, so
+            # get_realized_pnl_on never books it (MSO-07).
+            self._store.set_position_status(position_id, "NEEDS_ATTENTION")
+            codes = [leg["code"] for leg in sel["legs"]]
+            await self._alerter.send(
+                f"<b>Options NEEDS ATTENTION</b> {_esc(code)} — {_esc(cfg.name)} entry "
+                f"failed; UNWIND INCOMPLETE — legs still open ({_esc(', '.join(codes))}); "
+                f"close manually."
+            )
+            append_audit({
+                "event": "options_entry_unwind_incomplete",
+                "position_id": position_id, "underlying": code,
+                "strategy_name": cfg.name, "codes": codes,
+            })
+            _logger.warning(
+                "options_entry_unwind_incomplete",
+                position_id=position_id, underlying=code, strategy=cfg.name, codes=codes,
+            )
+            # ponytail: the leg rows (all inserted before the first order) are
+            # the operator's record of which codes to check; the broker holds
+            # the quantities. Recording exact per-leg remainders is WR-08's scope.
+            # Returning pos makes _scan_and_open count this row against
+            # opened_today, open_count and open_max_loss_total for the rest of
+            # THIS scan, exactly as every later scan counts it through
+            # _ACTIVE_STATUSES (D-22).
+            return pos
 
         self._store.set_position_status(position_id, "OPEN")
         await self._alerter.send(_fmt_entry(pos, sel["legs"]))

@@ -206,6 +206,10 @@ async def live_1lot(cfg, gateway, symbol, picked):
 
     _p("opening legs (long wing first):", [(l["side"], l["code"]) for l in sel["legs"]], "credit est", round(sel["credit"], 2))
     filled = await ex.open_position(sel["legs"], qty, quotes, on_leg_placed=on_placed, on_leg_filled=on_filled)
+    if filled is False:
+        store.set_position_status(pid, "NEEDS_ATTENTION")
+        _p("!! open FAILED and UNWIND INCOMPLETE — legs still open; close them manually in moomoo. scratch db:", tmpdb)
+        return
     if filled is None:
         store.set_position_status(pid, "ABORTED", closed_at=now_et().isoformat(), close_reason="open_failed")
         _p("!! open FAILED — legs unwound; ABORTED. Check the escalation logs above."); return
