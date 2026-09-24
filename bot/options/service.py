@@ -2,10 +2,13 @@
 """
 bot.options.service — OptionsBot: the always-on options process (Phase 8, D4/D5/D6).
 
-Composes the Phase 8 parts into a bot that trades unattended: an AsyncIOScheduler
-(America/New_York) drives three jobs — entry scan, manage, EOD report — around a
+Composes the Phase 8/11 parts into a bot that trades unattended: an AsyncIOScheduler
+(America/New_York) drives one entry-scan job per configured strategy
+(options_entry_scan_<name>[_2]) plus ONE manage job and ONE EOD report job, around a
 hard startup readiness gate (connect → reconcile → enable entries) and a graceful
-kill-switch shutdown.
+kill-switch shutdown. Per-strategy entries/day and concurrent-position caps are
+enforced per scanning strategy; the daily-loss breaker, BP headroom and the
+one-position-per-underlying rule stay global across every strategy (D-22).
 
 D4: self-contained package. TradingBot is a TEMPLATE, not a base class — its
 __init__ wires BarAggregator/scanner/PositionManager, none of which an options
@@ -431,37 +434,41 @@ class OptionsBot:
     # --------------------------------------------------------
 
     def _register_jobs(self) -> None:
-        """Register the entry-scan (x1 or x2), manage and EOD jobs.
+        """Register per-strategy entry-scan job(s), ONE manage and ONE EOD job.
 
-        Job ids (exact): options_entry_scan, options_entry_scan_2 (only when
-        cfg.second_entry_scan_et is set), options_manage, options_eod. Every
-        timing value comes from rules_options.json (CFG-01).
+        Job ids (exact, D-20): options_entry_scan_<name> (and
+        options_entry_scan_<name>_2 only when that strategy's
+        second_entry_scan_et is set), options_manage, options_eod — the manage
+        and EOD jobs stay singular regardless of how many strategies scan.
+        Every timing value comes from rules_options.json (CFG-01).
         """
-        cfg = self._cfg
         common = dict(coalesce=True, max_instances=1, misfire_grace_time=_MISFIRE_GRACE_S)
 
-        hour, minute = _parse_hhmm(cfg.entry_scan_et)
-        self._scheduler.add_job(
-            self._job_entry_scan,
-            CronTrigger(hour=hour, minute=minute, timezone=_ET),
-            id="options_entry_scan", **common,
-        )
-
-        if cfg.second_entry_scan_et is not None:
-            hour, minute = _parse_hhmm(cfg.second_entry_scan_et)
+        for strat in self._strategies.values():
+            hour, minute = _parse_hhmm(strat.entry_scan_et)
             self._scheduler.add_job(
                 self._job_entry_scan,
                 CronTrigger(hour=hour, minute=minute, timezone=_ET),
-                id="options_entry_scan_2", **common,
+                args=[strat.name],
+                id=f"options_entry_scan_{strat.name}", **common,
             )
+
+            if strat.second_entry_scan_et is not None:
+                hour, minute = _parse_hhmm(strat.second_entry_scan_et)
+                self._scheduler.add_job(
+                    self._job_entry_scan,
+                    CronTrigger(hour=hour, minute=minute, timezone=_ET),
+                    args=[strat.name],
+                    id=f"options_entry_scan_{strat.name}_2", **common,
+                )
 
         self._scheduler.add_job(
             self._job_manage,
-            IntervalTrigger(minutes=cfg.manage_interval_min, timezone=_ET),
+            IntervalTrigger(minutes=self._cfg.manage_interval_min, timezone=_ET),
             id="options_manage", **common,
         )
 
-        hour, minute = _parse_hhmm(cfg.eod_report_et)
+        hour, minute = _parse_hhmm(self._cfg.eod_report_et)
         self._scheduler.add_job(
             self._job_eod,
             CronTrigger(hour=hour, minute=minute, timezone=_ET),
@@ -507,7 +514,8 @@ class OptionsBot:
                 )
                 return
 
-            opened_today = self._store.count_opened_on(today.isoformat())
+            # D-22: entries/day is a per-strategy cap.
+            opened_today = self._store.count_opened_on(today.isoformat(), strategy_name=cfg.name)
             if opened_today >= cfg.max_new_positions_per_day:
                 _logger.info(
                     "options_entry_scan_skipped", reason="per_day_cap", strategy=cfg.name,
@@ -572,12 +580,20 @@ class OptionsBot:
                     ids, "C", cfg.min_dte, cfg.max_dte, 0.03, 0.35,
                 ) or [])
 
+        # busy / open_max_loss_total stay GLOBAL across every strategy (D-22):
+        # one-position-per-underlying and BP headroom bind the whole account.
         active = self._store.get_option_positions(_ACTIVE_STATUSES)
         busy = {p["underlying"] for p in active}
         open_max_loss_total = sum(
             float(p["max_loss_usd"] or 0) for p in active if p["status"] in _OPEN_STATUSES
         )
-        open_count = sum(1 for p in active if p["status"] in _OPEN_STATUSES)
+        # open_count is the scanning strategy's OWN concurrent-position count
+        # (D-22 per-strategy cap) — a Python-side filter over the already-
+        # fetched active list, not a new store query (research Open Question 1).
+        open_count = sum(
+            1 for p in active
+            if p["status"] in _OPEN_STATUSES and p.get("strategy_name") == cfg.name
+        )
 
         grouped = _group_rows_by_underlying(_rows(rows))
         if cfg.universe_source is None:

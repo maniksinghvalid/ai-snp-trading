@@ -295,7 +295,9 @@ def test_register_jobs_registers_the_four_job_ids(make_bot):
     bot = make_bot()
     bot._register_jobs()
     assert {j.id for j in bot._scheduler.get_jobs()} == {
-        "options_entry_scan", "options_entry_scan_2", "options_manage", "options_eod",
+        "options_entry_scan_tasty_credit_spreads",
+        "options_entry_scan_tasty_credit_spreads_2",
+        "options_manage", "options_eod",
     }
 
 
@@ -304,8 +306,24 @@ def test_register_jobs_skips_second_scan_when_unset(make_bot, options_cfg):
     bot = make_bot(replace(options_cfg, second_entry_scan_et=None))
     bot._register_jobs()
     ids = {j.id for j in bot._scheduler.get_jobs()}
-    assert "options_entry_scan_2" not in ids
-    assert "options_entry_scan" in ids
+    assert "options_entry_scan_tasty_credit_spreads_2" not in ids
+    assert "options_entry_scan_tasty_credit_spreads" in ids
+
+
+def test_register_jobs_one_entry_scan_per_strategy(make_bot, options_book):
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    bot._register_jobs()
+    jobs = {j.id: j for j in bot._scheduler.get_jobs()}
+    assert set(jobs) == {
+        "options_entry_scan_tasty_credit_spreads",
+        "options_entry_scan_tasty_credit_spreads_2",
+        "options_entry_scan_super_bull_call",
+        "options_manage", "options_eod",
+    }
+    bull_job = jobs["options_entry_scan_super_bull_call"]
+    assert bull_job.args == ("super_bull_call",)
+    assert "hour='10'" in str(bull_job.trigger)
+    assert "minute='5'" in str(bull_job.trigger)
 
 
 # ============================================================
@@ -694,6 +712,134 @@ def test_credit_entry_unchanged_with_two_strategy_book(
     assert pos["width"] == pytest.approx(6.0)
     assert pos["qty"] == 2
     assert [leg["side"] for leg in pos["legs"]] == ["BUY", "BUY", "SELL", "SELL"]
+
+
+# ============================================================
+# Per-strategy caps vs global breaker/BP/one-per-underlying (D-22)
+# ============================================================
+
+def test_bull_call_per_day_cap_is_per_strategy(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    for pid in ("A", "B"):
+        store.insert_option_position(_pos(
+            pid, status="CLOSED", underlying=f"US.{pid}",
+            opened_at=f"{TODAY.isoformat()}T10:00:00-04:00",
+            strategy_name="tasty_credit_spreads",
+        ))
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    opened = [p for p in store.get_option_positions(("OPEN",))
+              if p["strategy_name"] == "super_bull_call"]
+    assert [p["underlying"] for p in opened] == ["US.NVDA"]
+
+
+def test_credit_per_day_cap_ignores_other_strategies(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    for pid in ("A", "B"):
+        store.insert_option_position(_pos(
+            pid, status="CLOSED", underlying=f"US.{pid}",
+            opened_at=f"{TODAY.isoformat()}T10:00:00-04:00",
+            strategy_name="super_bull_call",
+        ))
+
+    _run(bot._job_entry_scan("tasty_credit_spreads"))
+
+    opened = [p for p in store.get_option_positions(("OPEN",))
+              if p["strategy_name"] == "tasty_credit_spreads"]
+    assert [p["underlying"] for p in opened] == ["US.SPY"]
+
+
+def test_bull_call_concurrent_cap_is_per_strategy(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    for i in range(4):
+        _seed_open_spread(
+            store, f"B{i}", strategy_name="super_bull_call",
+            underlying=f"US.OTH{i}", max_loss_usd=100.0,
+        )
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    bot._executor.open_position.assert_not_awaited()
+    assert "US.NVDA" not in {p["underlying"] for p in store.get_option_positions(("OPEN",))}
+
+
+def test_credit_concurrent_cap_ignores_other_strategies(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    for i in range(8):
+        _seed_open_spread(
+            store, f"B{i}", strategy_name="super_bull_call",
+            underlying=f"US.OTH{i}", max_loss_usd=100.0,
+        )
+
+    _run(bot._job_entry_scan("tasty_credit_spreads"))
+
+    opened = [p for p in store.get_option_positions(("OPEN",))
+              if p["strategy_name"] == "tasty_credit_spreads"]
+    assert [p["underlying"] for p in opened] == ["US.SPY"]
+
+
+def test_one_position_per_underlying_is_global(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    _seed_open_spread(
+        store, "T1", strategy_name="tasty_credit_spreads", underlying="US.NVDA",
+    )
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    bot._executor.open_position.assert_not_awaited()
+    assert [p["strategy_name"] for p in store.get_option_positions(("OPEN",))
+            if p["underlying"] == "US.NVDA"] == ["tasty_credit_spreads"]
+
+
+def test_bp_headroom_is_global(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    _seed_open_spread(
+        store, "T1", strategy_name="tasty_credit_spreads",
+        underlying="US.QQQ", max_loss_usd=24900.0,
+    )
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    bot._executor.open_position.assert_not_awaited()
+    assert "US.NVDA" not in {p["underlying"] for p in store.get_option_positions(("OPEN",))}
+
+
+def test_daily_breaker_blocks_every_strategy(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    calls = _wire_bull(bot, gateway, monkeypatch)
+    store.set_meta("options_breaker_date", TODAY.isoformat())
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    assert calls == []
+    gateway.screen_options.assert_not_awaited()
 
 
 # ============================================================
