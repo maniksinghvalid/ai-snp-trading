@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 | 10. External Strategy Research | 6/6 | Complete    | 2026-08-18 |
-| 11. Multi-strategy options bot (bull_call_spread) | 4/6 | In Progress|  |
+| 11. Multi-strategy options bot (bull_call_spread) | 5/6 | In Progress|  |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -440,7 +440,7 @@ Plans:
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
 
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 
 Plans:
 **Wave 1**
@@ -452,7 +452,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 11-04-PLAN.md — options_run --strategy + legacy_view before --set; convert shipped rules_options.json + widen bot/main.py dispatch; D-26 field-for-field no-drift test (MSO-02/09) [Wave 2]
-- [ ] 11-05-PLAN.md — Service entry side: per-strategy jobs, watchlist universe, call-only screen, debit entry, per-strategy caps vs global breaker/BP/underlying (MSO-08/06) [Wave 2]
+- [x] 11-05-PLAN.md — Service entry side: per-strategy jobs, watchlist universe, call-only screen, debit entry, per-strategy caps vs global breaker/BP/underlying (MSO-08/06) [Wave 2]
 
 **Wave 3** *(blocked on Wave 2 completion)*
 

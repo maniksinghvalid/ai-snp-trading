@@ -131,7 +131,7 @@ Added 2026-09-24. Operator-approved scope lift of the "Multiple strategies / str
 - [x] **MSO-05**: `manage_decision_debit` exits in order assignment guard → profit target (`profit_target_pct_of_max` of `width − debit`) → optional DTE exit; no stop loss; the debit sign convention is handled in exactly one place
 - [x] **MSO-06**: The `equity_watchlist` universe source reads today's `daily_scan` codes from the equity bot's DB (`data/bot_state.db`) through a read-only SQLite URI, capped at 20 by `rank ASC`; missing/locked/empty → zero entries for that strategy that day; no write path exists
 - [x] **MSO-07**: `option_positions.strategy_name` (idempotent guarded migration; legacy rows default `tasty_credit_spreads`); debit positions store negative `credit_per_spread` so the existing close math yields correct realized P&L for both credit and debit structures
-- [ ] **MSO-08**: The ONE options process runs every strategy: per-strategy entry-scan jobs, one manage job dispatching on each position's `strategy_name`, per-strategy caps (entries/day, concurrent), global daily-loss breaker + global BP headroom + global one-position-per-underlying; alerts and the EOD report show the strategy name
+- [x] **MSO-08**: The ONE options process runs every strategy: per-strategy entry-scan jobs, one manage job dispatching on each position's `strategy_name`, per-strategy caps (entries/day, concurrent), global daily-loss breaker + global BP headroom + global one-position-per-underlying; alerts and the EOD report show the strategy name
 - [x] **MSO-09**: Shipped `rules_options.json` converted to the `strategies` shape with `tasty_credit_spreads` (behavior identical, proven field-for-field) and `super_bull_call`; strategy provenance doc (transcript-distilled rules, source URL, deviations) committed under `docs/research/`; all Phase 8 safety invariants unchanged
 
 ## v2 Requirements
@@ -240,7 +240,7 @@ Which phases cover which requirements.
 | MSO-05 | Phase 11 | Complete |
 | MSO-06 | Phase 11 | Complete |
 | MSO-07 | Phase 11 | Complete |
-| MSO-08 | Phase 11 | Pending |
+| MSO-08 | Phase 11 | Complete |
 | MSO-09 | Phase 11 | Complete |
 | CB-01 | — (v2) | Deferred — superseded by RISK-CIRCUIT (Phase 7), reframed as realized-only −2R |
 | REP-01 | — (v2) | Deferred — not in current roadmap |
