@@ -7,6 +7,8 @@ Verifies:
   (b) fail-closed behaviour: unknown structure, missing group, bad file/JSON
   (c) the repo-root rules_options.json has not drifted from the test fixture
 """
+import copy
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -15,9 +17,21 @@ import pytest
 
 from bot.config.loader import ConfigError
 from bot.options.config import load_options_config, OptionsConfig
+from bot.options.config import OptionsBook, legacy_view, load_options_book
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The six fields OptionsConfig gained for the multi-strategy split (D-09).
+# Everything else is a pre-existing field whose value/type must be identical
+# between a legacy-loaded config and a strategies-shape-loaded config (D-26).
+_NEW_FIELDS = {
+    "name", "universe_source", "long_delta", "max_debit_to_width",
+    "profit_target_pct_of_max", "equity_state_db",
+}
+_PRE_EXISTING_FIELDS = [
+    f.name for f in dataclasses.fields(OptionsConfig) if f.name not in _NEW_FIELDS
+]
 
 
 def _write(tmp_path, rules):
@@ -194,3 +208,172 @@ class TestShippedRulesOptionsJson:
         finally:
             os.chdir(cwd)
         assert cfg.universe[0] == "US.SPY"
+
+
+# ============================================================
+# Multi-strategy book (D-01, D-02, D-03, D-06, D-07, D-08, D-09)
+# ============================================================
+
+class TestLoadOptionsBook:
+    """load_options_book loads a strategies-shape file into flat configs."""
+
+    def test_pre_existing_field_count_is_43(self):
+        assert len(_PRE_EXISTING_FIELDS) == 43
+
+    def test_two_strategies_in_config_order(self, options_book):
+        assert [c.name for c in options_book.strategies] == [
+            "tasty_credit_spreads", "super_bull_call",
+        ]
+        assert [c.strategy_name for c in options_book.strategies] == [
+            "tasty_credit_spreads", "super_bull_call",
+        ]
+
+    def test_bull_config_fields(self, options_book):
+        bull = options_book.strategies[1]
+        assert bull.structure_type == "bull_call_spread"
+        assert bull.long_delta == 0.30
+        assert bull.max_debit_to_width == 0.30
+        assert bull.profit_target_pct_of_max == 60.0
+        assert bull.manage_dte is None
+        assert bull.universe == ()
+        assert bull.universe_source == "equity_watchlist"
+        for field in (
+            "ivr_min", "ivp_min", "fear_drop_pct", "fear_ivr_min", "short_delta",
+            "min_credit_to_width", "profit_target_pct_of_credit",
+            "stop_loss_credit_multiple",
+        ):
+            assert getattr(bull, field) is None, field
+        assert bull.target_dte == 30
+        assert bull.min_dte == 21
+        assert bull.max_dte == 45
+        assert bull.entry_scan_et == "10:05"
+        assert bull.second_entry_scan_et is None
+        assert bull.max_concurrent_positions == 4
+
+    def test_shared_values_flattened_into_every_config(self, options_book):
+        for cfg in options_book.strategies:
+            assert cfg.sizing_equity_usd == 100000.0
+            assert cfg.max_bp_usage_pct == 25.0
+            assert cfg.daily_loss_limit_pct == 2.0
+            assert cfg.manage_interval_min == 5
+            assert cfg.equity_state_db == "data/bot_state.db"
+            assert cfg.state_db == "data/options_state.db"
+            assert cfg.kill_file == ".bot_kill_options"
+            assert cfg.report_dir == "reports/options"
+            assert cfg.limit_buffer_usd == 0.02
+
+    def test_relocation_proof(self, options_book_rules, tmp_path):
+        """Pitfall 2: risk.sizing_equity_usd must be read from risk, not per-strategy sizing."""
+        rules = copy.deepcopy(options_book_rules)
+        rules["risk"]["sizing_equity_usd"] = 50000
+        book = load_options_book(_write(tmp_path, rules))
+        for cfg in book.strategies:
+            assert cfg.sizing_equity_usd == 50000.0
+
+    def test_legacy_file_loads_as_one_strategy_book(self, options_rules, tmp_path):
+        book = load_options_book(_write(tmp_path, options_rules))
+        assert len(book.strategies) == 1
+        cfg = book.strategies[0]
+        assert cfg.name == cfg.strategy_name == "tasty_credit_spreads"
+        assert cfg.universe_source is None
+        assert cfg.long_delta is None
+        assert cfg.equity_state_db == "data/bot_state.db"
+
+    def test_legacy_and_book_default_strategy_equal_on_43_fields(
+        self, options_rules, options_book_rules, tmp_path
+    ):
+        legacy_path = tmp_path / "legacy.json"
+        legacy_path.write_text(json.dumps(options_rules), encoding="utf-8")
+        book_path = tmp_path / "book.json"
+        book_path.write_text(json.dumps(options_book_rules), encoding="utf-8")
+
+        legacy_cfg = load_options_config(str(legacy_path))
+        book_cfg = load_options_config(str(book_path))
+
+        for field in _PRE_EXISTING_FIELDS:
+            a, b = getattr(legacy_cfg, field), getattr(book_cfg, field)
+            assert a == b, field
+            assert type(a) is type(b), field
+
+    def test_strategy_selection_by_name(self, options_book_rules, tmp_path):
+        path = _write(tmp_path, options_book_rules)
+        cfg = load_options_config(path, strategy="super_bull_call")
+        assert cfg.structure_type == "bull_call_spread"
+
+    def test_unknown_strategy_name_raises(self, options_book_rules, tmp_path):
+        path = _write(tmp_path, options_book_rules)
+        with pytest.raises(ConfigError, match="nope"):
+            load_options_config(path, strategy="nope")
+
+    def test_strategy_kwarg_on_legacy_file_raises(self, options_rules, tmp_path):
+        path = _write(tmp_path, options_rules)
+        with pytest.raises(ConfigError):
+            load_options_config(path, strategy="super_bull_call")
+
+    def test_load_options_config_signature_unchanged_shape(self):
+        """MSO-02: default() still returns the flat OptionsConfig type."""
+        cwd = os.getcwd()
+        os.chdir(REPO_ROOT)
+        try:
+            cfg = load_options_config()
+        finally:
+            os.chdir(cwd)
+        assert isinstance(cfg, OptionsConfig)
+
+    def test_load_options_book_returns_options_book(self, options_book):
+        assert isinstance(options_book, OptionsBook)
+        assert isinstance(options_book.strategies, tuple)
+
+
+# ============================================================
+# legacy_view (D-10)
+# ============================================================
+
+class TestLegacyView:
+    """legacy_view projects one strategy back to the legacy flat shape."""
+
+    def test_legacy_input_is_identity(self, options_rules):
+        result = legacy_view(options_rules)
+        assert result == options_rules
+        assert result is not options_rules
+
+    def test_legacy_input_with_matching_name(self, options_rules):
+        assert legacy_view(options_rules, "tasty_credit_spreads") == options_rules
+
+    def test_legacy_input_with_wrong_name_raises(self, options_rules):
+        with pytest.raises(ConfigError):
+            legacy_view(options_rules, "other")
+
+    def test_book_default_strategy_matches_legacy_plus_equity_state_db(
+        self, options_book_rules, options_rules
+    ):
+        result = legacy_view(options_book_rules)
+        expected = copy.deepcopy(options_rules)
+        expected["service"]["equity_state_db"] = "data/bot_state.db"
+        assert result == expected
+
+    def test_book_named_strategy_same_as_default(self, options_book_rules):
+        assert legacy_view(options_book_rules, "tasty_credit_spreads") == legacy_view(
+            options_book_rules
+        )
+
+    def test_unknown_strategy_raises(self, options_book_rules):
+        with pytest.raises(ConfigError, match="nope"):
+            legacy_view(options_book_rules, "nope")
+
+    def test_inputs_not_mutated(self, options_book_rules, options_rules):
+        before_book = copy.deepcopy(options_book_rules)
+        before_legacy = copy.deepcopy(options_rules)
+        legacy_view(options_book_rules, "tasty_credit_spreads")
+        legacy_view(options_rules)
+        assert options_book_rules == before_book
+        assert options_rules == before_legacy
+
+    def test_round_trip_through_load_options_config(self, options_book_rules, options_book, tmp_path):
+        raw = legacy_view(options_book_rules)
+        path = tmp_path / "roundtrip.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        roundtrip_cfg = load_options_config(str(path))
+        book_cfg = options_book.strategies[0]
+        for field in _PRE_EXISTING_FIELDS:
+            assert getattr(roundtrip_cfg, field) == getattr(book_cfg, field), field
