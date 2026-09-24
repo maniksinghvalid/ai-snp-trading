@@ -98,6 +98,16 @@ _ACTIVE_STATUSES = ("OPENING", "OPEN", "CLOSING", "NEEDS_ATTENTION")
 # deliberately not a rules_options.json key (same as _MANAGE_START_ET).
 _QUOTE_MISS_ESCALATE_CYCLES = 3
 
+# A leg quote may drive a mark or decision outside the assignment-guard window
+# only if ask - bid <= max(0.5 x mid, $0.10) (WR-07). This is 10x the shipped
+# entry gate's 5%-of-mid and 2x its $0.05, because it rejects ABSURD quotes,
+# not illiquid-but-real ones. With bid 0 the bound reduces to ask <= $0.10, so
+# every quote with an ask above a dime must be two-sided. A sub-dime one-sided
+# far-OTM wing moves the mid by at most $0.05. Not rules_options.json keys
+# (not strategy knobs).
+_MARK_MAX_SPREAD_FRAC_OF_MID = 0.5
+_MARK_MAX_SPREAD_FLOOR_USD = 0.10
+
 
 # ============================================================
 # Pure helpers (no self, no I/O)
@@ -144,8 +154,11 @@ def _quote_ok(q) -> bool:
     (leg_is_liquid rejects bid <= 0). But when MARKING an open spread, the
     same coercion fabricates a $0 leg instead of skipping the cycle — a
     single unquoted leg must never be marked, decided on, or closed against.
-    This is the one gate every manage-path consumer (mark_spread,
-    manage_decision/manage_decision_debit, close_legs) routes through.
+    This is the base validity check. It is used ALONE only inside the
+    assignment-guard window: there manage_decision and manage_decision_debit
+    return "assignment_guard" whatever the mark, so a legitimately one-sided
+    far-OTM wing (0.00/0.05) must never block the aggressive close. Every
+    other decision goes through _quote_markable (WR-07).
     """
     if not q:
         return False
@@ -156,6 +169,23 @@ def _quote_ok(q) -> bool:
     if not (math.isfinite(bid) and math.isfinite(ask)):
         return False
     return ask > 0 and bid >= 0 and ask >= bid
+
+
+def _quote_markable(q) -> bool:
+    """True only for a quote narrow enough to drive a mark or decision
+    outside the assignment-guard window (WR-07).
+
+    A one-sided (bid 0) or absurdly wide quote fabricates a mid. The
+    review's 0.10/9.00 long -> mid 4.55 -> a false profit_target -> the
+    short is bought back and the long never fills -> a naked long plus
+    NEEDS_ATTENTION. A wide short ask inflates the mark, which can falsely
+    trip the global daily-loss breaker.
+    """
+    if not _quote_ok(q):
+        return False
+    bid, ask = float(q.get("bid")), float(q.get("ask"))
+    mid = (bid + ask) / 2
+    return ask - bid <= max(_MARK_MAX_SPREAD_FRAC_OF_MID * mid, _MARK_MAX_SPREAD_FLOOR_USD) + 1e-9
 
 
 def _group_rows_by_underlying(rows) -> dict:
@@ -1014,6 +1044,13 @@ class OptionsBot:
         outage is skipped in _manage_once and never counts toward the streak.
         A close_legs exception always ends NEEDS_ATTENTION, never CLOSING.
 
+        Per-call-site quote gate (WR-07): outside the guard window,
+        _quote_markable gates mark_spread (breaker P&L), manage_decision /
+        manage_decision_debit, and the non-aggressive close_legs those
+        decisions trigger. Inside the window, the looser _quote_ok gates the
+        assignment_guard close_legs(aggressive=True) path — there the mark
+        cannot change the decision and is never returned as P&L.
+
         Returns its unrealized P&L in dollars (0.0 once a close is attempted).
         """
         pid = pos["position_id"]
@@ -1037,12 +1074,14 @@ class OptionsBot:
             return 0.0
 
         dte = option_dte(date.fromisoformat(pos["expiry"]), today)
+        in_guard = dte <= strat_cfg.assignment_guard_dte
+        gate = _quote_ok if in_guard else _quote_markable
 
-        bad = [leg["code"] for leg in legs if not _quote_ok(quotes.get(leg["code"]))]
+        bad = [leg["code"] for leg in legs if not gate(quotes.get(leg["code"]))]
         if not bad:
             self._quote_miss_streak.pop(pid, None)
         if bad:
-            if dte <= strat_cfg.assignment_guard_dte:
+            if in_guard:
                 streak = self._quote_miss_streak.get(pid, 0) + 1
                 self._quote_miss_streak[pid] = streak
                 # The last automated cycle before the contract expires (WR-06):
