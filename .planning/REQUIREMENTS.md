@@ -124,9 +124,9 @@ Added 2026-08-18. Backtest-only research comparing two externally-sourced (Reddi
 
 Added 2026-09-24. Operator-approved scope lift of the "Multiple strategies / strategy framework" out-of-scope item **for the options bot only** (the equity bot stays single-strategy Trend Join Long). Design: `docs/superpowers/specs/2026-09-24-multi-strategy-options-design.md`.
 
-- [ ] **MSO-01**: `rules_options.json` supports a `strategies` array (unique `name`; per-strategy `universe` XOR `universe_source`, `entry`, `structure`, `sizing`, `manage`) plus shared `risk`/`execution`/`service` blocks; `load_options_book(path)` returns every strategy as a flat `OptionsConfig` with the shared values flattened in; the legacy flat file shape still loads
-- [ ] **MSO-02**: `load_options_config(path, strategy=None)` keeps its name and return type (flat per-strategy view, default = first strategy) so the Phase 9 backtester, UAT probe and existing tests keep working unmodified; `backtester.options_run` gains `--strategy` and projects the chosen strategy to the legacy flat shape via `legacy_view(raw, name)` before `--set` overrides, rejecting debit structures
-- [ ] **MSO-03**: Config fails closed (`ConfigError`) on duplicate names, both/neither universe keys, unknown `universe_source`, an unimplemented `structure.type`, or IV-gate keys missing for a credit structure
+- [x] **MSO-01**: `rules_options.json` supports a `strategies` array (unique `name`; per-strategy `universe` XOR `universe_source`, `entry`, `structure`, `sizing`, `manage`) plus shared `risk`/`execution`/`service` blocks; `load_options_book(path)` returns every strategy as a flat `OptionsConfig` with the shared values flattened in; the legacy flat file shape still loads
+- [x] **MSO-02**: `load_options_config(path, strategy=None)` keeps its name and return type (flat per-strategy view, default = first strategy) so the Phase 9 backtester, UAT probe and existing tests keep working unmodified; `backtester.options_run` gains `--strategy` and projects the chosen strategy to the legacy flat shape via `legacy_view(raw, name)` before `--set` overrides, rejecting debit structures
+- [x] **MSO-03**: Config fails closed (`ConfigError`) on duplicate names, both/neither universe keys, unknown `universe_source`, an unimplemented `structure.type`, or IV-gate keys missing for a credit structure
 - [ ] **MSO-04**: `bull_call_spread` structure in the pure strategy core: long call at |Δ| closest to `long_delta`, short call = listed strike closest to long + width strictly above, both legs liquid, `0 < debit ≤ max_debit_to_width × width`, BUY leg first; sized via `size_position` with per-spread risk `debit × 100`
 - [ ] **MSO-05**: `manage_decision_debit` exits in order assignment guard → profit target (`profit_target_pct_of_max` of `width − debit`) → optional DTE exit; no stop loss; the debit sign convention is handled in exactly one place
 - [ ] **MSO-06**: The `equity_watchlist` universe source reads today's `daily_scan` codes from the equity bot's DB (`data/bot_state.db`) through a read-only SQLite URI, capped at 20 by `rank ASC`; missing/locked/empty → zero entries for that strategy that day; no write path exists
@@ -233,9 +233,9 @@ Which phases cover which requirements.
 | XSR-04 | Phase 10 | Complete — cache-only held throughout, zero new equity fetches |
 | XSR-05 | Phase 10 | Complete — H1-H8 verdicted; only H2 SUPPORTED (not a profitable arm — both exit variants PF&lt;1) |
 | XSR-06 | Phase 10 | Complete (conditional) — gate mechanically TRIGGERED via H2; operator selected `defer` at the Task 2 checkpoint given both exit variants are losing configurations. No feature branch created, `bot/`/`rules.json`/`rules_options.json` untouched — this is the gate correctly closing on informed judgment, not the "nothing SUPPORTED" case |
-| MSO-01 | Phase 11 | Pending |
-| MSO-02 | Phase 11 | Pending |
-| MSO-03 | Phase 11 | Pending |
+| MSO-01 | Phase 11 | Complete |
+| MSO-02 | Phase 11 | Complete |
+| MSO-03 | Phase 11 | Complete |
 | MSO-04 | Phase 11 | Pending |
 | MSO-05 | Phase 11 | Pending |
 | MSO-06 | Phase 11 | Pending |

@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 | 10. External Strategy Research | 6/6 | Complete    | 2026-08-18 |
-| 11. Multi-strategy options bot (bull_call_spread) | 0/6 | Planned (3 waves) | - |
+| 11. Multi-strategy options bot (bull_call_spread) | 1/6 | In Progress|  |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -439,12 +439,13 @@ Plans:
   6. Positions carry `strategy_name` (idempotent migration, legacy rows default `tasty_credit_spreads`); debit positions store negative `credit_per_spread` and the existing close math yields correct realized P&L for both kinds
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
-**Plans:** 6 plans
+
+**Plans:** 1/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 11-01-PLAN.md — Config book: STRATEGIES_SCHEMA, OptionsConfig +6 fields, load_options_book, load_options_config(path, strategy=None), legacy_view, fail-closed D-11 checks (MSO-01/02/03) [Wave 1]
+- [x] 11-01-PLAN.md — Config book: STRATEGIES_SCHEMA, OptionsConfig +6 fields, load_options_book, load_options_config(path, strategy=None), legacy_view, fail-closed D-11 checks (MSO-01/02/03) [Wave 1]
 - [ ] 11-02-PLAN.md — Pure core: bull_call_spread pick_strikes branch + 1/4-rule gate, size_debit_position, manage_decision_debit; provenance doc (MSO-04/05, D-27) [Wave 1]
 - [ ] 11-03-PLAN.md — Data layer: _migration_0007 strategy_name + store pass-through/per-strategy count; read-only equity watchlist reader bot/options/universe.py (MSO-06/07) [Wave 1]
 

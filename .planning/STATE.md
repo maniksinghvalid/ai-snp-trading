@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 10-06-PLAN.md (gate TRIGGERED via H2, operator selected defer, no production change, phase 10 complete)
-last_updated: "2026-09-24T09:05:34.958Z"
-last_activity: "2026-08-27 - Completed quick task 260827-j29: filled positions no longer crash on register (opened_at NOT NULL) and force_close re-arms after firing (1134 tests, 1f3f30f + 247da3d)"
+stopped_at: "Completed 11-01-PLAN.md (multi-strategy config loader: STRATEGIES_SCHEMA, OptionsBook, load_options_book/legacy_view, fail-closed D-11 rules; 1184 passed 1 skipped)"
+last_updated: "2026-09-24T14:35:01.854Z"
+last_activity: 2026-09-24 -- Phase 11 execution started
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 11
-  total_plans: 54
-  completed_plans: 55
-  percent: 92
+  total_plans: 60
+  completed_plans: 56
+  percent: 85
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 10 — external-strategy-research
+**Current focus:** Phase 11 — multi-strategy-options-bot-bull-call-spread
 
 ## Current Position
 
-Phase: 10
-Plan: Not started
+Phase: 11 (multi-strategy-options-bot-bull-call-spread) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-08-27 - Completed quick task 260827-j29: filled positions no longer crash on register (opened_at NOT NULL) and force_close re-arms after firing (1134 tests, 1f3f30f + 247da3d)
+Last activity: 2026-09-24 -- Phase 11 execution started
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -81,6 +81,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 10-external-strategy-research P04 | 20min | 3 tasks | 0 files |
 | Phase 10-external-strategy-research P05 | 2h | 3 tasks | 11 files |
 | Phase 10 P06 | ~20 minutes | 3 tasks | 2 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P01 | 25min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -181,6 +182,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 10-05: aggregate.py's TJL comparator uses a narrower E1-E3(IS)/D1-D3(OOS) pool than the MEGA24 arms' IS_SLICES/OOS_SLICES (which also include C/B/A) -- matches the hypotheses doc's explicit H7 comparator definition
 - [Phase ?]: 10-05: combo arm never appended to arms.json -- pre-registered rule (PF>1 IS with >=25 trades) never fired; best of 15 arms is orb5 IS PF 0.922. H1-H8 verdicted: only H2 SUPPORTED (partial_be_trail beats pct_ladder on Ext#2's own entries); H1/H3/H4/H5/H6/H7/H8 REJECTED. Recommendation: no production change, rules.json/rules_options.json unmodified
 - [Phase ?]: 10-06: Gate TRIGGERED via H2 (mechanical rule: SUPPORTED both IS/OOS, floor met) -- not H8-specifically; operator selected defer at Task 2 checkpoint (both exit variants PF<1.0, not a profitable arm); no feature branch built, file list recorded in results doc Section 12; XSR-06 stays open
+- [Phase ?]: 11-01: New OptionsConfig fields carry no dataclass default (research A1) — both loader paths pass every field explicitly
+- [Phase ?]: 11-01: _check_strategy covers both entry IV-gate keys and manage profit-target/stop-loss key pair (Pitfall 3), sharing one _RELOCATED table with legacy_view (Open Question 3 resolved)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -221,6 +224,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-18T20:51:37.973Z
-Stopped at: Completed 10-06-PLAN.md (gate TRIGGERED via H2, operator selected defer, no production change, phase 10 complete)
+Last session: 2026-09-24T14:35:01.850Z
+Stopped at: Completed 11-01-PLAN.md (multi-strategy config loader: STRATEGIES_SCHEMA, OptionsBook, load_options_book/legacy_view, fail-closed D-11 rules; 1184 passed 1 skipped)
 Resume file: None
