@@ -439,8 +439,20 @@ Plans:
   6. Positions carry `strategy_name` (idempotent migration, legacy rows default `tasty_credit_spreads`); debit positions store negative `credit_per_spread` and the existing close math yields correct realized P&L for both kinds
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 11 to break down)
+- [ ] 11-01-PLAN.md — Config book: STRATEGIES_SCHEMA, OptionsConfig +6 fields, load_options_book, load_options_config(path, strategy=None), legacy_view, fail-closed D-11 checks (MSO-01/02/03) [Wave 1]
+- [ ] 11-02-PLAN.md — Pure core: bull_call_spread pick_strikes branch + 1/4-rule gate, size_debit_position, manage_decision_debit; provenance doc (MSO-04/05, D-27) [Wave 1]
+- [ ] 11-03-PLAN.md — Data layer: _migration_0007 strategy_name + store pass-through/per-strategy count; read-only equity watchlist reader bot/options/universe.py (MSO-06/07) [Wave 1]
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 11-04-PLAN.md — options_run --strategy + legacy_view before --set; convert shipped rules_options.json + widen bot/main.py dispatch; D-26 field-for-field no-drift test (MSO-02/09) [Wave 2]
+- [ ] 11-05-PLAN.md — Service entry side: per-strategy jobs, watchlist universe, call-only screen, debit entry, per-strategy caps vs global breaker/BP/underlying (MSO-08/06) [Wave 2]
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 11-06-PLAN.md — Service manage side: per-strategy manage dispatch, debit close/%-of-max, D-29 unknown-strategy guard, strategy name in exit/EOD, book-based main(); phase gate (MSO-08/07/05/09) [Wave 3]
