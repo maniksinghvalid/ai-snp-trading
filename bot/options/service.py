@@ -40,6 +40,7 @@ from bot.options.execution import LegExecutor
 from bot.options.store import OptionsStore
 from bot.options.strategy import (
     manage_decision,
+    manage_decision_debit,
     mark_spread,
     option_dte,
     passes_entry_gate,
@@ -192,13 +193,19 @@ def _fmt_entry(pos: dict, legs) -> str:
     return "\n".join(lines)
 
 
-def _fmt_exit(pos: dict, reason, pnl_usd, pct_of_credit) -> str:
-    """Telegram body for a closed spread (every field escaped)."""
+def _fmt_exit(pos: dict, reason, pnl_usd, pct_of_credit, basis="credit") -> str:
+    """Telegram body for a closed spread (every field escaped).
+
+    basis names the denominator of pct_of_credit: "credit" for a credit
+    structure (unchanged), "max profit" for a debit structure (a negative
+    credit_per_spread makes %-of-credit meaningless — D-19).
+    """
     return (
-        f"<b>Options exit</b> {_esc(pos.get('underlying'))}\n"
+        f"<b>Options exit</b> {_esc(pos.get('underlying'))} — "
+        f"{_esc(pos.get('strategy_name') or '')}\n"
         f"reason {_esc(reason)}\n"
         f"realized ${_esc(_signed(pnl_usd))} "
-        f"({_esc(round(float(pct_of_credit), 1))}% of credit)"
+        f"({_esc(round(float(pct_of_credit), 1))}% of {_esc(basis)})"
     )
 
 
@@ -346,6 +353,14 @@ class OptionsBot:
         state only OPEN rows are inspected, so the OPEN → NEEDS_ATTENTION
         transition IS the alert-once guard — no extra flag is needed.
 
+        On startup ONLY, a row whose strategy_name is not in the loaded book
+        (D-29) is also flagged NEEDS_ATTENTION and alerted — a strategy that
+        was removed from rules_options.json must never leave its positions
+        silently unmanaged, and the manage loop must never apply another
+        strategy's parameters to it. This check runs before the OPENING/
+        CLOSING branch so an orphaned strategy is reported as such even if it
+        also died mid-order.
+
         Broker option codes that appear on no position in this DB are counted
         and logged only (SAFE-OG-01: the paper account is shared with a human).
         """
@@ -359,6 +374,26 @@ class OptionsBot:
             legs = pos.get("legs") or []
             known_codes.update(leg["code"] for leg in legs)
             status = pos.get("status")
+
+            if startup and pos.get("strategy_name") not in self._strategies:
+                self._store.set_position_status(pid, "NEEDS_ATTENTION")
+                await self._alerter.send(
+                    f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
+                    f"strategy {_esc(pos.get('strategy_name'))} is not configured in "
+                    f"rules_options.json; close manually."
+                )
+                append_audit({
+                    "event": "options_unknown_strategy",
+                    "position_id": pid,
+                    "underlying": pos.get("underlying"),
+                    "strategy_name": pos.get("strategy_name"),
+                    "status": status,
+                })
+                _logger.warning(
+                    "options_unknown_strategy",
+                    position_id=pid, strategy=pos.get("strategy_name"),
+                )
+                continue
 
             if startup and status in ("OPENING", "CLOSING"):
                 self._store.set_position_status(pid, "NEEDS_ATTENTION")
@@ -829,13 +864,28 @@ class OptionsBot:
         await self._check_daily_breaker(today, unrealized_total)
 
     async def _manage_position(self, pos, quotes, today) -> float:
-        """Mark one position and close it if the strategy says so.
+        """Mark one position and close it if ITS OWN strategy says so (D-21).
+
+        Dispatches on pos["strategy_name"] to that strategy's config and
+        decision function — manage_decision_debit for a bull_call_spread
+        position, manage_decision for a credit structure — never self._cfg,
+        so a mixed book always applies the right parameters to each position.
+        A strategy_name not present in the loaded book (already flagged
+        NEEDS_ATTENTION by the D-29 startup reconcile guard) is skipped here
+        too, defense in depth against ever managing an orphaned position.
 
         Returns its unrealized P&L in dollars (0.0 once a close is attempted).
         """
-        cfg = self._cfg
         pid = pos["position_id"]
         legs = pos["legs"]
+
+        strat_cfg = self._strategies.get(pos.get("strategy_name"))
+        if strat_cfg is None:
+            _logger.warning(
+                "options_manage_unknown_strategy",
+                position_id=pid, strategy=pos.get("strategy_name"),
+            )
+            return 0.0
 
         if any(leg["code"] not in quotes for leg in legs):
             # mark_spread would KeyError; a stale mark is worse than no action.
@@ -846,8 +896,13 @@ class OptionsBot:
         dte = option_dte(date.fromisoformat(pos["expiry"]), today)
         credit = float(pos["credit_per_spread"])
         qty = int(pos["qty"])
+        is_debit = pos["structure"] == "bull_call_spread"
 
-        dec = manage_decision(mark, credit, dte, cfg)
+        if is_debit:
+            width = float(pos["width"] or 0)
+            dec = manage_decision_debit(mark, -credit, width, dte, strat_cfg)  # D-19
+        else:
+            dec = manage_decision(mark, credit, dte, strat_cfg)
         if dec is None:
             return (credit - mark) * _CONTRACT_MULTIPLIER * qty
 
@@ -891,16 +946,21 @@ class OptionsBot:
             closed_at=now_et().isoformat(), close_reason=dec,
             realized_pnl_usd=realized_usd,
         )
-        await self._alerter.send(_fmt_exit(
-            pos, dec, realized_usd,
-            realized_per_spread / credit * 100 if credit else 0.0,
-        ))
+        if is_debit:
+            max_profit = width + credit  # == width - debit (credit = -debit, D-19)
+            pct = realized_per_spread / max_profit * 100 if max_profit > 0 else 0.0
+            basis = "max profit"
+        else:
+            pct = realized_per_spread / credit * 100 if credit else 0.0
+            basis = "credit"
+        await self._alerter.send(_fmt_exit(pos, dec, realized_usd, pct, basis=basis))
         append_audit({
             "event": "options_position_closed",
             "position_id": pid,
             "underlying": pos.get("underlying"),
             "reason": dec,
             "realized_pnl_usd": realized_usd,
+            "strategy_name": pos.get("strategy_name"),
         })
         return 0.0
 

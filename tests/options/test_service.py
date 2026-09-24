@@ -128,6 +128,37 @@ def _statuses(store, status):
     return [p["position_id"] for p in store.get_option_positions((status,))]
 
 
+# NVDA worked example (CONTEXT.md "Specific Ideas"): buy 225 @ 3.58, sell 235
+# @ 1.62 -> debit 1.96, width 10.0, max profit 8.04.
+LONG_C = "US.NVDA260918C225000"
+SHORT_C = "US.NVDA260918C235000"
+
+
+def _seed_bull_spread(store, position_id="B1", qty=5, **over) -> None:
+    pos = {
+        "position_id": position_id,
+        "underlying": "US.NVDA",
+        "structure": "bull_call_spread",
+        "strategy_name": "super_bull_call",
+        "expiry": "2026-09-18",
+        "credit_per_spread": -1.96,
+        "width": 10.0,
+        "qty": qty,
+        "max_loss_usd": 980.0,
+        "status": "OPEN",
+    }
+    pos.update(over)
+    store.insert_option_position(pos)
+    store.insert_option_leg(
+        _leg(f"{position_id}-L1", position_id, side="BUY", code=LONG_C,
+             right="C", strike=225.0, qty=qty)
+    )
+    store.insert_option_leg(
+        _leg(f"{position_id}-L2", position_id, side="SELL", code=SHORT_C,
+             right="C", strike=235.0, qty=qty)
+    )
+
+
 # ============================================================
 # Reconcile
 # ============================================================
@@ -191,6 +222,38 @@ def test_reconcile_startup_flags_incomplete_row(make_bot, store, gateway, alerte
 
     assert _statuses(store, "NEEDS_ATTENTION") == ["P1"]
     assert alerter.send.await_count == 1
+
+
+def test_reconcile_startup_flags_unknown_strategy(make_bot, store, gateway, alerter, monkeypatch):
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_open_spread(store, "R1", strategy_name="retired_strategy")
+    _seed_open_spread(store, "T1")
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+    bot = make_bot()
+
+    _run(bot.reconcile(startup=True))
+
+    assert _statuses(store, "NEEDS_ATTENTION") == ["R1"]
+    assert _statuses(store, "OPEN") == ["T1"]
+    assert alerter.send.await_count == 1
+    assert "retired_strategy" in alerter.send.await_args[0][0]
+    unknown = [e for e in audit_events if e["event"] == "options_unknown_strategy"]
+    assert len(unknown) == 1
+    assert unknown[0]["strategy_name"] == "retired_strategy"
+
+
+def test_reconcile_steady_state_leaves_unknown_strategy_for_startup_only(
+    make_bot, store, gateway, alerter,
+):
+    _seed_open_spread(store, "R1", strategy_name="retired_strategy")
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+    bot = make_bot()
+
+    _run(bot.reconcile())
+
+    assert _statuses(store, "OPEN") == ["R1"]
+    alerter.send.assert_not_awaited()
 
 
 # ============================================================
@@ -922,6 +985,112 @@ def test_manage_trips_daily_loss_breaker_once(
 
     _run(bot._job_manage())                            # second tick: no re-alert
     assert alerter.send.await_count == 1
+
+
+# ============================================================
+# Multi-strategy manage dispatch (D-15, D-19, D-21, D-29)
+# ============================================================
+
+def test_manage_closes_bull_call_at_profit_target_of_max(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_bull_spread(store)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    _snapshot(gateway, {LONG_C: {"bid": 7.95, "ask": 8.05},
+                        SHORT_C: {"bid": 1.15, "ask": 1.25}})
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor(exit_prices={LONG_C: 8.00, SHORT_C: 1.20})
+
+    _run(bot._job_manage())
+
+    closed = store.get_option_positions(("CLOSED",))
+    assert len(closed) == 1
+    assert closed[0]["close_reason"] == "profit_target"
+    assert closed[0]["realized_pnl_usd"] == pytest.approx(2420.0)
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "super_bull_call" in body
+    assert "of max profit" in body
+    assert "60.2" in body
+
+
+def test_manage_bull_call_never_stops_out(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_bull_spread(store)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    # Spread worth 0.25 vs the 1.96 paid -- a deep loss, still no stop-loss branch.
+    _snapshot(gateway, {LONG_C: {"bid": 0.25, "ask": 0.35},
+                        SHORT_C: {"bid": 0.04, "ask": 0.06}})
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    _run(bot._job_manage())
+
+    assert _statuses(store, "OPEN") == ["B1"]
+    bot._executor.close_legs.assert_not_awaited()
+
+
+def test_manage_bull_call_assignment_guard(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_bull_spread(store, expiry="2026-08-18")   # 1 DTE on 2026-08-17
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    _snapshot(gateway, {LONG_C: {"bid": 3.56, "ask": 3.60},
+                        SHORT_C: {"bid": 1.60, "ask": 1.64}})
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor(exit_prices={LONG_C: 3.58, SHORT_C: 1.62})
+
+    _run(bot._job_manage())
+
+    closed = store.get_option_positions(("CLOSED",))
+    assert len(closed) == 1
+    assert closed[0]["close_reason"] == "assignment_guard"
+    assert bot._executor.close_legs.await_args.kwargs["aggressive"] is True
+
+
+def test_manage_dispatches_each_position_to_its_own_strategy(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_open_spread(store, "P1", qty=2, expiry=EXPIRY, credit_per_spread=2.0)
+    _seed_bull_spread(store, "B1")
+    gateway.get_option_positions = AsyncMock(return_value={
+        LONG_P: 2, SHORT_P: -2, LONG_C: 5, SHORT_C: -5,
+    })
+    _snapshot(gateway, {
+        SHORT_P: {"bid": 2.05, "ask": 2.15}, LONG_P: {"bid": 0.15, "ask": 0.25},
+        LONG_C: {"bid": 7.95, "ask": 8.05}, SHORT_C: {"bid": 1.15, "ask": 1.25},
+    })
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    bot._executor = _fake_executor(exit_prices={LONG_C: 8.00, SHORT_C: 1.20})
+
+    _run(bot._job_manage())
+
+    assert _statuses(store, "OPEN") == ["P1"]
+    closed = store.get_option_positions(("CLOSED",))
+    assert [p["position_id"] for p in closed] == ["B1"]
+    assert closed[0]["close_reason"] == "profit_target"
+
+
+def test_manage_skips_position_with_unknown_strategy(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_open_spread(store, "R1", strategy_name="retired_strategy")
+    bot = make_bot()
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+    quotes = {SHORT_P: {"bid": 0.55, "ask": 0.65}, LONG_P: {"bid": 0.15, "ask": 0.25}}
+
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["R1"]
 
 
 # ============================================================
