@@ -12,7 +12,8 @@ placed as sequential single-leg LIMIT orders. This module owns that loop:
                   persists each order_id before the next leg is placed, and
                   aggressively unwinds already-filled legs if any leg fails.
   close_legs    — buys back the SHORT legs before selling the long wings, so the
-                  account is never momentarily naked-short.
+                  account is never momentarily naked-short; it never sells a
+                  long wing while a short leg is still open (EX-01).
 
 Every tunable comes from OptionsConfig (CFG-01): limit_buffer_usd,
 poll_interval_s, ttl_s, escalation_step_usd, max_retries.
@@ -225,8 +226,12 @@ class LegExecutor:
         """Close the given legs, SHORT legs first (bought back before wings are sold).
 
         Closing a long wing first would leave the short leg momentarily naked, so
-        the ordering here is a risk control, not a preference. One leg failing
-        does not stop the rest — a half-closed spread left unattended is worse.
+        the ordering here is a risk control, not a preference. If ANY short fails
+        to close for its full quantity (no quote, unfilled, or partial), no long
+        is sold and this returns False (EX-01) — selling the protection would
+        leave a naked short, so the defined-risk remainder is left for the
+        caller to escalate (NEEDS_ATTENTION + alert in service.py and the UAT
+        probe). A failing long still lets the other longs proceed.
 
         Args:
             legs:    leg dicts; qty comes from "filled_qty" when present, else "qty".
@@ -241,14 +246,26 @@ class LegExecutor:
         longs = [leg for leg in legs if leg.get("side") != "SELL"]
 
         all_closed = True
+        open_shorts = []
         for leg in shorts + longs:
             code = leg["code"]
+
+            if leg.get("side") != "SELL" and open_shorts:
+                _logger.warning(
+                    "close_longs_skipped_short_open",
+                    short_codes=open_shorts,
+                    long_codes=[l["code"] for l in longs],
+                )
+                return False
+
             quote = quotes.get(code)
             if not quote:
                 # No quote → any limit we invent is wrong in one direction or the
                 # other. Placing nothing is the safe failure; the caller escalates.
                 _logger.warning("close_leg_no_quote", code=code)
                 all_closed = False
+                if leg.get("side") == "SELL":
+                    open_shorts.append(code)
                 continue
 
             closing_side = "BUY" if leg.get("side") == "SELL" else "SELL"
@@ -271,6 +288,8 @@ class LegExecutor:
                     filled_qty=(result[2] if result else 0), requested_qty=qty,
                 )
                 all_closed = False
+                if leg.get("side") == "SELL":
+                    open_shorts.append(code)
 
             if result is not None and on_leg_filled is not None:
                 await on_leg_filled(leg, result[0], result[1], result[2])

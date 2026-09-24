@@ -331,20 +331,69 @@ def test_close_legs_inverts_each_side():
     assert _prices(gw) == [2.07, 0.53]
 
 
-def test_close_legs_false_when_a_leg_does_not_close():
+@pytest.mark.parametrize("case", ["short_unfilled", "short_partial", "short_no_quote"])
+def test_close_legs_short_failure_sells_no_long(monkeypatch, case):
+    from bot.options import execution as execution_module
+    log = MagicMock()
+    monkeypatch.setattr(execution_module, "_logger", log)
+
+    if case == "short_unfilled":
+        gw = _gw(dealt=0)
+        legs = _filled_legs()
+        quotes = QUOTES
+    elif case == "short_partial":
+        gw = _gw(dealt=1, qty=2)
+        legs = [
+            {"code": WING, "side": "BUY", "qty": 2, "filled_qty": 2},
+            {"code": SHORT, "side": "SELL", "qty": 2, "filled_qty": 2},
+        ]
+        quotes = QUOTES
+    else:  # short_no_quote
+        gw = _gw()
+        legs = _filled_legs()
+        quotes = {WING: QUOTES[WING]}
+
+    ok = _run(LegExecutor(gw, _cfg()).close_legs(legs, quotes))
+
+    assert ok is False
+    assert WING not in [c.args[0] for c in gw.place_order.call_args_list]
+    log.warning.assert_any_call(
+        "close_longs_skipped_short_open", short_codes=[SHORT], long_codes=[WING],
+    )
+
+
+def test_close_legs_long_failure_still_attempts_other_longs(monkeypatch):
+    from bot.options import execution as execution_module
+    log = MagicMock()
+    monkeypatch.setattr(execution_module, "_logger", log)
+
+    CWING = "US.SPY260320C616000"
+    CSHORT = "US.SPY260320C610000"
+    legs = [
+        {"code": WING, "side": "BUY", "qty": 1, "filled_qty": 1},
+        {"code": CWING, "side": "BUY", "qty": 1, "filled_qty": 1},
+        {"code": SHORT, "side": "SELL", "qty": 1, "filled_qty": 1},
+        {"code": CSHORT, "side": "SELL", "qty": 1, "filled_qty": 1},
+    ]
+    quotes = {**QUOTES, CSHORT: {"bid": 1.00, "ask": 1.04}, CWING: {"bid": 0.20, "ask": 0.24}}
+
     gw = _gw()
     ids = itertools.count(1)
     gw.place_order = AsyncMock(side_effect=lambda *a, **k: f"O{next(ids)}")
-    # First order (the short buy-back) never fills; the wing does.
+    # Both shorts fill (O1, O2); every WING (long) attempt (O3, O4, O5) fails.
     gw.get_order_status = AsyncMock(
-        side_effect=lambda oid: [_row(oid, 0 if oid in ("O1", "O2", "O3") else 1, 1)]
+        side_effect=lambda oid: [_row(oid, 0 if oid in ("O3", "O4", "O5") else 1, 1)]
     )
 
-    ok = _run(LegExecutor(gw, _cfg()).close_legs(_filled_legs(), QUOTES))
+    ok = _run(LegExecutor(gw, _cfg()).close_legs(legs, quotes))
 
     assert ok is False
-    # The wing was still attempted — a half-closed spread is worse than trying.
-    assert WING in [c.args[0] for c in gw.place_order.call_args_list]
+    codes = [c.args[0] for c in gw.place_order.call_args_list]
+    assert codes == [SHORT, CSHORT, WING, WING, WING, CWING]
+    assert not any(
+        c.args and c.args[0] == "close_longs_skipped_short_open"
+        for c in log.warning.call_args_list
+    )
 
 
 def test_close_legs_uses_filled_qty_then_qty():
