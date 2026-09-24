@@ -91,6 +91,13 @@ _CONTRACT_MULTIPLIER = 100
 
 _ACTIVE_STATUSES = ("OPENING", "OPEN", "CLOSING", "NEEDS_ATTENTION")
 
+# Inside the assignment-guard window, only this many CONSECUTIVE manage cycles
+# with an unusable per-position quote hand a position to the operator (WR-06).
+# At the 5-minute manage interval that is 10 minutes after the first counted
+# miss, which rides out the 09:35 price-discovery gap. Not a strategy knob, so
+# deliberately not a rules_options.json key (same as _MANAGE_START_ET).
+_QUOTE_MISS_ESCALATE_CYCLES = 3
+
 
 # ============================================================
 # Pure helpers (no self, no I/O)
@@ -177,6 +184,14 @@ def _parse_hhmm(value: str):
     """Split an "HH:MM" config string into (hour, minute) ints."""
     hour, minute = str(value).split(":")
     return int(hour), int(minute)
+
+
+def _manage_cutoff(day) -> datetime:
+    """The last instant the manage job may run on `day` (ET)."""
+    hour, minute = _parse_hhmm(get_market_close_et(day))
+    return datetime.combine(
+        day, _time(hour, minute), tzinfo=_ET,
+    ) - timedelta(minutes=_MANAGE_CLOSE_BUFFER_MIN)
 
 
 def _esc(value) -> str:
@@ -343,6 +358,13 @@ class OptionsBot:
         # scans (a code is a code regardless of which strategy's universe it
         # came from, so one cache is correct and saves a repeat gateway call).
         self._stock_ids: dict = {}
+        # position_id -> consecutive counted invalid-quote manage cycles inside
+        # the guard window (WR-06). In memory by design: a restart starts the
+        # count over, which costs at most N-1 extra cycles.
+        # ponytail: an entry of a row that left OPEN through reconcile stays as
+        # a stale int, bounded by the positions one process ever holds. Prune
+        # it in _manage_once if that ever matters.
+        self._quote_miss_streak: dict = {}
 
         # OpenDWatchdog duck-types bot._entries_enabled/_store/_position_manager/
         # _bar_agg. The options bot has neither a PositionManager nor a bar
@@ -519,11 +541,7 @@ class OptionsBot:
         today = now.date()
         if not is_trading_day(today):
             return False
-        hour, minute = _parse_hhmm(get_market_close_et(today))
-        cutoff = datetime.combine(
-            today, _time(hour, minute), tzinfo=_ET,
-        ) - timedelta(minutes=_MANAGE_CLOSE_BUFFER_MIN)
-        return _MANAGE_START_ET <= now.time() and now < cutoff
+        return _MANAGE_START_ET <= now.time() and now < _manage_cutoff(today)
 
     # --------------------------------------------------------
     # Job registration
@@ -932,10 +950,12 @@ class OptionsBot:
 
         codes = sorted({leg["code"] for p in positions for leg in p["legs"]})
         quotes = {}
+        unsnapped = set()
         for chunk in _chunks(codes, _SNAPSHOT_CHUNK):
             ret, data = await self._gateway.get_market_snapshot(chunk)
             if ret != _RET_OK:
                 _logger.warning("options_snapshot_failed", codes=len(chunk))
+                unsnapped.update(chunk)
                 continue
             for row in _rows(data):
                 quotes[row["code"]] = {
@@ -944,6 +964,15 @@ class OptionsBot:
 
         unrealized_total = 0.0
         for pos in positions:
+            outage = [leg["code"] for leg in pos["legs"] if leg["code"] in unsnapped]
+            if outage:
+                # A whole-chunk snapshot failure is never a per-position quote
+                # miss: it neither grows nor resets the WR-06 streak.
+                _logger.warning(
+                    "options_manage_snapshot_outage",
+                    position_id=pos["position_id"], codes=outage,
+                )
+                continue
             try:
                 unrealized_total += await self._manage_position(pos, quotes, today)
             except asyncio.CancelledError:
@@ -975,9 +1004,15 @@ class OptionsBot:
         Any leg without a two-sided numeric quote (CR-01) is never marked,
         decided on, or closed against — this returns 0.0 (no action). Inside
         the assignment-guard window (dte <= the strategy's assignment_guard_dte)
-        that skip is escalated to NEEDS_ATTENTION with an alert (Q-01), since a
-        position about to expire must never be silently skipped forever. A
-        close_legs exception always ends NEEDS_ATTENTION, never CLOSING.
+        an unusable quote escalates to NEEDS_ATTENTION with an alert (Q-01)
+        only after _QUOTE_MISS_ESCALATE_CYCLES consecutive counted cycles, or
+        on the expiry session's final cycle; below that it logs a retry and
+        does nothing else (WR-06) — a position about to expire must never be
+        silently skipped forever, but one transient bad cycle must never
+        cancel the automated close either. The alert fires once, because a
+        NEEDS_ATTENTION row leaves the OPEN-only manage loop. A snapshot
+        outage is skipped in _manage_once and never counts toward the streak.
+        A close_legs exception always ends NEEDS_ATTENTION, never CLOSING.
 
         Returns its unrealized P&L in dollars (0.0 once a close is attempted).
         """
@@ -1004,13 +1039,34 @@ class OptionsBot:
         dte = option_dte(date.fromisoformat(pos["expiry"]), today)
 
         bad = [leg["code"] for leg in legs if not _quote_ok(quotes.get(leg["code"]))]
+        if not bad:
+            self._quote_miss_streak.pop(pid, None)
         if bad:
             if dte <= strat_cfg.assignment_guard_dte:
+                streak = self._quote_miss_streak.get(pid, 0) + 1
+                self._quote_miss_streak[pid] = streak
+                # The last automated cycle before the contract expires (WR-06):
+                # ponytail: a cycle delayed by the lock can read as final one
+                # cycle early, which fails toward the human; the upgrade path
+                # is the scheduler's next_run_time.
+                final_cycle = (
+                    dte <= 0
+                    and now_et() + timedelta(minutes=self._cfg.manage_interval_min)
+                    >= _manage_cutoff(today)
+                )
+                if streak < _QUOTE_MISS_ESCALATE_CYCLES and not final_cycle:
+                    _logger.warning(
+                        "options_manage_unquotable_near_expiry_retry",
+                        position_id=pid, codes=bad, dte=dte, streak=streak,
+                    )
+                    return 0.0
+                self._quote_miss_streak.pop(pid, None)
                 self._store.set_position_status(pid, "NEEDS_ATTENTION")
                 await self._alerter.send(
                     f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
                     f"no usable quote for {_esc(', '.join(bad))} at {_esc(dte)} DTE "
-                    f"(assignment-guard window); close manually."
+                    f"after {_esc(streak)} manage cycle(s) (assignment-guard window); "
+                    f"close manually."
                 )
                 append_audit({
                     "event": "options_manage_unquotable_near_expiry",
@@ -1019,10 +1075,13 @@ class OptionsBot:
                     "strategy_name": pos.get("strategy_name"),
                     "codes": bad,
                     "dte": dte,
+                    "streak": streak,
+                    "final_cycle": final_cycle,
                 })
                 _logger.warning(
                     "options_manage_unquotable_near_expiry",
                     position_id=pid, codes=bad, dte=dte,
+                    streak=streak, final_cycle=final_cycle,
                 )
             else:
                 _logger.warning("options_manage_missing_quote", position_id=pid, codes=bad)
