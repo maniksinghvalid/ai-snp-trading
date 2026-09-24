@@ -27,14 +27,14 @@ result: [pending]
 
 ### 2. Developer decision on CR-02 (EX-02) before extended unattended live/paper operation
 expected: A recorded decision — either a follow-up gap-closure plan (e.g. 11-08: propagate close_legs' unwind result out of open_position; a failed unwind lands NEEDS_ATTENTION + alert instead of ABORTED "legs unwound") is scheduled, or the residual risk (an entry-unwind failure can strand live legs outside BP/busy/reconcile visibility) is explicitly accepted
-result: [pending]
+result: pass — operator decision 2026-09-24: schedule gap-closure plan 11-08 covering CR-02 + WR-06 + WR-07 (11-08-PLAN.md)
 
 ## Summary
 
 total: 2
-passed: 0
+passed: 1
 issues: 0
-pending: 2
+pending: 1
 skipped: 0
 blocked: 0
 
