@@ -1,12 +1,13 @@
 ---
 phase: 11-multi-strategy-options-bot-bull-call-spread
-reviewed: 2026-09-24T15:51:54Z
+reviewed: 2026-09-24T17:01:53Z
 depth: standard
-files_reviewed: 20
+files_reviewed: 22
 files_reviewed_list:
   - backtester/options_run.py
   - bot/main.py
   - bot/options/config.py
+  - bot/options/execution.py
   - bot/options/schema.py
   - bot/options/service.py
   - bot/options/store.py
@@ -19,6 +20,7 @@ files_reviewed_list:
   - tests/options/conftest.py
   - tests/options/test_config.py
   - tests/options/test_dispatch.py
+  - tests/options/test_execution.py
   - tests/options/test_service.py
   - tests/options/test_store.py
   - tests/options/test_strategy.py
@@ -26,182 +28,218 @@ files_reviewed_list:
   - tests/state/test_migrations.py
 findings:
   critical: 1
-  warning: 5
-  info: 6
-  total: 12
+  warning: 7
+  info: 7
+  total: 15
 status: issues_found
 ---
 
-# Phase 11: Code Review Report
+# Phase 11: Code Review Report (re-review after gap closure 11-07)
 
-**Reviewed:** 2026-09-24T15:51:54Z
-**Depth:** standard (diff `940243a..HEAD`, full files for context)
-**Files Reviewed:** 20
+**Reviewed:** 2026-09-24T17:01:53Z
+**Depth:** standard. All 22 files were read. The focus was the 11-07 diff `4a065fd^..38b2538` in `bot/options/service.py` and `bot/options/execution.py`.
+**Files Reviewed:** 22
 **Status:** issues_found
 
 ## Summary
 
-The phase-11 diff mostly matches the locked decisions. The D-19 sign convention is applied in the right places: `credit_per_spread = -debit` on open, `manage_decision_debit(mark, -credit, ...)` on manage, and the unchanged `credit - net_exit` close math gives the correct realized P&L for a debit spread. Per-strategy counters and global counters are split correctly per D-22. D-29 is wired into startup reconcile. `load_options_config` still returns the same flat config, and the shipped tasty view matches the pre-change file field for field. The equity DB is only opened through a `mode=ro` URI. The full suite passes (1265 passed, 1 skipped).
+The 11-07 plan fixes what it set out to fix:
+- `_quote_ok` now guards the shared manage path, and nothing is marked, decided on, or closed against a missing, `'N/A'`, NaN, or crossed quote.
+- A `close_legs` exception ends in NEEDS_ATTENTION, never CLOSING.
+- `close_legs` never sells a long once a short leg failed.
+- The structure-kind check runs both at startup reconcile and in `_manage_position`.
+- BP headroom and the per-strategy concurrent count now include every ACTIVE row.
 
-Five things were verified by running them:
-- A live-DB read-only query showing rank collisions in `daily_scan`.
-- A `legacy_view` KeyError traceback reached through `backtester.options_run`.
-- `legacy_view` silently overriding a per-strategy global knob that the live loader rejects.
-- The read-only WAL open behavior.
-- The test suite run.
+`pytest tests/options tests/backtester/options tests/state/test_migrations.py`: 474 passed.
 
-The main problem is in manage. A leg with no usable quote is marked as worth $0. This produces false exits and false daily-breaker trips, and it can leave a position stuck in CLOSING or turn it into a naked short. The rest of the findings are about places where the recorded risk or P&L differs from what is actually open on the broker, and about the equity-watchlist read returning rows in an order that is not deterministic.
+One BLOCKER remains. It is the deferred backlog item **EX-02**, and it is more serious than the 11-07 plan says. The plan calls it a "misleading ABORTED report". I reproduced it with a scratch script. When the entry unwind fails, `open_position` still returns None. The service then marks the row ABORTED, a status that BP headroom, `busy`, and reconcile all ignore. So live broker legs become invisible to the bot, and the same underlying can be traded again on top of them.
+
+The new code also adds four WARNINGs:
+- The Q-01 escalation fires on the first bad cycle, with no retry.
+- `_quote_ok` still accepts one-sided or arbitrarily wide quotes.
+- A partially closed short is recorded as `CLOSED`.
+- NEEDS_ATTENTION rows now permanently use up BP and strategy slots, and there is no way to resolve them other than editing SQLite by hand.
+
+## Disposition of prior findings
+
+| Prior ID | Status | Evidence |
+|----------|--------|----------|
+| CR-01 (unusable quote marked as $0) | **RESOLVED** | `service.py:132-151` `_quote_ok` rejects None, `''`, `'N/A'`, NaN/inf, `ask<=0`, `bid<0`, and `ask<bid`. It is applied to every leg before `mark_spread` (`service.py:974`). The `close_legs` exception now leads to NEEDS_ATTENTION (`service.py:1021-1031`). Tests: `test_quote_ok_accepts_only_two_sided_numeric_quotes`, `test_manage_skips_*_on_invalid_quote`, `test_manage_invalid_long_quote_does_not_trip_breaker`, `test_manage_close_exception_flags_needs_attention`. The residual gap is WR-07 below: one-sided and wide quotes still pass. |
+| Q-01 (skipped forever near expiry) | **RESOLVED, with a new defect** | `service.py:974-998`. It escalates on the first failed cycle with no retry. See WR-06. |
+| WR-01 (structure-kind change leaves positions unmanaged) | **RESOLVED** | Startup reconcile (`service.py:415-457`) and manage (`service.py:963-970`) both compare the debit/credit kind. Iron condor and PCS deliberately share one kind. The `ponytail:` comment explains why that is safe today. |
+| WR-02 (entry premium recorded at mid, not fill) | **STILL OPEN (deferred)** | `service.py:771-782` is unchanged. Carried below. |
+| WR-03 (non-deterministic `daily_scan` rank order) | **STILL OPEN (deferred)** | `universe.py:87` is unchanged. Carried below. |
+| WR-04 (`legacy_view` unvalidated; KeyError; silent override) | **STILL OPEN (deferred)** | `config.py:514-554` and `options_run.py:228-232` are unchanged. Carried below. |
+| WR-05 (BP headroom ignores NEEDS_ATTENTION/CLOSING) | **RESOLVED, with a new consequence** | `service.py:687, 693`. It sums and counts every ACTIVE row. See WR-09: those rows can never be released. |
+| EX-01 (close sells long after short failed) | **RESOLVED** | `execution.py:249-292`. Longs are blocked once `open_shorts` is non-empty. There are 3 parametrized cases plus a test for a failed long. |
+| EX-02 (entry-unwind failure reported as "legs unwound", ABORTED) | **STILL OPEN (deferred), escalated to BLOCKER** | See CR-02. |
+| IN-01 … IN-06 | **STILL OPEN** | None of the touched lines changed. Carried below. |
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: A leg with no quote is marked as worth $0, which causes false exits, false breaker trips, and naked-short or stuck-CLOSING outcomes
+### CR-02 (EX-02): A failed entry unwind leaves live broker legs in an ABORTED row that BP, `busy`, and reconcile all ignore
 
-**File:** `bot/options/service.py:858-860, 901-918` (with `bot/options/strategy.py:287-292` and `bot/options/execution.py:79`)
+**File:** `bot/options/execution.py:209-216`; `bot/options/service.py:835-849`, `92`, `405`, `509`
 
-**Issue:** `_manage_position` only checks that each leg's code is present in `quotes`. It does not check that the quote is usable. The snapshot DataFrame is passed through raw (`bid_price`/`ask_price`). `strategy._as_float` documents that the SDK returns a literal `'N/A'` on untraded strikes, and it converts `None`, `''`, `'N/A'` and `0` to `0.0`. That leg's mid then goes into `mark_spread` as $0. For the new debit path:
+**Issue:** `open_position` discards the return value of `close_legs(filled, quotes, aggressive=True)`. It logs `open_position_unwound` and returns None whether or not the unwind worked. EX-01 made `close_legs` return False on purpose when a short could not be bought back, and its docstring (`execution.py:231-234`) says the caller escalates. `open_position` does not.
 
-- **Short call unquoted:** `mark = -mid(long)`, so the spread's value is overstated as the full long-call mid. `manage_decision_debit` can fire `profit_target` early. `close_legs` then works the short leg first:
-  - If the value is `'N/A'`, `float(bid)` in `fill_leg` raises `ValueError`. The row was already set to `CLOSING` (line 920). The per-position `except` swallows the error, and the row stays `CLOSING` with no alert. The manage loop only reads `OPEN`, so the position is orphaned until the next restart. It also drops out of BP headroom, which only counts `OPEN`/`OPENING`.
-  - If the value is numeric `0`, the buy-back is priced at $0.01–$0.11, is never filled, and is abandoned. `close_legs` then sells the long call anyway ("one leg failing does not stop the rest"), leaving a **naked short call**. That breaks the defined-risk invariant.
-- **Long call unquoted:** `mark = +mid(short)`, so `(credit - mark)*100*qty` gives an unrealized loss of about `-(debit + short_mid)*100*qty`, roughly -$1,780 for the 5-lot worked example. Two such positions summed at line 875 trip the global `$2,000` daily-loss breaker when no loss has occurred, which blocks every strategy for the rest of the day.
+Reproduced with a scratch script. A 2-lot bull call:
+1. The long leg fills 2.
+2. The short leg fills 1 of 2.
+3. The short buy-back fills 0.
 
-The credit path has the same flaw (it predates this phase). Phase 11 makes it much more likely to be hit, because it adds single-name S&P option chains, which are thinner than the ETF chains.
+The log shows `close_longs_skipped_short_open`, then `open_position_unwound unwound_legs=2`, then the call returns `None`. The broker is left holding +2 long calls and -1 short call.
 
-**Fix:** Refuse to mark or act on any leg without a two-sided numeric quote. Also, never leave a row in CLOSING because of an exception:
+`_try_open` then:
+- sets the row `ABORTED`;
+- sends "legs unwound, position aborted".
+
+After that:
+- ABORTED is not in `_ACTIVE_STATUSES` (`service.py:92`). The position adds nothing to `open_max_loss_total` or `open_count`, and it is not in `busy` (`service.py:682`). The next scan can open another spread on the **same underlying**, on top of the stranded legs.
+- Reconcile only loads OPEN/OPENING/CLOSING (`service.py:405`). The stranded codes are therefore not in `known_codes` and are logged at debug level as "external / ignored" (`service.py:509`). Nothing alerts, and the P&L of those legs never reaches the daily breaker.
+- The operator receives a Telegram message saying the legs were unwound, which is false.
+
+The 11-07 plan treats this as a cosmetic reporting issue. In fact it is unmonitored live exposure, plus a way to double up on an underlying. Before EX-01 the leftover was a naked short. After EX-01 it is defined-risk, but it is still invisible to the bot. The same thing happens when unwinding a long-only `filled` list and the long sale fails.
+
+No test covers `open_position` when `close_legs` returns False.
+
+**Fix:** Propagate the unwind result and escalate, rather than abort:
 ```python
-def _quote_ok(q):
-    try:
-        bid, ask = float(q.get("bid")), float(q.get("ask"))
-    except (TypeError, ValueError):
-        return False
-    return ask > 0 and bid >= 0 and ask >= bid
-
-if any(leg["code"] not in quotes or not _quote_ok(quotes[leg["code"]]) for leg in legs):
-    _logger.warning("options_manage_missing_quote", position_id=pid)
-    return 0.0
+# execution.py, open_position
+unwound = await self.close_legs(filled, quotes, aggressive=True)
 ...
-self._store.set_position_status(pid, "CLOSING")
-try:
-    ok = await self._executor.close_legs(...)
-except Exception:
-    ok = False      # falls through to the NEEDS_ATTENTION + alert branch
+return None if unwound else False     # or raise / return a sentinel
+
+# service.py, _try_open
+if filled is None or filled is False:
+    status = "ABORTED" if filled is None else "NEEDS_ATTENTION"
+    self._store.set_position_status(position_id, status,
+        closed_at=now_et().isoformat() if status == "ABORTED" else None,
+        close_reason="open_failed")
+    await self._alerter.send(
+        f"<b>Options entry failed</b> {_esc(code)} — "
+        + ("legs unwound, position aborted." if status == "ABORTED"
+           else "UNWIND INCOMPLETE — legs still open; close manually."))
 ```
-Also filter out rows with a missing or `'N/A'` quote when building `quotes` (lines 857-860).
+A NEEDS_ATTENTION row is active, so it keeps the underlying busy and counts against BP (WR-05). Add one test in which the short buy-back fills 0.
 
 ## Warnings
 
-### WR-01: D-29 only checks the strategy name, so a strategy whose structure changed leaves its open positions unmanaged
+### WR-06: Q-01 permanently hands a position to manual control after one bad snapshot cycle
 
-**File:** `bot/options/service.py:389, 893-916`
+**File:** `bot/options/service.py:974-998`
 
-**Issue:** The startup guard only asks whether `pos["strategy_name"]` is in the book. `_manage_position` picks the decision function from `pos["structure"]` but reads parameters from the strategy's current config. Suppose the operator keeps a name but changes its `structure.type`, for example `super_bull_call` switched to a credit structure, or tasty switched to `bull_call_spread`. Then a pre-existing position is decided with the other kind's config:
-- `manage_decision(..)` reads `cfg.profit_target_pct_of_credit`, which is `None`, so `None / 100` raises TypeError.
-- `manage_decision_debit(..)` reads `cfg.profit_target_pct_of_max`, which is `None`, with the same result.
+**Issue:** The first cycle with any `_quote_ok` failure while `dte <= assignment_guard_dte` sets NEEDS_ATTENTION. That row then leaves the manage loop for good, because only OPEN rows are managed. Both shipped strategies use `assignment_guard_dte: 1` (`rules_options.json`). The bull call has `manage_dte: null`, so at DTE 1 the assignment guard is its only automated exit.
 
-This happens on every 5-minute cycle. The error is logged and swallowed. Only `assignment_guard` still works, because it is checked first. The position never takes profit or exits on DTE, and its unrealized P&L is left out of the breaker total. This is what D-29 is meant to prevent ("never managed with another strategy's parameters").
+The first manage cycle runs at 09:35 ET (`service.py:84`). That is when quotes on single-name options are most likely to be briefly missing or crossed. Also, when `get_market_snapshot` fails for a whole chunk (`service.py:903-905`), `quotes` has no entries for up to 400 codes. In that case every position in the window escalates at once.
 
-**Fix:** In the startup reconcile, also flag NEEDS_ATTENTION when `pos["structure"] != self._strategies[name].structure_type`. In `_manage_position`, add the same check as defense in depth, and return 0.0 with a warning when it fails.
+The result: one transient OpenD or quote hiccup cancels the automated aggressive close that would have run 5 minutes later. The operator then has to close by hand on the day before expiry. The 11-07 plan states "retries next cycle" outside the window, but inside the window there is no retry at all.
 
-### WR-02: Entry premium is recorded at the pre-trade mid, not the fill, so the 1/4 rule, max loss, BP cap and realized P&L are all off
-
-**File:** `bot/options/service.py:720-732, 742-745, 952`; `bot/options/strategy.py:434-436`
-
-**Issue:** `credit_per_spread = -sel["debit"]` and `max_loss_usd = debit*100*qty` both use the chain mid. `LegExecutor` always buys at mid + $0.02 or worse, and can escalate to mid + $0.11 on each leg. It sells at mid − $0.02 or worse. So the debit actually paid can be up to about $0.22 per spread more than the recorded value.
-
-- The 1/4-rule gate (`debit <= 0.30 × width`) is only enforced on the mid. A $3.00 mid on a $10 spread passes, but can fill at $3.22 (32%).
-- `max_loss_usd`, which feeds the global BP headroom, understates the actual risk.
-- `realized_per_spread = credit - net_exit` is overstated by at least $0.04 per spread on every trade, and the daily breaker inherits that bias.
-
-The per-leg `entry_price` values are already persisted (`_on_filled` → `set_leg_entry`) but are never used. The credit path has the same bias (it predates this phase), and the new debit path copies it.
-
-**Fix:** After `open_position` returns `filled`, recompute the premium from the fills and update the row before `set_position_status(..., "OPEN")`:
+**Fix:** Escalate only after N consecutive failed cycles, or only in the last cycle before the manage cutoff. For example, keep a per-position counter in meta or on the instance:
 ```python
-net = sum(f["entry_price"] for f in filled if f["side"] == "SELL") - \
-      sum(f["entry_price"] for f in filled if f["side"] == "BUY")
-max_loss = (-net if is_debit else sel["width"] - net) * 100 * qty
-# store.update_position_premium(position_id, credit_per_spread=net, max_loss_usd=max_loss)
+misses = self._quote_misses[pid] = self._quote_misses.get(pid, 0) + 1
+if dte <= strat_cfg.assignment_guard_dte and (misses >= 3 or self._last_manage_cycle_today()):
+    ...escalate...
 ```
-Optionally, for a debit, abort or alert if the filled debit breaks `max_debit_to_width × width`.
+Clear the counter whenever `bad` is empty. Also skip the escalation completely when the snapshot chunk itself failed, and log that as a snapshot outage instead.
 
-### WR-03: The equity-watchlist read returns rows in a non-deterministic, mixed order because intraday rescans reuse the same rank numbers
+### WR-07: `_quote_ok` accepts one-sided (`bid=0`) and arbitrarily wide quotes, so a spurious exit is still possible
 
-**File:** `bot/options/universe.py:86-89`
+**File:** `bot/options/service.py:148-151`; test `tests/options/test_service.py:1117`
 
-**Issue:** The equity bot's intraday rescan runs every 30 minutes from 09:55 ET (`rules.json:66-68`), so it has already run before the 10:05 bull-call scan. It upserts into the same `daily_scan(scan_date, code)` rows with its own rank sequence starting at 1, and it never deletes rows. A read-only query of the live DB for 2026-09-17 shows premarket and intraday rows sharing ranks 1, 2, 3, 5, 6, 7, 9 and 10 (for example `US.MRNA|1|intraday` and `US.OMC|1|premarket`).
+**Issue:** The gate is described as "two-sided", but `{"bid": 0, "ask": X}` passes for any X, and nothing bounds `ask - bid`. Consider an illiquid single-name long call quoted `0.10 / 9.00`:
+- It gets a mid of 4.55.
+- `manage_decision_debit` fires `profit_target`.
+- `close_legs` buys the short back, which succeeds, and then works the long at 4.53, then 4.50, 4.47, 4.44.
+- The long order is never filled, and the row goes to NEEDS_ATTENTION.
 
-`ORDER BY rank ASC LIMIT 20` has no tie-breaker. As a result:
-- Which 20 names are returned, and in what order the per-day slots go to them, depends on SQLite's row order.
-- Premarket names ranked 16–20 are dropped in favour of intraday names.
-- Names that a later pass dropped are still included.
+So a bad quote turned a managed spread into an unmanaged naked long, plus a manual-intervention alert. On the credit side, a wide ask on a short leg inflates the mark and can falsely trip the global daily-loss breaker. This is the same failure CR-01 fixed, now caused by a wide quote rather than a missing one. The entry path already rejects these through `leg_is_liquid` (`bid <= 0`, width limits).
 
-The query does match D-17 word for word, but it does not meet D-17's intent of a rank-ordered premarket watchlist.
+**Fix:** For *decisions* other than `assignment_guard`, require `bid > 0` and a sane width. For example, reuse the strategy's `max_spread_pct_of_mid` with a looser multiplier, or `spread <= max(0.5 * mid, 0.10)`. Keep the looser `_quote_ok` only for the guard-window close, where closing at any price beats pin risk.
 
-**Fix:** At minimum, make the order deterministic: `ORDER BY rank ASC, gap_pct DESC, code ASC`. Better, choose the intended semantics explicitly. One option is `WHERE scan_date=? AND scan_pass='premarket'`. Note that the upsert overwrites `scan_pass`, so a separate premarket snapshot may be needed. Another option is `ORDER BY gap_pct DESC` across all passes. Then update D-17 to record the choice.
+### WR-08: A partially closed short leg is recorded as `status='CLOSED'` with an exit price
 
-### WR-04: `legacy_view` runs before any validation, so bad input crashes `options_run` and backtests can silently diverge from the live config
+**File:** `bot/options/service.py:1017-1019`; `bot/options/execution.py:294-295`
 
-**File:** `bot/options/config.py:533-554`; `backtester/options_run.py:228-232`
+**Issue:** `close_legs` calls `on_leg_filled` for partial fills (`result is not None`). `_on_exit_filled` then writes `status="CLOSED"` and the exit price, whatever `filled_qty` was. EX-01 makes "short partially bought back, longs held" an expected outcome. In that case the DB says the short is CLOSED, but the broker still holds `qty - filled_qty` short contracts.
 
-**Issue:**
-1. `legacy_view` indexes `raw["risk"]` and `raw["service"]` and calls `src.pop(key)` without checking the keys exist. A strategies-shape file that is missing `risk.max_bp_usage_pct` fails with a raw `KeyError` traceback (verified). This breaks the module's stated contract of "exits 1 with `[ERROR]` rather than a raw stack trace". `options_run` only catches `ConfigError`.
-2. If a strategy sets a global knob inside its own block (for example `strategies[0].sizing.sizing_equity_usd = 5000`), `legacy_view` silently replaces it with the global value (it returned `100000`). The live loader rejects the same file with `ConfigError` (T-11-02). The backtest then runs a config that the bot would refuse to start with.
+The position goes to NEEDS_ATTENTION, and reconcile never checks NEEDS_ATTENTION rows again. The operator's only record of what is still open is therefore wrong on exactly the leg that carries the risk.
 
-**Fix:** Before projecting, validate the raw strategies-shape dict with the same path as the bot. For example, call `_validate(raw, STRATEGIES_SCHEMA)` and `_check_strategy(s)` inside `legacy_view` and raise `ConfigError`, or have `options_run` call `load_options_book(args.rules)` first. Also catch `KeyError` and `TypeError` around `legacy_view` in `options_run` and print `[ERROR]`.
-
-### WR-05: Global BP headroom ignores NEEDS_ATTENTION and CLOSING positions that are still open on the broker
-
-**File:** `bot/options/service.py:631-635`
-
-**Issue:** `open_max_loss_total` only sums rows in `_OPEN_STATUSES = ("OPEN", "OPENING")`. Rows in NEEDS_ATTENTION or CLOSING are still live broker exposure, but they are excluded from the D-22 global BP cap. These rows come from D-29 unknown-strategy flags, from reconcile mismatches and from incomplete closes, plus the stuck-CLOSING case in CR-01. D-29 adds a new, bulk path into NEEDS_ATTENTION. On a restart after removing a strategy, every one of that strategy's positions leaves the headroom calculation, and `size_position`/`size_debit_position` can then open up to the full 25% on top of them. The same exclusion applies to the per-strategy `open_count` (lines 639-642).
-
-**Fix:** Sum `max_loss_usd` over every active status, which is what `busy` already does:
+**Fix:** Pass `filled_qty` through and record it:
 ```python
-open_max_loss_total = sum(float(p["max_loss_usd"] or 0) for p in active)
+async def _on_exit_filled(leg, order_id, price, filled_qty):
+    full = filled_qty >= int(leg.get("filled_qty") or leg.get("qty"))
+    exits[leg["code"]] = price
+    self._store.set_leg_exit(leg["leg_id"], price=price,
+                             status="CLOSED" if full else "PARTIAL")
 ```
-Consider the same change for `open_count`, so that a strategy with stuck positions cannot keep adding new ones.
+Alternatively, store the closed quantity in a column.
+
+### WR-09: NEEDS_ATTENTION rows are terminal with no way to resolve them, and they now permanently use up BP and strategy slots
+
+**File:** `bot/options/service.py:683-693`
+
+**Issue:** After WR-05, every NEEDS_ATTENTION row counts against `open_max_loss_total` and the strategy's `open_count`, and (as before) keeps its underlying in `busy`. The code comment says "the operator clears it by resolving the row". However:
+- nothing in `bot/`, `scripts/`, or the docs changes a NEEDS_ATTENTION row to a terminal status;
+- no runbook describes how to do it.
+
+After the operator closes the legs in moomoo, the row still counts against BP and slots until someone hand-edits `data/options_state.db`. With `max_concurrent_positions: 4` for `super_bull_call`, four stuck rows turn the strategy off with no alert. `options_entry_scan` simply breaks out on the cap. 11-07 also adds two new ways into NEEDS_ATTENTION: Q-01 and the close-exception path. Those rows' realized P&L is never recorded either.
+
+**Fix:** Add a small operator command, for example `python3 -m bot.options.resolve <position_id> --realized <usd>`. It would set `CLOSED`, `close_reason='manual'`, and `realized_pnl_usd`, and write an audit entry. Document it in CLAUDE.md next to the options-bot run instructions. At minimum, log `options_entry_scan_skipped reason=concurrent_cap` when the cap is reached.
+
+### WR-02 (carried, deferred): Entry premium recorded at the pre-trade mid instead of the fill
+
+**File:** `bot/options/service.py:771-782`, `1000-1043`
+**Issue:** Unchanged since the prior review. `credit_per_spread` and `max_loss_usd` come from chain mids. The executor fills at the mid ± $0.02 or worse, and escalation can add up to $0.11 per leg. As a result, the 1/4-rule debit gate, BP headroom, and realized P&L are all biased in the bot's favour. The per-leg `entry_price` values are persisted but never used.
+**Fix:** After `open_position` succeeds, recompute the net premium from `filled[*]["entry_price"]`, and update `credit_per_spread` and `max_loss_usd` before setting the row OPEN (see the prior report for the snippet).
+
+### WR-03 (carried, deferred): `daily_scan` read has no tie-break when premarket and intraday rows share a rank
+
+**File:** `bot/options/universe.py:87`
+**Issue:** Unchanged. `ORDER BY rank ASC LIMIT ?` has no tie-breaker. The equity bot's intraday rescans reuse rank numbers, so which 20 names are returned, and in what order, depends on SQLite row order.
+**Fix:** Use `ORDER BY rank ASC, gap_pct DESC, code ASC` at minimum. Better, filter explicitly to `scan_pass='premarket'`, and update D-17 to match.
+
+### WR-04 (carried, deferred): `legacy_view` runs before validation
+
+**File:** `bot/options/config.py:514-554`; `backtester/options_run.py:228-232`
+**Issue:** Unchanged. A missing `risk` or `service` key raises a raw `KeyError`, and `options_run` only catches `ConfigError`. A per-strategy override of a global knob is silently replaced, even though the live loader rejects the same file. So the backtest can run a config the bot refuses to start with.
+**Fix:** Validate with `load_options_book` or the same `_validate` path before projecting, and catch `KeyError`/`TypeError` in `options_run`.
 
 ## Info
 
-### IN-01: The EOD HTML "Credit" column shows negative numbers for debit positions
+### IN-01 (carried): The EOD HTML "Credit" column prints a negative credit for debit positions
+**File:** `bot/options/service.py:267, 293`
+**Fix:** Render `_premium_label(p.get("credit_per_spread") or 0)` and rename the header to "Premium".
 
-**File:** `bot/options/service.py:245, 271`
-**Issue:** The Telegram lines use `_premium_label` ("debit 1.96"), but the HTML report prints the raw signed `credit_per_spread` (`-1.96`) under a "Credit" header. D-24 parity is met in form but not in meaning.
-**Fix:** Render `_premium_label(p.get("credit_per_spread") or 0)` in that cell and rename the header to "Premium".
+### IN-02 (carried): `insert_option_position` silently defaults a missing `strategy_name` to tasty
+**File:** `bot/options/store.py:59-73`
+**Fix:** Raise `ValueError` when `strategy_name` is missing for new inserts.
 
-### IN-02: `insert_option_position` silently assigns an unset strategy_name to tasty
-
-**File:** `bot/options/store.py:69`
-**Issue:** Any row inserted with `strategy_name=None` gets the SQL default `'tasty_credit_spreads'`. A future caller that forgets the field on a bull-call row would have it managed with tasty's config (see WR-01), with no error. The default is only correct for rows written before the migration.
-**Fix:** Raise `ValueError` in `insert_option_position` when `strategy_name` is missing. Keep the SQL default for historical rows only.
-
-### IN-03: `main.py` dispatch crashes on a JSON file whose top level is not an object
-
+### IN-03 (carried): `main.py` dispatch assumes the rules JSON is an object
 **File:** `bot/main.py:80`
-**Issue:** `data.get(...)` and `"strategies" in data` assume a dict. A top-level array or string raises an uncaught AttributeError or TypeError instead of `[ERROR] ... exit 1`.
 **Fix:** `if not isinstance(data, dict): print("[ERROR] ...", file=sys.stderr); sys.exit(1)`.
 
-### IN-04: `equity_state_db` ignores the `BOT_STATE_DB` override that the equity bot honours
+### IN-04 (carried): `equity_state_db` ignores the `BOT_STATE_DB` override that the equity bot honours
+**File:** `bot/options/config.py`; `bot/options/universe.py:51`; `bot/options/service.py:639`
+**Fix:** Document the coupling in CLAUDE.md, or log the resolved absolute path at startup.
 
-**File:** `bot/options/config.py:53, 421`; `bot/options/universe.py:51`
-**Issue:** The equity bot resolves its DB through `resolve_db_path()` (`BOT_STATE_DB` env var first). The options bot always uses `service.equity_state_db`, resolved relative to the working directory. If the equity bot runs with the env override, the bull-call strategy reads a different or stale DB and trades on it, or fails closed with zero entries. Only a log line would show this.
-**Fix:** Document the coupling in CLAUDE.md, or log the resolved absolute path at startup in `options_jobs_registered`.
+### IN-05 (carried): The provenance doc does not list the 60% vs the video's 40–50% profit target as a deviation
+**File:** `docs/research/2026-09-24-super-bull-call-spread.md:21, 56`
+**Fix:** Add a Deviations bullet for the fixed-target percentage.
 
-### IN-05: The provenance doc does not list the 60% profit target as a deviation
+### IN-06 (carried): Blocking sqlite read with a 5 s busy timeout on the event loop
+**File:** `bot/options/universe.py:58`; `bot/options/service.py:639`
+**Fix:** Lower `timeout_s` to about 0.5 s, or run the read in an executor.
 
-**File:** `docs/research/2026-09-24-super-bull-call-spread.md:21, 46, 56`
-**Issue:** The video's fixed-target rule is 40–50% of max profit, but the bot ships 60 (D-16). The Deviations section only contrasts the target with the sell-half runner. D-27 requires every deviation to be listed.
-**Fix:** Add a bullet: "Profit target 60% of max vs the video's 40–50% fixed-target band."
-
-### IN-06: A blocking sqlite read with a 5 s busy timeout runs on the asyncio loop
-
-**File:** `bot/options/service.py:586-589`; `bot/options/universe.py:57`
-**Issue:** The `ponytail:` comment assumes the read takes under a millisecond. However, `timeout_s=5.0` lets it block the event loop for up to 5 s while the equity DB is locked (for example during a WAL checkpoint or recovery). That stalls the kill-switch poll and all other jobs.
-**Fix:** Either lower `timeout_s` to about 0.5 s, or use `await asyncio.get_running_loop().run_in_executor(None, read_equity_watchlist, ...)`.
+### IN-07 (new): A quote-skipped position counts as $0 unrealized, so the daily breaker cannot see its loss
+**File:** `bot/options/service.py:997, 912-923`
+**Issue:** CR-01 correctly stops false breaker trips. The trade-off is that every skipped position, including every position during a snapshot outage, contributes 0.0 to `unrealized_total`. The breaker fails open for as long as the quotes stay bad. This is acceptable as a trade-off, but it is not documented.
+**Fix:** Log `unquoted_positions=len(skipped)` on the breaker check, or reuse the last good mark (with a staleness bound) for the breaker sum only.
 
 ---
 
-_Reviewed: 2026-09-24T15:51:54Z_
+_Reviewed: 2026-09-24T17:01:53Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
