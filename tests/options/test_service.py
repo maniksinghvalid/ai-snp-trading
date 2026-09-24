@@ -1097,6 +1097,177 @@ def test_manage_skips_position_with_unknown_strategy(
 
 
 # ============================================================
+# CR-01 / Q-01: quote validity in the shared manage path
+# ============================================================
+
+@pytest.mark.parametrize("q, expected", [
+    (None, False),
+    ({}, False),
+    ({"bid": None, "ask": 1.0}, False),
+    ({"bid": "", "ask": 1.0}, False),
+    ({"bid": "N/A", "ask": 1.0}, False),
+    ({"bid": 1.0, "ask": "N/A"}, False),
+    ({"bid": float("nan"), "ask": 1.0}, False),
+    ({"bid": 1.0, "ask": float("inf")}, False),
+    ({"bid": "abc", "ask": 1.0}, False),
+    ({"bid": 0, "ask": 0}, False),
+    ({"bid": 0.30, "ask": 0.20}, False),
+    ({"bid": -0.05, "ask": 0.10}, False),
+    ({"bid": 0.55, "ask": 0.65}, True),
+    ({"bid": 0, "ask": 0.05}, True),
+    ({"bid": 1.0, "ask": 1.0}, True),
+    ({"bid": "0.55", "ask": "0.65"}, True),
+])
+def test_quote_ok_accepts_only_two_sided_numeric_quotes(q, expected):
+    assert service._quote_ok(q) is expected
+
+
+@pytest.mark.parametrize("bad_long_quote", [
+    {"bid": "N/A", "ask": "N/A"},
+    None,
+    {"bid": 0, "ask": 0},
+    {"bid": 0.30, "ask": 0.20},
+], ids=["na_bid", "missing_leg", "zero_quote", "crossed"])
+def test_manage_skips_credit_position_on_invalid_quote(
+    make_bot, store, monkeypatch, bad_long_quote,
+):
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    _seed_open_spread(store, "P1", qty=2, expiry=EXPIRY, credit_per_spread=2.0)
+    bot = make_bot()
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    quotes = {SHORT_P: {"bid": 0.55, "ask": 0.65}}
+    if bad_long_quote is not None:
+        quotes[LONG_P] = bad_long_quote
+
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["P1"]
+    log.warning.assert_any_call(
+        "options_manage_missing_quote", position_id="P1", codes=[LONG_P],
+    )
+
+
+@pytest.mark.parametrize("long_quote, short_quote, bad_code", [
+    ({"bid": "N/A", "ask": "N/A"}, {"bid": 1.15, "ask": 1.25}, LONG_C),
+    ({"bid": 7.95, "ask": 8.05}, {"bid": "N/A", "ask": "N/A"}, SHORT_C),
+], ids=["long_na", "short_na"])
+def test_manage_skips_debit_position_on_invalid_quote(
+    options_book, make_bot, store, monkeypatch, long_quote, short_quote, bad_code,
+):
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    _seed_bull_spread(store)
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    quotes = {LONG_C: long_quote, SHORT_C: short_quote}
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["B1"]
+    log.warning.assert_any_call(
+        "options_manage_missing_quote", position_id="B1", codes=[bad_code],
+    )
+
+
+def test_manage_invalid_long_quote_does_not_trip_breaker(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_bull_spread(store, qty=10, max_loss_usd=1960.0)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 10, SHORT_C: -10})
+    _snapshot(gateway, {LONG_C: {"bid": "N/A", "ask": "N/A"},
+                        SHORT_C: {"bid": 1.15, "ask": 1.25}})
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    _run(bot._job_manage())
+
+    assert store.get_meta("options_breaker_date") is None
+    alerter.send.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["B1"]
+
+
+def test_manage_close_exception_flags_needs_attention(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_open_spread(store, "P1", qty=2, expiry=EXPIRY, credit_per_spread=2.0)
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+    _snapshot(gateway, {SHORT_P: {"bid": 0.55, "ask": 0.65},
+                        LONG_P: {"bid": 0.15, "ask": 0.25}})
+    bot = make_bot()
+    bot._executor = MagicMock(
+        close_legs=AsyncMock(side_effect=ValueError("could not convert string to float: 'N/A'")),
+    )
+
+    _run(bot._job_manage())
+
+    assert _statuses(store, "NEEDS_ATTENTION") == ["P1"]
+    assert _statuses(store, "CLOSING") == []
+    assert alerter.send.await_count == 1
+    assert "NEEDS ATTENTION" in alerter.send.await_args[0][0]
+    incomplete = [e for e in audit_events if e["event"] == "options_close_incomplete"]
+    assert len(incomplete) == 1
+    assert incomplete[0]["position_id"] == "P1"
+
+
+def test_manage_unquotable_leg_inside_guard_window_flags_needs_attention(
+    options_book, make_bot, store, alerter, monkeypatch,
+):
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_bull_spread(store, expiry="2026-08-18")   # 1 DTE on TODAY
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    quotes = {LONG_C: {"bid": 3.56, "ask": 3.60}, SHORT_C: {"bid": "N/A", "ask": "N/A"}}
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "NEEDS_ATTENTION") == ["B1"]
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "NEEDS ATTENTION" in body
+    assert SHORT_C in body
+    near_expiry = [
+        e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
+    ]
+    assert len(near_expiry) == 1
+    assert near_expiry[0]["position_id"] == "B1"
+    assert near_expiry[0]["codes"] == [SHORT_C]
+    assert near_expiry[0]["dte"] == 1
+
+
+def test_manage_unquotable_leg_outside_guard_window_stays_open(
+    options_book, make_bot, store, alerter, monkeypatch,
+):
+    _seed_bull_spread(store, expiry="2026-08-19")   # 2 DTE on TODAY
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    quotes = {LONG_C: {"bid": 7.95, "ask": 8.05}, SHORT_C: {"bid": "N/A", "ask": "N/A"}}
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["B1"]
+    alerter.send.assert_not_awaited()
+
+
+# ============================================================
 # EOD
 # ============================================================
 

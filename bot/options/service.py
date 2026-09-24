@@ -31,6 +31,7 @@ Exports: OptionsBot, main
 """
 import asyncio
 import html
+import math
 import os
 import sys
 from datetime import date, datetime, time as _time, timedelta
@@ -127,6 +128,28 @@ def _change_pct(row: dict):
         return float(value) * 100
     except (TypeError, ValueError):
         return None
+
+
+def _quote_ok(q) -> bool:
+    """True only for a usable two-sided numeric quote (CR-01).
+
+    strategy._as_float maps the SDK's literal 'N/A' (and None, '', NaN) to
+    0.0. That is correct for ENTRY gating, where a 0.0 mid fails closed
+    (leg_is_liquid rejects bid <= 0). But when MARKING an open spread, the
+    same coercion fabricates a $0 leg instead of skipping the cycle — a
+    single unquoted leg must never be marked, decided on, or closed against.
+    This is the one gate every manage-path consumer (mark_spread,
+    manage_decision/manage_decision_debit, close_legs) routes through.
+    """
+    if not q:
+        return False
+    try:
+        bid, ask = float(q.get("bid")), float(q.get("ask"))
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(bid) and math.isfinite(ask)):
+        return False
+    return ask > 0 and bid >= 0 and ask >= bid
 
 
 def _group_rows_by_underlying(rows) -> dict:
@@ -885,6 +908,13 @@ class OptionsBot:
         NEEDS_ATTENTION by the D-29 startup reconcile guard) is skipped here
         too, defense in depth against ever managing an orphaned position.
 
+        Any leg without a two-sided numeric quote (CR-01) is never marked,
+        decided on, or closed against — this returns 0.0 (no action). Inside
+        the assignment-guard window (dte <= the strategy's assignment_guard_dte)
+        that skip is escalated to NEEDS_ATTENTION with an alert (Q-01), since a
+        position about to expire must never be silently skipped forever. A
+        close_legs exception always ends NEEDS_ATTENTION, never CLOSING.
+
         Returns its unrealized P&L in dollars (0.0 once a close is attempted).
         """
         pid = pos["position_id"]
@@ -898,13 +928,34 @@ class OptionsBot:
             )
             return 0.0
 
-        if any(leg["code"] not in quotes for leg in legs):
-            # mark_spread would KeyError; a stale mark is worse than no action.
-            _logger.warning("options_manage_missing_quote", position_id=pid)
+        dte = option_dte(date.fromisoformat(pos["expiry"]), today)
+
+        bad = [leg["code"] for leg in legs if not _quote_ok(quotes.get(leg["code"]))]
+        if bad:
+            if dte <= strat_cfg.assignment_guard_dte:
+                self._store.set_position_status(pid, "NEEDS_ATTENTION")
+                await self._alerter.send(
+                    f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
+                    f"no usable quote for {_esc(', '.join(bad))} at {_esc(dte)} DTE "
+                    f"(assignment-guard window); close manually."
+                )
+                append_audit({
+                    "event": "options_manage_unquotable_near_expiry",
+                    "position_id": pid,
+                    "underlying": pos.get("underlying"),
+                    "strategy_name": pos.get("strategy_name"),
+                    "codes": bad,
+                    "dte": dte,
+                })
+                _logger.warning(
+                    "options_manage_unquotable_near_expiry",
+                    position_id=pid, codes=bad, dte=dte,
+                )
+            else:
+                _logger.warning("options_manage_missing_quote", position_id=pid, codes=bad)
             return 0.0
 
         mark = mark_spread(legs, quotes)
-        dte = option_dte(date.fromisoformat(pos["expiry"]), today)
         credit = float(pos["credit_per_spread"])
         qty = int(pos["qty"])
         is_debit = pos["structure"] == "bull_call_spread"
@@ -927,10 +978,16 @@ class OptionsBot:
             exits[leg["code"]] = price
             self._store.set_leg_exit(leg["leg_id"], price=price, status="CLOSED")
 
-        ok = await self._executor.close_legs(
-            legs, quotes, aggressive=(dec == "assignment_guard"),
-            on_leg_placed=_on_exit_placed, on_leg_filled=_on_exit_filled,
-        )
+        try:
+            ok = await self._executor.close_legs(
+                legs, quotes, aggressive=(dec == "assignment_guard"),
+                on_leg_placed=_on_exit_placed, on_leg_filled=_on_exit_filled,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("options_close_error", position_id=pid, reason=dec, exc_info=True)
+            ok = False
 
         if not ok:
             self._store.set_position_status(pid, "NEEDS_ATTENTION")
