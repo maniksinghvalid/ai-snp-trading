@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-03-PLAN.md (migration 0007 strategy_name, OptionsStore pass-through, read-only equity watchlist reader universe.py; 1225 passed 1 skipped)
-last_updated: "2026-09-24T14:56:38.613Z"
+stopped_at: Completed 11-04-PLAN.md (options_run --strategy/legacy_view/debit rejection, shipped rules_options.json converted to strategies shape, bot/main.py dispatch widened, D-26 no-drift test; 1241 passed 1 skipped)
+last_updated: "2026-09-24T15:06:47.984Z"
 last_activity: 2026-09-24 -- Phase 11 execution started
 progress:
   total_phases: 13
   completed_phases: 11
   total_plans: 60
-  completed_plans: 58
+  completed_plans: 59
   percent: 85
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-09-24 -- Phase 11 execution started
 
@@ -84,6 +84,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11-multi-strategy-options-bot-bull-call-spread P01 | 25min | 2 tasks | 4 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P02 | 25min | 3 tasks | 3 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P03 | 8min | 2 tasks | 6 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P04 | 8min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -191,6 +192,8 @@ Recent decisions affecting current work:
 - [Phase 11]: 11-03: insert_option_position's omit-None column build (not a strategy_name special case) — every nullable column still lands NULL when omitted, matching pre-existing behavior exactly
 - [Phase 11]: 11-03: count_opened_on gained an optional strategy_name keyword (default None reproduces the exact pre-existing SQL) rather than a second method
 - [Phase 11]: 11-03: bot/options/universe.py's no-bot.state-import isolation (D-17) is enforced by an ast-walk test, not just code review
+- [Phase ?]: 11-04: options_run's debit-structure rejection reads the effective (post --set) config, not args.strategy, so --set structure.type=bull_call_spread is caught for any base strategy
+- [Phase ?]: 11-04: bot/main.py dispatch widened to strategy_name==tasty_credit_spreads OR 'strategies' in data (research Pitfall 1/T-11-03) -- keeps the live launch command routing to the options bot after the rules_options.json conversion
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -231,6 +234,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24T14:56:38.608Z
-Stopped at: Completed 11-03-PLAN.md (migration 0007 strategy_name, OptionsStore pass-through, read-only equity watchlist reader universe.py; 1225 passed 1 skipped)
+Last session: 2026-09-24T15:06:47.979Z
+Stopped at: Completed 11-04-PLAN.md (options_run --strategy/legacy_view/debit rejection, shipped rules_options.json converted to strategies shape, bot/main.py dispatch widened, D-26 no-drift test; 1241 passed 1 skipped)
 Resume file: None
