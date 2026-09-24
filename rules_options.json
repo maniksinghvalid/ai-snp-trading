@@ -1,63 +1,96 @@
 {
-  "strategy_name": "tasty_credit_spreads",
-
-  "universe": [
-    "US.SPY",
-    "US.QQQ",
-    "US.IWM",
-    "US.DIA",
-    "US.GLD",
-    "US.SLV",
-    "US.TLT",
-    "US.XLE",
-    "US.XLF",
-    "US.XLK",
-    "US.EEM",
-    "US.EFA",
-    "US.FXI",
-    "US.GDX",
-    "US.USO"
+  "strategies": [
+    {
+      "name": "tasty_credit_spreads",
+      "universe": [
+        "US.SPY",
+        "US.QQQ",
+        "US.IWM",
+        "US.DIA",
+        "US.GLD",
+        "US.SLV",
+        "US.TLT",
+        "US.XLE",
+        "US.XLF",
+        "US.XLK",
+        "US.EEM",
+        "US.EFA",
+        "US.FXI",
+        "US.GDX",
+        "US.USO"
+      ],
+      "entry": {
+        "ivr_min": 30,
+        "ivp_min": null,
+        "fear_drop_pct": 2.0,
+        "fear_ivr_min": 20,
+        "max_spread_pct_of_mid": 5.0,
+        "max_spread_abs_usd": 0.05,
+        "min_open_interest": 500,
+        "target_dte": 45,
+        "min_dte": 30,
+        "max_dte": 60,
+        "prefer_monthly": true,
+        "entry_scan_et": "10:00",
+        "second_entry_scan_et": "14:30"
+      },
+      "structure": {
+        "type": "iron_condor",
+        "short_delta": 0.20,
+        "wing_width_pct_of_underlying": 1.0,
+        "min_wing_width_usd": 2.0,
+        "min_credit_to_width": 0.25
+      },
+      "sizing": {
+        "max_risk_per_trade_pct": 1.0,
+        "max_concurrent_positions": 8,
+        "max_new_positions_per_day": 2
+      },
+      "manage": {
+        "profit_target_pct_of_credit": 50,
+        "manage_dte": 21,
+        "stop_loss_credit_multiple": null,
+        "assignment_guard_dte": 1
+      }
+    },
+    {
+      "name": "super_bull_call",
+      "universe_source": "equity_watchlist",
+      "entry": {
+        "max_spread_pct_of_mid": 5.0,
+        "max_spread_abs_usd": 0.05,
+        "min_open_interest": 500,
+        "target_dte": 30,
+        "min_dte": 21,
+        "max_dte": 45,
+        "prefer_monthly": true,
+        "entry_scan_et": "10:05",
+        "second_entry_scan_et": null
+      },
+      "structure": {
+        "type": "bull_call_spread",
+        "long_delta": 0.30,
+        "wing_width_pct_of_underlying": 4.5,
+        "min_wing_width_usd": 2.0,
+        "max_debit_to_width": 0.30
+      },
+      "sizing": {
+        "max_risk_per_trade_pct": 1.0,
+        "max_concurrent_positions": 4,
+        "max_new_positions_per_day": 2
+      },
+      "manage": {
+        "profit_target_pct_of_max": 60,
+        "manage_dte": null,
+        "assignment_guard_dte": 1
+      }
+    }
   ],
 
-  "entry": {
-    "ivr_min": 30,
-    "ivp_min": null,
-    "fear_drop_pct": 2.0,
-    "fear_ivr_min": 20,
-    "max_spread_pct_of_mid": 5.0,
-    "max_spread_abs_usd": 0.05,
-    "min_open_interest": 500,
-    "target_dte": 45,
-    "min_dte": 30,
-    "max_dte": 60,
-    "prefer_monthly": true,
-    "entry_scan_et": "10:00",
-    "second_entry_scan_et": "14:30"
-  },
-
-  "structure": {
-    "type": "iron_condor",
-    "short_delta": 0.20,
-    "wing_width_pct_of_underlying": 1.0,
-    "min_wing_width_usd": 2.0,
-    "min_credit_to_width": 0.25
-  },
-
-  "sizing": {
+  "risk": {
     "sizing_equity_usd": 100000,
-    "max_risk_per_trade_pct": 1.0,
     "max_bp_usage_pct": 25,
-    "max_concurrent_positions": 8,
-    "max_new_positions_per_day": 2,
     "daily_loss_limit_pct": 2.0
-  },
-
-  "manage": {
-    "manage_interval_min": 5,
-    "profit_target_pct_of_credit": 50,
-    "manage_dte": 21,
-    "stop_loss_credit_multiple": null,
-    "assignment_guard_dte": 1
   },
 
   "execution": {
@@ -69,12 +102,14 @@
   },
 
   "service": {
+    "manage_interval_min": 5,
     "eod_report_et": "16:10",
     "watchdog_poll_interval_s": 60,
     "watchdog_reconnect_initial_s": 5,
     "watchdog_reconnect_cap_s": 300,
     "state_db": "data/options_state.db",
     "kill_file": ".bot_kill_options",
-    "report_dir": "reports/options"
+    "report_dir": "reports/options",
+    "equity_state_db": "data/bot_state.db"
   }
 }

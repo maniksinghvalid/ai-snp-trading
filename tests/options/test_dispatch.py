@@ -51,6 +51,36 @@ def test_options_strategy_name_dispatches_to_options_main(tmp_path, monkeypatch)
     mock_gateway_cls.assert_not_called()
 
 
+def test_strategies_shape_dispatches_to_options_main(tmp_path, monkeypatch):
+    """T-11-03: a Phase 11 multi-strategy payload (no top-level strategy_name)
+    still routes to bot.options.service.main; the equity gateway is never built."""
+    rules = _write_rules(tmp_path, {"strategies": []})
+    mock_gateway_cls = _patch_equity_seams(monkeypatch)
+
+    seen = []
+    monkeypatch.setattr(bot.options.service, "main", lambda path: seen.append(path))
+
+    bot.main.main(rules_path=rules)
+
+    assert seen == [rules]
+    mock_gateway_cls.assert_not_called()
+
+
+def test_shipped_rules_options_dispatches_to_options_main(monkeypatch):
+    """T-11-03: the real, post-conversion repo-root rules_options.json still
+    routes to the options bot."""
+    rules = str(Path(__file__).resolve().parents[2] / "rules_options.json")
+    mock_gateway_cls = _patch_equity_seams(monkeypatch)
+
+    seen = []
+    monkeypatch.setattr(bot.options.service, "main", lambda path: seen.append(path))
+
+    bot.main.main(rules_path=rules)
+
+    assert seen == [rules]
+    mock_gateway_cls.assert_not_called()
+
+
 def test_equity_path_loads_the_given_rules_path(tmp_path, monkeypatch):
     # The shipped rules.json, relocated: the equity bot must load the path it is
     # given, not the hard-coded "rules.json" it used before D5.

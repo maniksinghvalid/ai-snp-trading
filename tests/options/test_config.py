@@ -192,12 +192,13 @@ class TestShippedRulesOptionsJson:
         assert cfg.structure_type == "iron_condor"
         assert len(cfg.universe) == 15
 
-    def test_shipped_file_matches_fixture(self, options_rules):
-        """Catches fixture drift: shipped defaults and the fixture must agree."""
+    def test_shipped_file_matches_fixture(self, options_book_rules):
+        """D-26: the shipped file is now the strategies shape; the pre-change
+        legacy content is guarded by test_shipped_legacy_view_is_the_pre_change_file."""
         shipped = json.loads(
             (REPO_ROOT / "rules_options.json").read_text(encoding="utf-8")
         )
-        assert shipped == options_rules
+        assert shipped == options_book_rules
 
     def test_default_path_is_repo_root_file(self):
         """load_options_config() with no argument reads rules_options.json."""
@@ -208,6 +209,61 @@ class TestShippedRulesOptionsJson:
         finally:
             os.chdir(cwd)
         assert cfg.universe[0] == "US.SPY"
+
+    def test_shipped_tasty_view_equals_pre_change_config_field_for_field(self, options_cfg):
+        """D-26: the converted shipped file's default (tasty_credit_spreads)
+        view is field-for-field identical to the pre-change legacy config on
+        every pre-existing OptionsConfig field (value AND type)."""
+        pre = options_cfg
+        post = load_options_config(str(REPO_ROOT / "rules_options.json"))
+        assert len(_PRE_EXISTING_FIELDS) == 43
+        for name in _PRE_EXISTING_FIELDS:
+            pre_value = getattr(pre, name)
+            post_value = getattr(post, name)
+            assert post_value == pre_value, f"field {name!r}: {post_value!r} != {pre_value!r}"
+            assert type(post_value) is type(pre_value), (
+                f"field {name!r}: type {type(post_value)!r} != {type(pre_value)!r}"
+            )
+
+    def test_shipped_legacy_view_is_the_pre_change_file(self, options_rules):
+        """legacy_view(shipped, "tasty_credit_spreads") == the pre-change
+        legacy fixture, plus service.equity_state_db (new in the shared block)."""
+        shipped = json.loads(
+            (REPO_ROOT / "rules_options.json").read_text(encoding="utf-8")
+        )
+        projected = legacy_view(shipped, "tasty_credit_spreads")
+        expected = copy.deepcopy(options_rules)
+        expected["service"]["equity_state_db"] = "data/bot_state.db"
+        assert projected == expected
+
+    def test_shipped_book_has_both_strategies_in_order(self):
+        book = load_options_book(str(REPO_ROOT / "rules_options.json"))
+        assert [c.name for c in book.strategies] == ["tasty_credit_spreads", "super_bull_call"]
+
+    def test_shipped_super_bull_call_values(self):
+        cfg = load_options_config(str(REPO_ROOT / "rules_options.json"), strategy="super_bull_call")
+        assert cfg.structure_type == "bull_call_spread"
+        assert cfg.long_delta == 0.30
+        assert cfg.wing_width_pct_of_underlying == 4.5
+        assert cfg.min_wing_width_usd == 2.0
+        assert cfg.max_debit_to_width == 0.30
+        assert cfg.target_dte == 30
+        assert cfg.min_dte == 21
+        assert cfg.max_dte == 45
+        assert cfg.prefer_monthly is True
+        assert cfg.max_spread_pct_of_mid == 5.0
+        assert cfg.max_spread_abs_usd == 0.05
+        assert cfg.min_open_interest == 500
+        assert cfg.entry_scan_et == "10:05"
+        assert cfg.second_entry_scan_et is None
+        assert cfg.max_risk_per_trade_pct == 1.0
+        assert cfg.max_concurrent_positions == 4
+        assert cfg.max_new_positions_per_day == 2
+        assert cfg.profit_target_pct_of_max == 60.0
+        assert cfg.manage_dte is None
+        assert cfg.assignment_guard_dte == 1
+        assert cfg.universe_source == "equity_watchlist"
+        assert cfg.equity_state_db == "data/bot_state.db"
 
 
 # ============================================================

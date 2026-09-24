@@ -45,9 +45,12 @@ def main(rules_path: str = "rules.json") -> None:
 
     Construction order:
       1. configure_logging()  — must be first (before any structlog calls)
-      1b. Peek rules_path's top-level strategy_name and dispatch (D5): the
-          options strategy runs an entirely different bot, so it takes over here
-          and nothing below is constructed.
+      1b. Peek rules_path's top-level shape and dispatch (D5): the options bot
+          config is recognised by either its legacy top-level strategy_name
+          ("tasty_credit_spreads") or the Phase 11 multi-strategy "strategies"
+          array (which has no top-level strategy_name key) — either shape
+          routes to the options bot, which takes over here and nothing below
+          is constructed.
       2. load_strategy_config(rules_path)  — raises ConfigError → stderr + sys.exit(1)
       3. Read TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from env (never log these — Pitfall 4)
       4. Construct MoomooGateway, StateStore, TrendJoinLong, ExecutionEngine, TelegramAlerter
@@ -64,15 +67,17 @@ def main(rules_path: str = "rules.json") -> None:
     configure_logging()
     _logger = get_logger(__name__)
 
-    # Step 1b: Dispatch on the top-level strategy_name (D5)
+    # Step 1b: Dispatch on the top-level shape (D5, T-11-03): the legacy
+    # strategy_name marker OR the Phase 11 multi-strategy "strategies" array
+    # (which has no top-level strategy_name key) both route to the options bot.
     try:
         with open(rules_path, "r", encoding="utf-8") as f:
-            strategy_name = json.load(f).get("strategy_name", "")
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         print(f"[ERROR] cannot read {rules_path}: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if strategy_name == "tasty_credit_spreads":
+    if data.get("strategy_name", "") == "tasty_credit_spreads" or "strategies" in data:
         # Deferred import: the equity path never pays for the options deps, and
         # no import cycle back into bot.main is possible.
         from bot.options.service import main as _options_main

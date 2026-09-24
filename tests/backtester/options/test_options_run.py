@@ -286,3 +286,42 @@ def test_help_lists_strategy_flag(capsys):
         run_mod.main(["--help"])
     assert exc_info.value.code == 0
     assert "--strategy" in capsys.readouterr().out
+
+
+def test_strategy_super_bull_call_rejected(tmp_path, capsys):
+    """D-10: the shipped super_bull_call strategy is a debit structure --
+    selecting it directly (no --set needed) is rejected before any run dir."""
+    exit_code = run_mod.main(_base_args(tmp_path, **{"--strategy": "super_bull_call"}))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[ERROR]" in captured.err
+    assert "bull_call_spread" in captured.err
+    assert not (tmp_path / "config.json").exists()
+
+
+@pytest.mark.parametrize("set_arg", [
+    "entry.ivr_min=20",
+    "structure.short_delta=0.16",
+    "structure.type=put_credit_spread",
+    "entry.min_dte=1",
+    "entry.max_dte=10",
+])
+def test_documented_arm_commands_still_work(monkeypatch, tmp_path, set_arg):
+    """Every documented arm command from
+    docs/research/2026-08-17-options-backtest-results.md still runs verbatim
+    against the converted (strategies-shape) shipped rules_options.json."""
+    _patch_offline(monkeypatch)
+    monkeypatch.setattr(run_mod, "OptionsBacktestEngine", _FakeEngine)
+
+    exit_code = run_mod.main(_base_args(tmp_path) + ["--set", set_arg])
+
+    assert exit_code == 0
+    effective = json.loads((tmp_path / "config.json").read_text())
+    assert effective["strategy_name"] == "tasty_credit_spreads"
+    key, value = set_arg.split("=", 1)
+    parts = key.split(".")
+    node = effective
+    for part in parts[:-1]:
+        node = node[part]
+    assert str(node[parts[-1]]) == value
