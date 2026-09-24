@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-02-PLAN.md (bull_call_spread strike selection, 1/4-rule gate, size_debit_position, manage_decision_debit, provenance doc; 1206 passed 1 skipped)
-last_updated: "2026-09-24T14:46:09.447Z"
+stopped_at: Completed 11-03-PLAN.md (migration 0007 strategy_name, OptionsStore pass-through, read-only equity watchlist reader universe.py; 1225 passed 1 skipped)
+last_updated: "2026-09-24T14:56:38.613Z"
 last_activity: 2026-09-24 -- Phase 11 execution started
 progress:
   total_phases: 13
   completed_phases: 11
   total_plans: 60
-  completed_plans: 57
+  completed_plans: 58
   percent: 85
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-09-24 -- Phase 11 execution started
 
@@ -83,6 +83,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 10 P06 | ~20 minutes | 3 tasks | 2 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P01 | 25min | 2 tasks | 4 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P02 | 25min | 3 tasks | 3 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P03 | 8min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -187,6 +188,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 11-01: _check_strategy covers both entry IV-gate keys and manage profit-target/stop-loss key pair (Pitfall 3), sharing one _RELOCATED table with legacy_view (Open Question 3 resolved)
 - [Phase ?]: 11-02: size_position body extracted into shared _size_for_risk so size_debit_position reuses the exact floor+BP-cap logic; credit-path numeric results provably unchanged
 - [Phase ?]: 11-02: _pick_bull_call reuses leg_is_liquid/_closest_delta/_pick_wing/_mid/_leg rather than duplicating credit-path helpers for the debit structure
+- [Phase 11]: 11-03: insert_option_position's omit-None column build (not a strategy_name special case) — every nullable column still lands NULL when omitted, matching pre-existing behavior exactly
+- [Phase 11]: 11-03: count_opened_on gained an optional strategy_name keyword (default None reproduces the exact pre-existing SQL) rather than a second method
+- [Phase 11]: 11-03: bot/options/universe.py's no-bot.state-import isolation (D-17) is enforced by an ast-walk test, not just code review
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -227,6 +231,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24T14:46:09.441Z
-Stopped at: Completed 11-02-PLAN.md (bull_call_spread strike selection, 1/4-rule gate, size_debit_position, manage_decision_debit, provenance doc; 1206 passed 1 skipped)
+Last session: 2026-09-24T14:56:38.608Z
+Stopped at: Completed 11-03-PLAN.md (migration 0007 strategy_name, OptionsStore pass-through, read-only equity watchlist reader universe.py; 1225 passed 1 skipped)
 Resume file: None
