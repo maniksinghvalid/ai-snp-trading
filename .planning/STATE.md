@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 11-01-PLAN.md (multi-strategy config loader: STRATEGIES_SCHEMA, OptionsBook, load_options_book/legacy_view, fail-closed D-11 rules; 1184 passed 1 skipped)"
-last_updated: "2026-09-24T14:35:01.854Z"
+stopped_at: Completed 11-02-PLAN.md (bull_call_spread strike selection, 1/4-rule gate, size_debit_position, manage_decision_debit, provenance doc; 1206 passed 1 skipped)
+last_updated: "2026-09-24T14:46:09.447Z"
 last_activity: 2026-09-24 -- Phase 11 execution started
 progress:
   total_phases: 13
   completed_phases: 11
   total_plans: 60
-  completed_plans: 56
+  completed_plans: 57
   percent: 85
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-09-24 -- Phase 11 execution started
 
@@ -82,6 +82,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 10-external-strategy-research P05 | 2h | 3 tasks | 11 files |
 | Phase 10 P06 | ~20 minutes | 3 tasks | 2 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P01 | 25min | 2 tasks | 4 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P02 | 25min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -184,6 +185,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 10-06: Gate TRIGGERED via H2 (mechanical rule: SUPPORTED both IS/OOS, floor met) -- not H8-specifically; operator selected defer at Task 2 checkpoint (both exit variants PF<1.0, not a profitable arm); no feature branch built, file list recorded in results doc Section 12; XSR-06 stays open
 - [Phase ?]: 11-01: New OptionsConfig fields carry no dataclass default (research A1) — both loader paths pass every field explicitly
 - [Phase ?]: 11-01: _check_strategy covers both entry IV-gate keys and manage profit-target/stop-loss key pair (Pitfall 3), sharing one _RELOCATED table with legacy_view (Open Question 3 resolved)
+- [Phase ?]: 11-02: size_position body extracted into shared _size_for_risk so size_debit_position reuses the exact floor+BP-cap logic; credit-path numeric results provably unchanged
+- [Phase ?]: 11-02: _pick_bull_call reuses leg_is_liquid/_closest_delta/_pick_wing/_mid/_leg rather than duplicating credit-path helpers for the debit structure
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -224,6 +227,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24T14:35:01.850Z
-Stopped at: Completed 11-01-PLAN.md (multi-strategy config loader: STRATEGIES_SCHEMA, OptionsBook, load_options_book/legacy_view, fail-closed D-11 rules; 1184 passed 1 skipped)
+Last session: 2026-09-24T14:46:09.441Z
+Stopped at: Completed 11-02-PLAN.md (bull_call_spread strike selection, 1/4-rule gate, size_debit_position, manage_decision_debit, provenance doc; 1206 passed 1 skipped)
 Resume file: None
