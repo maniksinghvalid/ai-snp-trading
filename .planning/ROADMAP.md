@@ -39,7 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 7: Strategy Optimization** - Four structural strategy changes from quant feedback: RVOL-TOD gate, exit restructure (backtest-gated), tick-level stop invalidation, -2R daily circuit breaker
 - [x] **Phase 8: Options Premium Selling (tasty_credit_spreads)** - Successor strategy after Trend Join Long was validated as no-edge (2026-08-13): tastylive-derived defined-risk iron condors / put credit spreads on liquid ETFs (45 DTE, IVR≥30 gate, 20Δ shorts, 50% profit target, 21-DTE exit), self-contained `bot/options/` package + `python -m bot --rules rules_options.json` dispatch (built 2026-08-17 via quick tasks 260817-0ph/155/1ie + UAT batch ad41cd5; 961 tests; live paper UAT `--live-1lot` pending operator run)
 - [x] **Phase 10: External Strategy Research** - Two Reddit-sourced day-trading strategies critically extracted and compared against Trend Join Long; backtest-only research package (`backtester/experimental/`) implementing their automatable cores, pre-registered hypotheses, cache-only cost-realistic backtests across 5 windows/9 regime slices, and a 14-section report — production code changed only on a separate branch if a hypothesis is SUPPORTED (started 2026-08-18) (completed 2026-08-18)
-- [ ] **Phase 11: Multi-strategy options bot (bull_call_spread)** - `strategies` array in `rules_options.json`; one options process runs `tasty_credit_spreads` (unchanged) + new `super_bull_call` bull call debit spread on the equity premarket watchlist; per-strategy sizing, global breaker/BP cap; loader keeps the flat `load_options_config` contract for the backtester/probe (planned 2026-09-24)
+- [x] **Phase 11: Multi-strategy options bot (bull_call_spread)** - `strategies` array in `rules_options.json`; one options process runs `tasty_credit_spreads` (unchanged) + new `super_bull_call` bull call debit spread on the equity premarket watchlist; per-strategy sizing, global breaker/BP cap; loader keeps the flat `load_options_config` contract for the backtester/probe (planned 2026-09-24) (completed 2026-09-24)
 
 ## Phase Details
 
@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 | 10. External Strategy Research | 6/6 | Complete    | 2026-08-18 |
-| 11. Multi-strategy options bot (bull_call_spread) | 5/6 | In Progress|  |
+| 11. Multi-strategy options bot (bull_call_spread) | 6/6 | Complete   | 2026-09-24 |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -440,7 +440,7 @@ Plans:
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
 
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -456,4 +456,4 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 11-06-PLAN.md — Service manage side: per-strategy manage dispatch, debit close/%-of-max, D-29 unknown-strategy guard, strategy name in exit/EOD, book-based main(); phase gate (MSO-08/07/05/09) [Wave 3]
+- [x] 11-06-PLAN.md — Service manage side: per-strategy manage dispatch, debit close/%-of-max, D-29 unknown-strategy guard, strategy name in exit/EOD, book-based main(); phase gate (MSO-08/07/05/09) [Wave 3]

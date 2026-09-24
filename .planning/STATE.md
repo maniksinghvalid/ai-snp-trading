@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: "Completed 11-05-PLAN.md (per-strategy entry scan wiring: watchlist universe, debit sizing, per-strategy caps vs global breaker/BP/one-per-underlying; 1253 passed 1 skipped)"
-last_updated: "2026-09-24T15:22:23.536Z"
+status: verifying
+stopped_at: "Completed 11-06-PLAN.md (multi-strategy service composition + phase gate: manage dispatch, D-29 fail-closed reconcile, strategy-named EOD, book-based main(); 1265 passed 1 skipped)"
+last_updated: "2026-09-24T15:40:50.718Z"
 last_activity: 2026-09-24 -- Phase 11 execution started
 progress:
   total_phases: 13
-  completed_phases: 11
+  completed_phases: 12
   total_plans: 60
-  completed_plans: 60
-  percent: 85
+  completed_plans: 61
+  percent: 92
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-24 -- Phase 11 execution started
 
 Progress: [██████████] 9/9 phases (100%)
@@ -86,6 +86,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11-multi-strategy-options-bot-bull-call-spread P03 | 8min | 2 tasks | 6 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P04 | 8min | 2 tasks | 6 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P05 | 25min | 2 tasks | 2 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P06 | 14min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -197,6 +198,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 11-04: bot/main.py dispatch widened to strategy_name==tasty_credit_spreads OR 'strategies' in data (research Pitfall 1/T-11-03) -- keeps the live launch command routing to the options bot after the rules_options.json conversion
 - [Phase 11-05]: cfg threaded as an explicit parameter through _scan_and_open/_try_open instead of self._cfg, so one entry-scan body serves every strategy in the book
 - [Phase 11-05]: Fixed a latent bug (Rule 1): options_position_opened audit read sel['credit'] unconditionally, which KeyErrors on a debit sel dict -- switched to pos['credit_per_spread'] (correct signed value for both structures)
+- [Phase ?]: 11-06: manage_decision_debit's sign math and the existing net_exit/realized_per_spread close math needed zero changes for the debit case — verified against the NVDA worked example (5 spreads @ 8.00/1.20 -> realized 2420.00, 60.2% of max profit)
+- [Phase ?]: 11-06: _manage_position keeps a defense-in-depth skip for a position whose strategy_name is not in self._strategies, behind the D-29 startup reconcile guard (belt-and-suspenders, not a substitute)
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -237,6 +240,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24T15:22:23.530Z
-Stopped at: Completed 11-05-PLAN.md (per-strategy entry scan wiring: watchlist universe, debit sizing, per-strategy caps vs global breaker/BP/one-per-underlying; 1253 passed 1 skipped)
+Last session: 2026-09-24T15:40:50.713Z
+Stopped at: Completed 11-06-PLAN.md (multi-strategy service composition + phase gate: manage dispatch, D-29 fail-closed reconcile, strategy-named EOD, book-based main(); 1265 passed 1 skipped)
 Resume file: None
