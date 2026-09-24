@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 11-07-PLAN.md (gap closure: CR-01 quote-validity gate, Q-01 near-expiry escalation, WR-01 structure-kind fail-closed, WR-05 ACTIVE-row BP/concurrent counts, EX-01 close_legs never sells a long after a short failed; 1299 passed 1 skipped)"
-last_updated: "2026-09-24T19:27:27.385Z"
+stopped_at: "Completed 11-08-PLAN.md (gap closure: CR-02 incomplete-unwind NEEDS_ATTENTION, WR-06 near-expiry streak/final-cycle escalation, WR-07 _quote_markable width gate; 1330 passed 1 skipped)"
+last_updated: "2026-09-24T20:04:14.654Z"
 last_activity: 2026-09-24 -- Phase 11 execution started
 progress:
   total_phases: 13
   completed_phases: 12
-  total_plans: 61
-  completed_plans: 62
+  total_plans: 62
+  completed_plans: 63
   percent: 92
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 
 ## Current Position
 
-Phase: 11 (multi-strategy-options-bot-bull-call-spread) — EXECUTING
-Plan: 7 of 7
-Status: Ready to execute
-Last activity: 2026-09-24 -- Phase 11 execution started
+Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
+Plan: 8 of 8
+Status: Complete
+Last activity: 2026-09-24 -- Phase 11 plan 08 (gap closure: CR-02/WR-06/WR-07) complete
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -88,6 +88,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11-multi-strategy-options-bot-bull-call-spread P05 | 25min | 2 tasks | 2 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P06 | 14min | 2 tasks | 2 files |
 | Phase 11 P07 | 20min | 3 tasks | 4 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P08 | 25min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 11-06: _manage_position keeps a defense-in-depth skip for a position whose strategy_name is not in self._strategies, behind the D-29 startup reconcile guard (belt-and-suspenders, not a substitute)
 - [Phase 11-07]: WR-01 kind check compares structure KIND (bull_call_spread vs any credit structure), not exact structure_type string equality -- iron_condor and put_credit_spread share manage_decision and identical config fields
 - [Phase 11-07]: manage_position's structure-kind check (WR-01) runs before the CR-01 quote gate so a mismatched row is never escalated using the wrong strategy's assignment_guard_dte
+- [Phase 11-08]: CR-02: open_position returns None if unwound else False; _try_open returns pos (not a new dict) on the False branch so the SAME scan's BP/busy/concurrent-cap accounting counts the live exposure immediately
+- [Phase 11-08]: WR-06: escalate at 3 consecutive counted bad-quote manage cycles inside the guard window, or on the expiry session's final manage cycle; a snapshot-outage chunk never counts
+- [Phase 11-08]: WR-07: _quote_markable = ask-bid <= max(0.5*mid, $0.10); bid=0 accepted only when ask<=$0.10 (not a literal bid>0), so a legitimate far-OTM 0.00/0.05 wing is never stranded; gate = _quote_ok if in_guard else _quote_markable supersedes 11-07's hardcoded _quote_ok call site
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -243,6 +247,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24T16:55:55.713Z
-Stopped at: Completed 11-07-PLAN.md (gap closure: CR-01 quote-validity gate, Q-01 near-expiry escalation, WR-01 structure-kind fail-closed, WR-05 ACTIVE-row BP/concurrent counts, EX-01 close_legs never sells a long after a short failed; 1299 passed 1 skipped)
+Last session: 2026-09-24T20:04:14.649Z
+Stopped at: Completed 11-08-PLAN.md (gap closure: CR-02 incomplete-unwind NEEDS_ATTENTION, WR-06 near-expiry streak/final-cycle escalation, WR-07 _quote_markable width gate; 1330 passed 1 skipped)
 Resume file: None
