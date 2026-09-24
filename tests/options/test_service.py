@@ -8,12 +8,14 @@ kill switch are mocks with AsyncMock async methods.
 """
 import asyncio
 from datetime import date, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
 import bot.options.service as service
+from bot.options.config import load_options_book
 from bot.options.service import (
     OptionsBot,
     _fmt_entry,
@@ -28,6 +30,7 @@ from bot.options.store import OptionsStore
 
 
 _ET = ZoneInfo("America/New_York")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SHORT_P = "US.SPY260320P600000"
 LONG_P = "US.SPY260320P594000"
@@ -1120,3 +1123,113 @@ def test_eod_sends_summary_and_writes_report(
     written = (report_dir / f"{TODAY.isoformat()}.html").read_text(encoding="utf-8")
     assert "US.SPY" in written and "profit_target" in written
     assert (report_dir / "latest.html").exists()
+
+
+def test_eod_summary_and_report_show_strategy_names(
+    options_book, make_bot, store, gateway, alerter, monkeypatch, tmp_path,
+):
+    from dataclasses import replace
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_open_spread(store, "P1")
+    _seed_bull_spread(store, "B1")
+    store.insert_option_position({
+        "position_id": "B2",
+        "underlying": "US.NVDA",
+        "structure": "bull_call_spread",
+        "strategy_name": "super_bull_call",
+        "expiry": "2026-09-18",
+        "credit_per_spread": -1.96,
+        "width": 10.0,
+        "qty": 5,
+        "max_loss_usd": 980.0,
+        "status": "CLOSED",
+        "closed_at": f"{TODAY.isoformat()}T11:00:00-04:00",
+        "close_reason": "profit_target",
+        "realized_pnl_usd": 2420.0,
+    })
+    report_dir = tmp_path / "reports" / "options"
+    cfg = replace(options_book.strategies[0], report_dir=str(report_dir))
+    bot = make_bot(cfg, strategies=options_book.strategies)
+
+    _run(bot._job_eod())
+
+    body = alerter.send.await_args[0][0]
+    assert "tasty_credit_spreads" in body
+    assert "super_bull_call" in body
+    assert "debit 1.96" in body
+    assert "+2,420.00" in body
+    written = (report_dir / f"{TODAY.isoformat()}.html").read_text(encoding="utf-8")
+    assert "<th>Strategy</th>" in written
+    assert "super_bull_call" in written
+
+
+def test_formatters_escape_strategy_name():
+    pos = _pos(strategy_name="<b>x</b>")
+    legs = [{"side": "SELL", "code": "X", "strike": 1.0}]
+
+    entry = _fmt_entry(pos, legs)
+    exit_txt = _fmt_exit(pos, "profit_target", 100.0, 50.0, basis="credit")
+    summary = _fmt_summary([pos], [], 0.0)
+    doc = _options_html(
+        [pos], [{**pos, "close_reason": "x", "realized_pnl_usd": 1.0}], "2026-08-17",
+    )
+
+    for out in (entry, exit_txt, summary, doc):
+        assert "<b>x</b>" not in out
+        assert "&lt;b&gt;x&lt;/b&gt;" in out
+
+
+# ============================================================
+# main() composition (D-08, D-20, D-25)
+# ============================================================
+
+def test_main_builds_one_bot_for_every_strategy(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(service, "configure_logging", MagicMock())
+    monkeypatch.setattr(service, "MoomooGateway", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(service, "get_gateway_config", MagicMock(return_value=MagicMock()))
+    store_mock = MagicMock()
+    store_mock.open = MagicMock(return_value=store_mock)
+    store_cls = MagicMock(return_value=store_mock)
+    monkeypatch.setattr(service, "OptionsStore", store_cls)
+    monkeypatch.setattr(service, "OpenDWatchdog", MagicMock())
+    bot_cls = MagicMock()
+    monkeypatch.setattr(service, "OptionsBot", bot_cls)
+    monkeypatch.setattr(service.asyncio, "run", lambda coro: None)
+
+    service.main(str(REPO_ROOT / "rules_options.json"))
+
+    bot_cls.assert_called_once()
+    kwargs = bot_cls.call_args.kwargs
+    assert [c.name for c in kwargs["strategies"]] == [
+        "tasty_credit_spreads", "super_bull_call",
+    ]
+    assert kwargs["cfg"].name == "tasty_credit_spreads"
+    store_cls.assert_called_once_with("data/options_state.db")
+
+
+def test_main_exits_1_on_config_error(monkeypatch, tmp_path, capsys):
+    import json
+    bad = json.loads((REPO_ROOT / "rules_options.json").read_text(encoding="utf-8"))
+    bad["strategies"][1]["name"] = bad["strategies"][0]["name"]
+    path = tmp_path / "rules_options.json"
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    monkeypatch.setattr(service, "configure_logging", MagicMock())
+
+    with pytest.raises(SystemExit) as exc_info:
+        service.main(str(path))
+
+    assert exc_info.value.code == 1
+    assert "[ERROR]" in capsys.readouterr().err
+
+
+def test_shipped_book_registers_per_strategy_jobs(make_bot):
+    book = load_options_book(str(REPO_ROOT / "rules_options.json"))
+    bot = make_bot(book.strategies[0], strategies=book.strategies)
+    bot._register_jobs()
+    assert {j.id for j in bot._scheduler.get_jobs()} == {
+        "options_entry_scan_tasty_credit_spreads",
+        "options_entry_scan_tasty_credit_spreads_2",
+        "options_entry_scan_super_bull_call",
+        "options_manage", "options_eod",
+    }

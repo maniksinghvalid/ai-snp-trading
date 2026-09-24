@@ -8,7 +8,15 @@ Composes the Phase 8/11 parts into a bot that trades unattended: an AsyncIOSched
 hard startup readiness gate (connect → reconcile → enable entries) and a graceful
 kill-switch shutdown. Per-strategy entries/day and concurrent-position caps are
 enforced per scanning strategy; the daily-loss breaker, BP headroom and the
-one-position-per-underlying rule stay global across every strategy (D-22).
+one-position-per-underlying rule stay global across every strategy (D-22). The
+ONE manage job dispatches each open position to ITS OWN strategy's config and
+decision function (manage_decision_debit for a bull_call_spread position,
+manage_decision for a credit structure) by pos["strategy_name"] (D-21); a
+position whose strategy has been removed from rules_options.json is failed
+closed to NEEDS_ATTENTION at startup reconcile, never silently managed with
+another strategy's parameters (D-29). main() composes ONE OptionsBot for
+every strategy in the loaded book (load_options_book); Telegram alerts and the
+EOD report name the strategy (D-24).
 
 D4: self-contained package. TradingBot is a TEMPLATE, not a base class — its
 __init__ wires BarAggregator/scanner/PositionManager, none of which an options
@@ -35,7 +43,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.config.loader import ConfigError
 from bot.gateway.gateway import MoomooGateway, get_gateway_config
-from bot.options.config import load_options_config
+from bot.options.config import load_options_book
 from bot.options.execution import LegExecutor
 from bot.options.store import OptionsStore
 from bot.options.strategy import (
@@ -218,9 +226,10 @@ def _fmt_summary(open_positions, closed_today, realized_today) -> str:
     ]
     for pos in open_positions:
         lines.append(
+            f"{_esc(pos.get('strategy_name') or '')} "
             f"{_esc(pos.get('underlying'))} {_esc(pos.get('structure'))} "
             f"exp {_esc(pos.get('expiry'))} qty {_esc(pos.get('qty'))} "
-            f"credit {_esc(round(float(pos.get('credit_per_spread') or 0), 2))}"
+            f"{_esc(_premium_label(pos.get('credit_per_spread') or 0))}"
         )
     return "\n".join(lines)
 
@@ -232,18 +241,20 @@ def _options_html(open_positions, closed_today, date_str: str) -> str:
 
     open_rows = "".join(
         "<tr>" + _cells([
-            p.get("underlying"), p.get("structure"), p.get("expiry"),
-            p.get("qty"), p.get("credit_per_spread"), p.get("max_loss_usd"),
+            p.get("strategy_name"), p.get("underlying"), p.get("structure"),
+            p.get("expiry"), p.get("qty"), p.get("credit_per_spread"),
+            p.get("max_loss_usd"),
         ]) + "</tr>"
         for p in open_positions
-    ) or "<tr><td colspan='6'>none</td></tr>"
+    ) or "<tr><td colspan='7'>none</td></tr>"
 
     closed_rows = "".join(
         "<tr>" + _cells([
-            p.get("underlying"), p.get("close_reason"), p.get("realized_pnl_usd"),
+            p.get("strategy_name"), p.get("underlying"), p.get("close_reason"),
+            p.get("realized_pnl_usd"),
         ]) + "</tr>"
         for p in closed_today
-    ) or "<tr><td colspan='3'>none</td></tr>"
+    ) or "<tr><td colspan='4'>none</td></tr>"
 
     return (
         "<!DOCTYPE html>\n<html><head><meta charset='utf-8'>"
@@ -256,10 +267,10 @@ def _options_html(open_positions, closed_today, date_str: str) -> str:
         "  td { padding: 4px 12px; border-bottom: 1px solid #21262d; }\n"
         "</style></head><body>\n"
         f"<h1>Options — {_esc(date_str)}</h1>\n"
-        "<h2>Open</h2><table><tr><th>Underlying</th><th>Structure</th><th>Expiry</th>"
-        f"<th>Qty</th><th>Credit</th><th>Max loss</th></tr>{open_rows}</table>\n"
-        "<h2>Closed today</h2><table><tr><th>Underlying</th><th>Reason</th>"
-        f"<th>Realized</th></tr>{closed_rows}</table>\n"
+        "<h2>Open</h2><table><tr><th>Strategy</th><th>Underlying</th><th>Structure</th>"
+        f"<th>Expiry</th><th>Qty</th><th>Credit</th><th>Max loss</th></tr>{open_rows}</table>\n"
+        "<h2>Closed today</h2><table><tr><th>Strategy</th><th>Underlying</th>"
+        f"<th>Reason</th><th>Realized</th></tr>{closed_rows}</table>\n"
         "</body></html>\n"
     )
 
@@ -1117,22 +1128,27 @@ def main(rules_path: str) -> None:
 
     Construction order:
       1. configure_logging() — first, before any component logs
-      2. load_options_config(rules_path) — ConfigError → stderr + sys.exit(1)
+      2. load_options_book(rules_path) — every configured strategy; the first
+         carries the shared execution/service/risk values — ConfigError →
+         stderr + sys.exit(1)
       3. MoomooGateway(get_gateway_config()) — no initial_stop_pct (equity-only knob)
       4. OptionsStore(cfg.state_db).open() — its OWN db file (D6)
       5. TelegramAlerter from env (never log the token — Pitfall 4)
       6. KillSwitch on cfg.kill_file — the options bot's OWN sentinel (D6)
-      7. OptionsBot, then OpenDWatchdog (needs the bot ref) injected after
+      7. OptionsBot (every strategy in the book), then OpenDWatchdog (needs
+         the bot ref) injected after
       8. asyncio.run(bot.run())
     """
     configure_logging()
     _log = get_logger(__name__)
 
     try:
-        cfg = load_options_config(rules_path)
+        book = load_options_book(rules_path)
     except ConfigError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         sys.exit(1)
+
+    cfg = book.strategies[0]
 
     gateway = MoomooGateway(get_gateway_config())
 
@@ -1154,6 +1170,7 @@ def main(rules_path: str) -> None:
         kill_switch=kill_switch,
         alerter=alerter,
         watchdog=None,   # set below — the watchdog needs the bot reference
+        strategies=book.strategies,
     )
     bot._watchdog = OpenDWatchdog(
         gateway=gateway,
