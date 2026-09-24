@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-bot.options.strategy — pure strategy core for `tasty_credit_spreads` (Phase 8).
+bot.options.strategy — pure strategy core for `tasty_credit_spreads` (Phase 8)
+and `super_bull_call` (Phase 11, the bull_call_spread debit structure).
 
 Every function here is PURE: no I/O, no clock reads, no SDK/broker calls, no
 logging side effects. `today` is always a parameter, never date.today(). This
@@ -12,7 +13,8 @@ Every threshold comes from `cfg` (an OptionsConfig) — the only literals in thi
 module are the 100 contract multiplier and /100 percent conversions (CFG-01).
 
 Exports: is_monthly_expiry, option_dte, pick_expiry, passes_entry_gate,
-         leg_is_liquid, pick_strikes, size_position, mark_spread, manage_decision
+         leg_is_liquid, pick_strikes, size_position, size_debit_position,
+         mark_spread, manage_decision, manage_decision_debit
 """
 import math
 from datetime import date
@@ -139,19 +141,22 @@ def leg_is_liquid(row: dict, cfg) -> bool:
 
 
 def pick_strikes(rows, underlying_px, structure, cfg) -> Optional[dict]:
-    """Build a defined-risk credit spread from a chain snapshot.
+    """Build a defined-risk spread from a chain snapshot.
 
     Args:
         rows:          per-contract dicts with code, right ('C'/'P'), strike,
                        delta, bid, ask, open_interest.
         underlying_px: last price of the underlying (sets the wing width).
-        structure:     "iron_condor" or "put_credit_spread".
+        structure:     "iron_condor", "put_credit_spread", or
+                       "bull_call_spread" (a debit structure — see
+                       _pick_bull_call).
         cfg:           OptionsConfig.
 
-    Short strikes are the contracts whose |delta| is closest to cfg.short_delta.
-    Each long wing is the LISTED strike closest to short -/+ the wing width and
-    at least one listed strike away from the short (never the same strike, which
-    would be a zero-width spread with unlimited... nothing, but no risk defined).
+    For the two credit structures: short strikes are the contracts whose
+    |delta| is closest to cfg.short_delta. Each long wing is the LISTED strike
+    closest to short -/+ the wing width and at least one listed strike away
+    from the short (never the same strike, which would be a zero-width spread
+    with unlimited... nothing, but no risk defined).
 
     Returns {"legs": [...], "credit": float, "width": float} with legs ordered
     LONG WINGS FIRST, then shorts — the safe OPEN order (buy protection before
@@ -159,10 +164,14 @@ def pick_strikes(rows, underlying_px, structure, cfg) -> Optional[dict]:
     strikes exist, any selected leg is illiquid, or the credit is below
     cfg.min_credit_to_width * width.
 
+    For "bull_call_spread": delegates to _pick_bull_call, which returns
+    {"legs": [...], "debit": float, "width": float} (BUY leg first) instead of
+    a credit — see that function's docstring for the 1/4-rule gate.
+
     Raises ValueError for an unrecognised structure (fail closed rather than
     silently degrading an iron condor to a one-sided spread).
     """
-    if structure not in ("iron_condor", "put_credit_spread"):
+    if structure not in ("iron_condor", "put_credit_spread", "bull_call_spread"):
         raise ValueError(f"unsupported structure: {structure}")
 
     # Wing width: a % of price, floored in dollars — 1% of a $60 ETF is one
@@ -172,6 +181,9 @@ def pick_strikes(rows, underlying_px, structure, cfg) -> Optional[dict]:
         underlying_px * cfg.wing_width_pct_of_underlying / 100,
         getattr(cfg, "min_wing_width_usd", 0.0),
     )
+
+    if structure == "bull_call_spread":
+        return _pick_bull_call(rows, width_target, cfg)
 
     puts = [r for r in rows if r.get("right") == "P"]
     short_put = _closest_delta(puts, cfg.short_delta)
@@ -220,15 +232,34 @@ def pick_strikes(rows, underlying_px, structure, cfg) -> Optional[dict]:
 # ============================================================
 
 def size_position(width, credit, cfg, open_max_loss_total) -> int:
-    """Return the number of spreads to trade (0 = skip).
+    """Return the number of credit spreads to trade (0 = skip).
 
-    Per-spread risk is (width - credit) * 100. Quantity is the whole number of
-    spreads whose combined risk fits cfg.max_risk_per_trade_pct of
+    Per-spread risk is (width - credit) * 100. See _size_for_risk for the
+    shared floor + BP-cap logic (identical to before this function was split).
+    """
+    return _size_for_risk((width - credit) * _CONTRACT_MULTIPLIER, cfg, open_max_loss_total)
+
+
+def size_debit_position(debit, cfg, open_max_loss_total) -> int:
+    """Return the number of bull call spreads to trade (0 = skip).
+
+    Per-spread risk is debit * 100 — for a debit structure the whole debit
+    paid IS the max loss (D-14). `open_max_loss_total` is the caller's GLOBAL
+    open max-loss total across every strategy sharing the account (D-22), so
+    the BP cap below is a portfolio-wide ceiling, not a per-strategy one.
+    """
+    return _size_for_risk(debit * _CONTRACT_MULTIPLIER, cfg, open_max_loss_total)
+
+
+def _size_for_risk(risk, cfg, open_max_loss_total) -> int:
+    """Return the whole number of positions whose combined `risk` fits budget.
+
+    Quantity is floored to whatever fits cfg.max_risk_per_trade_pct of
     cfg.sizing_equity_usd, then capped so total open max loss stays inside
     cfg.max_bp_usage_pct of that equity. Never negative; floors (never rounds
-    up) so the dollar-risk budget is a hard ceiling.
+    up) so the dollar-risk budget is a hard ceiling. `risk` <= 0 (e.g. a
+    non-positive credit/debit) always sizes to zero.
     """
-    risk = (width - credit) * _CONTRACT_MULTIPLIER
     if risk <= 0:
         return 0
     qty = math.floor(cfg.sizing_equity_usd * cfg.max_risk_per_trade_pct / 100 / risk)
@@ -326,6 +357,49 @@ def _closest_delta(rows, target_delta):
     if not rows:
         return None
     return min(rows, key=lambda r: abs(abs(_as_float(r.get("delta"))) - target_delta))
+
+
+def _pick_bull_call(rows, width_target, cfg) -> Optional[dict]:
+    """Build a bull call debit spread from a chain snapshot (D-12, D-13).
+
+    Puts are ignored outright. The long leg is the call whose |delta| is
+    closest to cfg.long_delta (_closest_delta). The short leg is the listed
+    call strike closest to long_strike + width_target, STRICTLY above it
+    (_pick_wing already enforces "never the same strike"). Both legs must
+    pass leg_is_liquid. Debit = mid(long) - mid(short); width = short strike -
+    long strike.
+
+    Returns None when there is no call inventory, no strike above the long,
+    either leg is illiquid, or the debit fails the 1/4-rule gate:
+    0 < debit <= cfg.max_debit_to_width * width. Unlike the credit structures,
+    there is no min-to-width floor here — cheap debit is fine, a non-positive
+    or oversized one is not.
+
+    Returns {"legs": [...], "debit": float, "width": float} with the BUY leg
+    FIRST (mirrors the credit path's "protection before risk" open order, so
+    LegExecutor needs no change: buying the long call before selling the
+    short is itself the safe order for a debit spread, D-25).
+    """
+    calls = [r for r in rows if r.get("right") == "C"]
+    long_call = _closest_delta(calls, cfg.long_delta)
+    if long_call is None:
+        return None
+    short_call = _pick_wing(calls, long_call["strike"], width_target)
+    if short_call is None:
+        return None
+    if not (leg_is_liquid(long_call, cfg) and leg_is_liquid(short_call, cfg)):
+        return None
+
+    debit = _mid(long_call) - _mid(short_call)
+    width = short_call["strike"] - long_call["strike"]
+    if not (0 < debit <= cfg.max_debit_to_width * width):
+        return None
+
+    return {
+        "legs": [_leg(long_call, "BUY"), _leg(short_call, "SELL")],
+        "debit": debit,
+        "width": width,
+    }
 
 
 def _pick_wing(rows, short_strike, offset):

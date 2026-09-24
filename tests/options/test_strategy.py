@@ -14,6 +14,7 @@ floating-point luck.
 """
 from dataclasses import replace
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,7 @@ from bot.options.strategy import (
     passes_entry_gate,
     pick_expiry,
     pick_strikes,
+    size_debit_position,
     size_position,
 )
 
@@ -100,6 +102,83 @@ def grid_cfg(options_cfg):
 
 def _by_side(result):
     return [leg["side"] for leg in result["legs"]]
+
+
+# ============================================================
+# NVDA call grid (bull_call_spread fixtures — the D-12/D-13 worked example)
+# ============================================================
+
+NVDA_PX = 222.0
+
+# strike -> (delta, bid, ask). Deltas fall off with distance from the money,
+# same shape as the SPY grid above but on real NVDA-like strikes/prices so the
+# worked example (225 long / 235 short, debit 1.96, width 10) is literal.
+_NVDA_CALLS = {
+    215: (0.45, 7.40, 7.44),
+    220: (0.38, 5.20, 5.24),
+    225: (0.30, 3.56, 3.60),
+    230: (0.24, 2.48, 2.52),
+    235: (0.18, 1.60, 1.64),
+    240: (0.12, 1.00, 1.04),
+}
+# Put deltas deliberately closer to 0.30 than any call, so a put leaking into
+# _pick_bull_call's delta search would be picked over the true 225 call.
+_NVDA_PUTS = {225: -0.30, 220: -0.29}
+
+
+def _nvda_calls(overrides=None):
+    """NVDA call chain rows (right "C") for the worked example, plus two put
+    rows that must never appear in a bull_call_spread result.
+
+    overrides maps strike -> field overrides on that strike's call row.
+    """
+    overrides = overrides or {}
+    rows = []
+    for strike, (delta, bid, ask) in _NVDA_CALLS.items():
+        row = {
+            "code": f"US.NVDA260918C{int(strike * 1000):08d}",
+            "right": "C",
+            "strike": float(strike),
+            "delta": delta,
+            "bid": bid,
+            "ask": ask,
+            "open_interest": 5000,
+        }
+        row.update(overrides.get(strike, {}))
+        rows.append(row)
+    for strike, delta in _NVDA_PUTS.items():
+        rows.append({
+            "code": f"US.NVDA260918P{int(strike * 1000):08d}",
+            "right": "P",
+            "strike": float(strike),
+            "delta": delta,
+            "bid": 3.00,
+            "ask": 3.04,
+            "open_interest": 5000,
+        })
+    return rows
+
+
+@pytest.fixture
+def bull_cfg(options_cfg):
+    """options_cfg reshaped into the shipped super_bull_call knobs.
+
+    SimpleNamespace (precedent: tests/options/test_execution.py's _cfg) rather
+    than dataclasses.replace: the pure functions here only read attributes, so
+    this keeps this plan independent of the OptionsConfig field additions that
+    ship elsewhere in this phase.
+    """
+    return SimpleNamespace(**{
+        **vars(options_cfg),
+        "structure_type": "bull_call_spread",
+        "long_delta": 0.30,
+        "wing_width_pct_of_underlying": 4.5,
+        "min_wing_width_usd": 2.0,
+        "max_debit_to_width": 0.30,
+        "profit_target_pct_of_max": 60.0,
+        "manage_dte": None,
+        "assignment_guard_dte": 1,
+    })
 
 
 # ============================================================
@@ -459,6 +538,72 @@ class TestPickStrikesPutCreditSpread:
 
 
 # ============================================================
+# pick_strikes("bull_call_spread") — the NVDA worked example (D-12, D-13)
+# ============================================================
+
+class TestPickStrikesBullCallSpread:
+    """Debit structure: BUY the long delta pick, SELL the wing strictly above it."""
+
+    def test_bull_call_nvda_worked_example(self, bull_cfg):
+        result = pick_strikes(_nvda_calls(), NVDA_PX, "bull_call_spread", bull_cfg)
+        assert result is not None
+        assert _by_side(result) == ["BUY", "SELL"]
+        assert [leg["strike"] for leg in result["legs"]] == [225.0, 235.0]
+        assert [leg["right"] for leg in result["legs"]] == ["C", "C"]
+        assert result["debit"] == pytest.approx(1.96)
+        assert result["width"] == pytest.approx(10.0)
+
+    def test_bull_call_long_delta_is_config_driven(self, bull_cfg):
+        cfg = SimpleNamespace(**{**vars(bull_cfg), "long_delta": 0.18})
+        result = pick_strikes(_nvda_calls(), NVDA_PX, "bull_call_spread", cfg)
+        strikes = [leg["strike"] for leg in result["legs"]]
+        assert strikes == [235.0, 240.0]
+
+    def test_bull_call_width_is_config_driven(self, bull_cfg):
+        wide_cfg = SimpleNamespace(**{**vars(bull_cfg), "min_wing_width_usd": 14.0})
+        result = pick_strikes(_nvda_calls(), NVDA_PX, "bull_call_spread", wide_cfg)
+        assert result["legs"][1]["strike"] == 240.0
+
+        narrow_cfg = SimpleNamespace(**{**vars(bull_cfg), "wing_width_pct_of_underlying": 2.0})
+        result = pick_strikes(_nvda_calls(), NVDA_PX, "bull_call_spread", narrow_cfg)
+        assert result["legs"][1]["strike"] == 230.0
+
+    def test_bull_call_short_is_strictly_above_long(self, bull_cfg):
+        rows = [r for r in _nvda_calls() if r["right"] != "C" or r["strike"] <= 225]
+        assert pick_strikes(rows, NVDA_PX, "bull_call_spread", bull_cfg) is None
+
+    def test_bull_call_rejects_debit_above_cap(self, bull_cfg):
+        cfg = SimpleNamespace(**{**vars(bull_cfg), "max_debit_to_width": 0.15})
+        assert pick_strikes(_nvda_calls(), NVDA_PX, "bull_call_spread", cfg) is None
+
+    def test_bull_call_accepts_debit_exactly_at_cap(self, bull_cfg):
+        rows = _nvda_calls(overrides={
+            225: {"bid": 3.49, "ask": 3.51},
+            235: {"bid": 0.99, "ask": 1.01},
+        })
+        cfg = SimpleNamespace(**{**vars(bull_cfg), "max_debit_to_width": 0.25})
+        result = pick_strikes(rows, NVDA_PX, "bull_call_spread", cfg)
+        assert result is not None
+        assert result["debit"] == pytest.approx(2.5)
+
+    def test_bull_call_rejects_non_positive_debit(self, bull_cfg):
+        rows = _nvda_calls(overrides={235: {"bid": 3.60, "ask": 3.64}})
+        assert pick_strikes(rows, NVDA_PX, "bull_call_spread", bull_cfg) is None
+
+    def test_bull_call_rejects_illiquid_long(self, bull_cfg):
+        rows = _nvda_calls(overrides={225: {"open_interest": 100}})
+        assert pick_strikes(rows, NVDA_PX, "bull_call_spread", bull_cfg) is None
+
+    def test_bull_call_rejects_illiquid_short(self, bull_cfg):
+        rows = _nvda_calls(overrides={235: {"open_interest": 100}})
+        assert pick_strikes(rows, NVDA_PX, "bull_call_spread", bull_cfg) is None
+
+    def test_bull_call_ignores_puts(self, bull_cfg):
+        result = pick_strikes(_nvda_calls(), NVDA_PX, "bull_call_spread", bull_cfg)
+        assert all(leg["right"] == "C" for leg in result["legs"])
+
+
+# ============================================================
 # size_position
 # ============================================================
 
@@ -495,6 +640,31 @@ class TestSizePosition:
     def test_sizing_equity_is_config_driven(self, options_cfg):
         cfg = replace(options_cfg, sizing_equity_usd=10_000)
         assert size_position(5, 1.7, cfg, 0) == 0
+
+
+# ============================================================
+# size_debit_position
+# ============================================================
+
+class TestSizeDebitPosition:
+    """Same floor + BP-cap logic as size_position, risk = debit x 100."""
+
+    def test_size_debit_position_nvda(self, bull_cfg):
+        """$100k x 1% = $1,000 budget; risk 1.96 x 100 = $196 -> 5 spreads."""
+        assert size_debit_position(1.96, bull_cfg, 0.0) == 5
+
+    def test_size_debit_position_bp_cap_uses_open_total(self, bull_cfg):
+        assert size_debit_position(1.96, bull_cfg, 24_900) == 0
+        assert size_debit_position(1.96, bull_cfg, 24_500) == 2
+        assert size_debit_position(1.96, bull_cfg, 24_000) == 5
+
+    def test_size_debit_position_non_positive_debit_is_zero(self, bull_cfg):
+        assert size_debit_position(0.0, bull_cfg, 0.0) == 0
+        assert size_debit_position(-1.0, bull_cfg, 0.0) == 0
+
+    def test_size_debit_position_config_driven(self, bull_cfg):
+        cfg = SimpleNamespace(**{**vars(bull_cfg), "max_risk_per_trade_pct": 2.0})
+        assert size_debit_position(1.96, cfg, 0.0) == 10
 
 
 # ============================================================
