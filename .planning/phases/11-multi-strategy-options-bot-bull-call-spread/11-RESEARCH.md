@@ -653,22 +653,25 @@ treat as proposals, not locked decisions, since they go slightly beyond what
 **If this table is empty:** N/A — see above, both entries are
 recommendations flagged for planner attention, not unverified facts.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Where does the per-strategy `opened_today`/concurrent-count filter live — a new `OptionsStore` method, or a Python-side filter over `get_option_positions()`'s existing full result?**
    - What we know: `count_opened_on(date_iso)` has no `strategy_name` parameter today `[VERIFIED: bot/options/store.py:183-190]`; `get_option_positions(statuses)` returns everything active, un-filtered by strategy.
    - What's unclear: whether the planner should add `count_opened_on(date_iso, strategy_name=None)` (extending the existing method, backward compatible since `None` = today's behavior) or do a one-line Python filter in `service.py` (`[p for p in active if p["strategy_name"] == cfg.name]`) since the position list is already fully in memory for the busy-underlying/BP-headroom pass.
    - Recommendation: the Python-side filter is the smaller diff (zero store-schema/SQL changes, no new method to test in isolation) and `get_option_positions` already returns the full row including the new `strategy_name` column (D-18) — prefer this unless the position count ever grows large enough that a SQL `COUNT` becomes worth it (not the case here: this is a handful of ETFs + a 20-code-capped watchlist).
+   - RESOLVED: Python-side filter on `strategy_name` over the already-loaded active positions (plan 11-05 T2).
 
 2. **Exact wording/placement of the `bot/main.py` dispatch fix — new elif branch, or broaden the existing condition?**
    - What we know: current check is `if strategy_name == "tasty_credit_spreads":` at `bot/main.py:75` — a single string equality.
    - What's unclear: whether to change the peek itself (read `data.get("strategy_name", "") or ("strategies" in data and "multi")`-style sentinel) or keep the peek simple and add a second top-level check (`if strategy_name == "tasty_credit_spreads" or "strategies" in data:`).
    - Recommendation: the second form (`or "strategies" in data`) is the smallest diff and keeps the existing D5 test file (`tests/options/test_dispatch.py`) mostly intact — just add a new test case for the `strategies`-shape payload alongside the existing `strategy_name` one.
+   - RESOLVED: `if strategy_name == "tasty_credit_spreads" or "strategies" in data:` in the same task as the `rules_options.json` conversion (plan 11-04 T2).
 
 3. **Whether `legacy_view(raw, name)` needs to also express the `manage`-block structure-conditional keys (Pitfall 3) when a strategies-shape file's chosen strategy is a credit structure with the moved `risk`/`service` globals.**
    - What we know: A2/D-10 says `legacy_view` output must itself be a valid legacy file so `apply_overrides` + `load_options_config`'s existing temp-file validation path (`backtester/options_run.py:218-228`) is unchanged.
    - What's unclear: exactly which manage/entry keys `legacy_view` must synthesize back into the flat shape (`sizing_equity_usd` back into `sizing`, `manage_interval_min` back into `manage`) for a chosen credit strategy, since the legacy schema still requires them nested there.
    - Recommendation: `legacy_view` should be the exact inverse of `load_options_config`'s strategies-shape flattening step — build it by literally reusing that same field-relocation logic (do not write two independent mapping tables that can drift from each other).
+   - RESOLVED: `legacy_view` and `_wrap_legacy` share one relocation table `_RELOCATED` (plan 11-01 T1).
 
 ## Environment Availability
 
