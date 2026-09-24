@@ -90,7 +90,6 @@ _SNAPSHOT_CHUNK = 400
 _CONTRACT_MULTIPLIER = 100
 
 _ACTIVE_STATUSES = ("OPENING", "OPEN", "CLOSING", "NEEDS_ATTENTION")
-_OPEN_STATUSES = ("OPEN", "OPENING")
 
 
 # ============================================================
@@ -391,9 +390,13 @@ class OptionsBot:
         (D-29) is also flagged NEEDS_ATTENTION and alerted — a strategy that
         was removed from rules_options.json must never leave its positions
         silently unmanaged, and the manage loop must never apply another
-        strategy's parameters to it. This check runs before the OPENING/
-        CLOSING branch so an orphaned strategy is reported as such even if it
-        also died mid-order.
+        strategy's parameters to it. The same startup check also flags a row
+        whose structure KIND (debit bull_call_spread vs any credit structure)
+        no longer matches its named strategy's configured kind (WR-01,
+        D-29 completion) — an operator who renames a strategy's structure.type
+        must never leave a pre-existing position decided with the other
+        kind's config. This check runs before the OPENING/CLOSING branch so
+        either case is reported as such even if it also died mid-order.
 
         Broker option codes that appear on no position in this DB are counted
         and logged only (SAFE-OG-01: the paper account is shared with a human).
@@ -409,23 +412,47 @@ class OptionsBot:
             known_codes.update(leg["code"] for leg in legs)
             status = pos.get("status")
 
-            if startup and pos.get("strategy_name") not in self._strategies:
+            strat = self._strategies.get(pos.get("strategy_name"))
+            if strat is None:
+                event = "options_unknown_strategy"
+            # ponytail: kind comparison, not exact-type equality — iron_condor
+            # and put_credit_spread share manage_decision and identical config
+            # fields; strict equality is the upgrade path if that ever changes.
+            elif (pos.get("structure") == "bull_call_spread") != (
+                strat.structure_type == "bull_call_spread"
+            ):
+                event = "options_strategy_structure_mismatch"
+            else:
+                event = None
+
+            if startup and event is not None:
                 self._store.set_position_status(pid, "NEEDS_ATTENTION")
-                await self._alerter.send(
-                    f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
-                    f"strategy {_esc(pos.get('strategy_name'))} is not configured in "
-                    f"rules_options.json; close manually."
-                )
+                if event == "options_unknown_strategy":
+                    await self._alerter.send(
+                        f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
+                        f"strategy {_esc(pos.get('strategy_name'))} is not configured in "
+                        f"rules_options.json; close manually."
+                    )
+                else:
+                    await self._alerter.send(
+                        f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
+                        f"structure {_esc(pos.get('structure'))} does not match strategy "
+                        f"{_esc(pos.get('strategy_name'))} (configured "
+                        f"{_esc(strat.structure_type)}); close manually."
+                    )
                 append_audit({
-                    "event": "options_unknown_strategy",
+                    "event": event,
                     "position_id": pid,
                     "underlying": pos.get("underlying"),
                     "strategy_name": pos.get("strategy_name"),
                     "status": status,
+                    "structure": pos.get("structure"),
+                    "configured_structure": strat.structure_type if strat is not None else None,
                 })
                 _logger.warning(
-                    "options_unknown_strategy",
+                    event,
                     position_id=pid, strategy=pos.get("strategy_name"),
+                    structure=pos.get("structure"),
                 )
                 continue
 
@@ -653,16 +680,17 @@ class OptionsBot:
         # one-position-per-underlying and BP headroom bind the whole account.
         active = self._store.get_option_positions(_ACTIVE_STATUSES)
         busy = {p["underlying"] for p in active}
-        open_max_loss_total = sum(
-            float(p["max_loss_usd"] or 0) for p in active if p["status"] in _OPEN_STATUSES
-        )
+        # Every ACTIVE row (OPENING/OPEN/CLOSING/NEEDS_ATTENTION) counts, not
+        # just OPEN/OPENING — a stuck row is still live broker exposure
+        # (WR-05). Over-counting a row the operator already closed is the
+        # fail-closed side; the operator clears it by resolving the row.
+        open_max_loss_total = sum(float(p["max_loss_usd"] or 0) for p in active)
         # open_count is the scanning strategy's OWN concurrent-position count
         # (D-22 per-strategy cap) — a Python-side filter over the already-
         # fetched active list, not a new store query (research Open Question 1).
-        open_count = sum(
-            1 for p in active
-            if p["status"] in _OPEN_STATUSES and p.get("strategy_name") == cfg.name
-        )
+        # Same ACTIVE-row scope as open_max_loss_total above (WR-05): a stuck
+        # position still occupies this strategy's concurrent slot.
+        open_count = sum(1 for p in active if p.get("strategy_name") == cfg.name)
 
         grouped = _group_rows_by_underlying(_rows(rows))
         if cfg.universe_source is None:
@@ -906,7 +934,11 @@ class OptionsBot:
         so a mixed book always applies the right parameters to each position.
         A strategy_name not present in the loaded book (already flagged
         NEEDS_ATTENTION by the D-29 startup reconcile guard) is skipped here
-        too, defense in depth against ever managing an orphaned position.
+        too, defense in depth against ever managing an orphaned position. A
+        position whose structure KIND no longer matches its strategy's
+        configured kind (WR-01) is skipped the same way, before the quote
+        gate below, so it is never escalated with the wrong strategy's
+        assignment_guard_dte.
 
         Any leg without a two-sided numeric quote (CR-01) is never marked,
         decided on, or closed against — this returns 0.0 (no action). Inside
@@ -925,6 +957,15 @@ class OptionsBot:
             _logger.warning(
                 "options_manage_unknown_strategy",
                 position_id=pid, strategy=pos.get("strategy_name"),
+            )
+            return 0.0
+
+        is_debit = pos["structure"] == "bull_call_spread"
+        if is_debit != (strat_cfg.structure_type == "bull_call_spread"):
+            _logger.warning(
+                "options_manage_structure_mismatch",
+                position_id=pid, strategy=pos.get("strategy_name"),
+                structure=pos["structure"], configured_structure=strat_cfg.structure_type,
             )
             return 0.0
 
@@ -958,7 +999,6 @@ class OptionsBot:
         mark = mark_spread(legs, quotes)
         credit = float(pos["credit_per_spread"])
         qty = int(pos["qty"])
-        is_debit = pos["structure"] == "bull_call_spread"
 
         if is_debit:
             width = float(pos["width"] or 0)

@@ -1268,6 +1268,109 @@ def test_manage_unquotable_leg_outside_guard_window_stays_open(
 
 
 # ============================================================
+# WR-01: structure-kind mismatch (D-29 completion)
+# ============================================================
+
+def test_reconcile_startup_flags_structure_mismatch(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+
+    _seed_open_spread(store, "T1")                                      # control
+    _seed_open_spread(store, "M1", strategy_name="super_bull_call")      # credit under debit
+    _seed_bull_spread(store, "X1", strategy_name="tasty_credit_spreads")  # debit under credit
+
+    _run(bot.reconcile(startup=True))
+
+    assert sorted(_statuses(store, "NEEDS_ATTENTION")) == ["M1", "X1"]
+    assert _statuses(store, "OPEN") == ["T1"]
+    assert alerter.send.await_count == 2
+    mismatches = [e for e in audit_events if e["event"] == "options_strategy_structure_mismatch"]
+    assert len(mismatches) == 2
+    assert not [e for e in audit_events if e["event"] == "options_unknown_strategy"]
+    m1_event = next(e for e in mismatches if e["position_id"] == "M1")
+    assert m1_event["structure"] == "put_credit_spread"
+    assert m1_event["configured_structure"] == "bull_call_spread"
+    assert m1_event["strategy_name"] == "super_bull_call"
+
+
+@pytest.mark.parametrize("seed", ["credit_row_under_debit_strategy", "debit_row_under_credit_strategy"])
+def test_manage_skips_structure_mismatch(
+    options_book, make_bot, store, monkeypatch, seed,
+):
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    if seed == "credit_row_under_debit_strategy":
+        _seed_open_spread(store, "M1", expiry=EXPIRY, strategy_name="super_bull_call")
+    else:
+        _seed_bull_spread(store, "M1", strategy_name="tasty_credit_spreads")
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+    pos = store.get_option_positions(("OPEN",))[0]
+
+    quotes = {
+        SHORT_P: {"bid": 0.55, "ask": 0.65}, LONG_P: {"bid": 0.15, "ask": 0.25},
+        LONG_C: {"bid": 7.95, "ask": 8.05}, SHORT_C: {"bid": 1.15, "ask": 1.25},
+    }
+    result = _run(bot._manage_position(pos, quotes, TODAY))
+
+    assert result == 0.0
+    bot._executor.close_legs.assert_not_awaited()
+    assert _statuses(store, "OPEN") == ["M1"]
+    assert any(
+        c.args and c.args[0] == "options_manage_structure_mismatch"
+        for c in log.warning.call_args_list
+    )
+
+
+# ============================================================
+# WR-05: stuck rows still count against BP headroom + concurrent cap (D-22)
+# ============================================================
+
+def test_bp_headroom_counts_needs_attention_and_closing_rows(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    _seed_open_spread(
+        store, "N1", status="NEEDS_ATTENTION", strategy_name="tasty_credit_spreads",
+        underlying="US.QQQ", max_loss_usd=12450.0,
+    )
+    _seed_open_spread(
+        store, "C1", status="CLOSING", strategy_name="tasty_credit_spreads",
+        underlying="US.IWM", max_loss_usd=12450.0,
+    )
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    bot._executor.open_position.assert_not_awaited()
+    assert "US.NVDA" not in {p["underlying"] for p in store.get_option_positions(("OPEN",))}
+
+
+def test_concurrent_cap_counts_needs_attention_and_closing_rows(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    for i in range(4):
+        _seed_bull_spread(
+            store, f"S{i}",
+            status=("NEEDS_ATTENTION" if i < 2 else "CLOSING"),
+            underlying=f"US.OTH{i}", max_loss_usd=100.0,
+        )
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    bot._executor.open_position.assert_not_awaited()
+    assert "US.NVDA" not in {p["underlying"] for p in store.get_option_positions(("OPEN",))}
+
+
+# ============================================================
 # EOD
 # ============================================================
 
