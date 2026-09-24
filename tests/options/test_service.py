@@ -67,13 +67,14 @@ def gateway():
 
 @pytest.fixture
 def make_bot(options_cfg, gateway, store, alerter):
-    def _make(cfg=None):
+    def _make(cfg=None, strategies=None):
         return OptionsBot(
             cfg=cfg or options_cfg,
             gateway=gateway,
             store=store,
             kill_switch=MagicMock(triggered=True, check_file=MagicMock(return_value=False)),
             alerter=alerter,
+            strategies=strategies,
         )
     return _make
 
@@ -544,6 +545,155 @@ def test_entry_scan_aborts_position_when_open_fails(
     assert aborted[0]["closed_at"]
     assert alerter.send.await_count == 1
     assert "entry failed" in alerter.send.await_args[0][0]
+
+
+# ============================================================
+# Multi-strategy entry scan (bull call / per-strategy dispatch)
+# ============================================================
+
+# NVDA worked example (CONTEXT.md "Specific Ideas"): buy 225 @ 3.58, sell 235
+# @ 1.62 -> debit 1.96, width 10.0, 1/4-rule debit/width 0.196 <= 0.30 passes.
+_NVDA_CALLS = {
+    215.0: (0.45, 7.40, 7.44),
+    220.0: (0.38, 5.20, 5.24),
+    225.0: (0.30, 3.56, 3.60),
+    230.0: (0.24, 2.48, 2.52),
+    235.0: (0.18, 1.60, 1.64),
+    240.0: (0.12, 1.00, 1.04),
+}
+
+
+def _bull_chain(stock_id=7, root="NVDA", u_price=222.0, ivr_frac=0.05):
+    """Build screen_options call rows for one bull-call underlying."""
+    rows = []
+    for strike, (delta, bid, ask) in _NVDA_CALLS.items():
+        rows.append({
+            "code": f"US.{root}260918C{int(strike * 1000)}",
+            "right": "C", "strike": strike, "expiry": "2026-09-18", "dte": 32,
+            "bid": bid, "ask": ask, "mid": (bid + ask) / 2,
+            "iv": 0.2, "open_interest": 5000, "delta": delta,
+            "u_stock_id": stock_id, "u_price": u_price, "u_iv": 0.2,
+            "u_iv_rank": ivr_frac, "u_iv_percentile": ivr_frac,
+            "u_change_ratio": 0.0,
+        })
+    return rows
+
+
+def _wire_bull(bot, gateway, monkeypatch, codes=("US.NVDA",), stock_ids=None, chains=None):
+    """Point the gateway/reader at a watchlist + call chain(s); freeze the clock.
+
+    Monkeypatches `service.read_equity_watchlist` with a recorder that returns
+    `list(codes)`; returns the recorder's (db_path, scan_date_iso) call list.
+    """
+    _freeze(monkeypatch, SESSION_NOON)
+    stock_ids = stock_ids if stock_ids is not None else {c: 7 + i for i, c in enumerate(codes)}
+    chains = chains if chains is not None else {
+        stock_ids[c]: _bull_chain(stock_id=stock_ids[c], root=c.split(".")[-1])
+        for c in codes
+    }
+
+    calls = []
+
+    def _reader(db_path, scan_date_iso, *a, **k):
+        calls.append((db_path, scan_date_iso))
+        return list(codes)
+
+    monkeypatch.setattr(service, "read_equity_watchlist", _reader)
+    gateway.get_stock_ids = AsyncMock(return_value=dict(stock_ids))
+    gateway.screen_options = AsyncMock(
+        side_effect=lambda ids, right, *a, **k: [
+            row for sid in ids for row in chains.get(sid, [])
+        ]
+    )
+    bot._entries_enabled = True
+    bot._kill_switch.triggered = False
+    return calls
+
+
+def test_bull_call_entry_opens_debit_spread_from_watchlist(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    calls = _wire_bull(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    opened = store.get_option_positions(("OPEN",))
+    assert len(opened) == 1
+    pos = opened[0]
+    assert pos["strategy_name"] == "super_bull_call"
+    assert pos["structure"] == "bull_call_spread"
+    assert pos["underlying"] == "US.NVDA"
+    assert pos["credit_per_spread"] == pytest.approx(-1.96)
+    assert pos["width"] == pytest.approx(10.0)
+    assert pos["qty"] == 5
+    assert pos["max_loss_usd"] == pytest.approx(980.0)
+    assert [leg["side"] for leg in pos["legs"]] == ["BUY", "SELL"]
+    assert [leg["strike"] for leg in pos["legs"]] == [225.0, 235.0]
+
+    gateway.screen_options.assert_awaited_once_with([7], "C", 21, 45, 0.05, 0.50)
+    assert calls == [("data/bot_state.db", "2026-08-17")]
+
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "super_bull_call" in body
+    assert "debit 1.96" in body
+
+
+def test_bull_call_entry_empty_watchlist_opens_nothing(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    _wire_bull(bot, gateway, monkeypatch, codes=())
+    bot._executor = _fake_executor()
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    gateway.get_stock_ids.assert_not_awaited()
+    gateway.screen_options.assert_not_awaited()
+    assert store.get_option_positions(("OPEN",)) == []
+
+
+def test_bull_call_entry_iterates_watchlist_in_rank_order(
+    options_book, make_bot, store, gateway, monkeypatch,
+):
+    from dataclasses import replace
+    bull_cfg = replace(options_book.strategies[1], max_new_positions_per_day=1)
+    strategies = (options_book.strategies[0], bull_cfg)
+    bot = make_bot(bull_cfg, strategies=strategies)
+    _wire_bull(
+        bot, gateway, monkeypatch,
+        codes=("US.BBB", "US.AAA"),
+        stock_ids={"US.BBB": 9, "US.AAA": 3},
+    )
+    bot._executor = _fake_executor()
+
+    _run(bot._job_entry_scan("super_bull_call"))
+
+    opened = store.get_option_positions(("OPEN",))
+    assert [p["underlying"] for p in opened] == ["US.BBB"]
+
+
+def test_credit_entry_unchanged_with_two_strategy_book(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    bot = make_bot(options_book.strategies[0], strategies=options_book.strategies)
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+
+    _run(bot._job_entry_scan("tasty_credit_spreads"))
+
+    opened = store.get_option_positions(("OPEN",))
+    assert len(opened) == 1
+    pos = opened[0]
+    assert pos["strategy_name"] == "tasty_credit_spreads"
+    assert pos["structure"] == "iron_condor"
+    assert pos["expiry"] == EXPIRY
+    assert pos["credit_per_spread"] == pytest.approx(2.30)
+    assert pos["width"] == pytest.approx(6.0)
+    assert pos["qty"] == 2
+    assert [leg["side"] for leg in pos["legs"]] == ["BUY", "BUY", "SELL", "SELL"]
 
 
 # ============================================================

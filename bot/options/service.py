@@ -42,8 +42,10 @@ from bot.options.strategy import (
     passes_entry_gate,
     pick_expiry,
     pick_strikes,
+    size_debit_position,
     size_position,
 )
+from bot.options.universe import read_equity_watchlist
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.kill_switch import KillSwitch
@@ -153,16 +155,28 @@ def _signed(value) -> str:
     return f"{float(value):+,.2f}"
 
 
+def _premium_label(credit_per_spread) -> str:
+    """Format a signed net premium for display (D-19/D-24).
+
+    Positive (a credit structure) -> "credit X"; negative (a debit structure,
+    e.g. bull_call_spread) -> "debit X" (the sign is flipped back to a
+    human-readable positive dollar amount for the debit case).
+    """
+    value = float(credit_per_spread)
+    return f"credit {round(value, 2)}" if value >= 0 else f"debit {round(-value, 2)}"
+
+
 def _fmt_entry(pos: dict, legs) -> str:
     """Telegram body for a filled spread entry (every field escaped)."""
     ivr = pos.get("ivr_at_entry")
     lines = [
-        f"<b>Options entry</b> {_esc(pos.get('underlying'))}",
+        f"<b>Options entry</b> {_esc(pos.get('underlying'))} — "
+        f"{_esc(pos.get('strategy_name') or '')}",
         f"{_esc(pos.get('structure'))} exp {_esc(pos.get('expiry'))} "
         f"({_esc(pos.get('dte_at_entry'))} DTE)",
         f"IVR {'n/a' if ivr is None else _esc(round(float(ivr), 1))} "
         f"| qty {_esc(pos.get('qty'))}",
-        f"credit {_esc(round(float(pos.get('credit_per_spread') or 0), 2))} "
+        f"{_esc(_premium_label(pos.get('credit_per_spread') or 0))} "
         f"/ width {_esc(round(float(pos.get('width') or 0), 2))} "
         f"| max loss ${_esc(round(float(pos.get('max_loss_usd') or 0), 2))}",
     ]
@@ -247,15 +261,25 @@ def _options_html(open_positions, closed_today, date_str: str) -> str:
 class OptionsBot:
     """Always-on APScheduler-driven options process (D4/D5/D6).
 
-    cfg:         OptionsConfig — every timing/threshold value (CFG-01).
+    cfg:         OptionsConfig — the PRIMARY strategy (the first one in the book).
+                 Shared execution/service/risk values are identical across every
+                 flattened OptionsConfig by construction (D-02), so LegExecutor,
+                 the watchdog, the daily-loss breaker and EOD all keep reading
+                 from this one config regardless of how many strategies scan.
     gateway:     MoomooGateway — connect/close/screen/snapshot/positions/orders.
     store:       OptionsStore — open handle on the options DB (its OWN file).
     kill_switch: KillSwitch — install + check_file + triggered.
     alerter:     TelegramAlerter — fire-and-forget send() coroutine.
     watchdog:    OpenDWatchdog or None — injected after construction (needs bot ref).
+    strategies:  optional iterable of every OptionsConfig this process should
+                 run an entry scan for (typically an OptionsBook.strategies
+                 tuple). Defaults to (cfg,) — a single-strategy bot, unchanged
+                 behavior. Looked up by name in self._strategies (D-20).
     """
 
-    def __init__(self, cfg, gateway, store, kill_switch, alerter, watchdog=None) -> None:
+    def __init__(
+        self, cfg, gateway, store, kill_switch, alerter, watchdog=None, strategies=None,
+    ) -> None:
         self._cfg = cfg
         self._gateway = gateway
         self._store = store
@@ -264,12 +288,17 @@ class OptionsBot:
         self._watchdog = watchdog
         self._watchdog_task = None
 
+        self._strategies = {c.name: c for c in (strategies or (cfg,))}
+
         self._scheduler = AsyncIOScheduler(timezone=_ET)
         self._entries_enabled: bool = False
         # One lock serialises entry vs manage so the shared order_list_query
         # budget (10 req / 30s) is never contended (T-1ie-03).
         self._lock = asyncio.Lock()
         self._executor = LegExecutor(gateway, cfg)
+        # Shared code -> stock_id cache across every strategy this process
+        # scans (a code is a code regardless of which strategy's universe it
+        # came from, so one cache is correct and saves a repeat gateway call).
         self._stock_ids: dict = {}
 
         # OpenDWatchdog duck-types bot._entries_enabled/_store/_position_manager/
@@ -448,62 +477,100 @@ class OptionsBot:
     # Entry scan
     # --------------------------------------------------------
 
-    async def _job_entry_scan(self) -> None:
+    async def _job_entry_scan(self, strategy_name=None) -> None:
         """Screen the chain once per right and open at most one spread per underlying."""
         try:
-            cfg = self._cfg
+            cfg = self._cfg if strategy_name is None else self._strategies[strategy_name]
             today = now_et().date()
 
             if not is_trading_day(today):
-                _logger.info("options_entry_scan_skipped", reason="not_trading_day")
+                _logger.info(
+                    "options_entry_scan_skipped", reason="not_trading_day", strategy=cfg.name,
+                )
                 return
             if not self._entries_enabled:
-                _logger.info("options_entry_scan_skipped", reason="entries_disabled")
+                _logger.info(
+                    "options_entry_scan_skipped", reason="entries_disabled", strategy=cfg.name,
+                )
                 return
             if self._kill_switch.triggered:
-                _logger.info("options_entry_scan_skipped", reason="kill_switch")
+                _logger.info(
+                    "options_entry_scan_skipped", reason="kill_switch", strategy=cfg.name,
+                )
                 return
             # Realized-only check first so a restart (manage never ran) still trips it.
+            # The breaker is GLOBAL (D-22): shared across every strategy.
             await self._check_daily_breaker(today, 0.0)
             if self._store.get_meta(_BREAKER_META_KEY) == today.isoformat():
-                _logger.info("options_entry_scan_skipped", reason="daily_loss_breaker")
+                _logger.info(
+                    "options_entry_scan_skipped", reason="daily_loss_breaker", strategy=cfg.name,
+                )
                 return
 
             opened_today = self._store.count_opened_on(today.isoformat())
             if opened_today >= cfg.max_new_positions_per_day:
-                _logger.info("options_entry_scan_skipped", reason="per_day_cap")
+                _logger.info(
+                    "options_entry_scan_skipped", reason="per_day_cap", strategy=cfg.name,
+                )
                 return
 
             async with self._lock:
-                await self._scan_and_open(today, opened_today)
+                await self._scan_and_open(cfg, today, opened_today)
 
         except asyncio.CancelledError:
             raise
         except Exception:
             _logger.error("options_entry_scan_error", exc_info=True)
 
-    async def _scan_and_open(self, today, opened_today: int) -> None:
+    async def _scan_and_open(self, cfg, today, opened_today: int) -> None:
         """Screen, select and open — the locked body of the entry scan."""
-        cfg = self._cfg
+        if cfg.universe_source is None:
+            codes = list(cfg.universe)
+        else:
+            # D-17/D-28: the bull-call universe is the equity bot's premarket
+            # watchlist, read cross-process from its own (read-only) DB.
+            # ponytail: this is a sub-millisecond local read on the WAL equity
+            # DB, called directly on the loop; move to run_in_executor if it
+            # ever blocks.
+            codes = read_equity_watchlist(cfg.equity_state_db, today.isoformat())
+            _logger.info("options_watchlist_loaded", strategy=cfg.name, count=len(codes))
 
-        if not self._stock_ids:
-            self._stock_ids = await self._gateway.get_stock_ids(list(cfg.universe))
-        if not self._stock_ids:
-            _logger.warning("options_entry_scan_no_stock_ids")
+        if not codes:
+            _logger.info(
+                "options_entry_scan_skipped", reason="empty_universe", strategy=cfg.name,
+            )
             return
-        by_id = {sid: code for code, sid in self._stock_ids.items()}
-        ids = list(self._stock_ids.values())
 
-        # The delta bounds here are screen BREADTH, not a strategy threshold —
-        # the real knob is cfg.short_delta, which pick_strikes applies to
-        # whatever the screen returns.
-        rows = await self._gateway.screen_options(
-            ids, "P", cfg.min_dte, cfg.max_dte, -0.35, -0.03,
-        )
-        if cfg.structure_type == "iron_condor":
-            rows = list(rows or []) + list(await self._gateway.screen_options(
-                ids, "C", cfg.min_dte, cfg.max_dte, 0.03, 0.35,
-            ) or [])
+        missing = [c for c in codes if c not in self._stock_ids]
+        if missing:
+            self._stock_ids.update(await self._gateway.get_stock_ids(missing) or {})
+        stock_ids = {c: self._stock_ids[c] for c in codes if c in self._stock_ids}
+        if not stock_ids:
+            _logger.warning("options_entry_scan_no_stock_ids", strategy=cfg.name)
+            return
+        by_id = {sid: code for code, sid in stock_ids.items()}
+        ids = list(stock_ids.values())
+
+        if cfg.structure_type == "bull_call_spread":
+            # Calls only (D-23); the delta bounds here are screen BREADTH, not
+            # a strategy threshold — the real knob is cfg.long_delta, which
+            # pick_strikes applies to whatever the screen returns. Same
+            # per-underlying screen + throttle discipline as the credit path
+            # (the gateway handles the 1000-row cap per underlying).
+            rows = await self._gateway.screen_options(
+                ids, "C", cfg.min_dte, cfg.max_dte, 0.05, 0.50,
+            )
+        else:
+            # The delta bounds here are screen BREADTH, not a strategy
+            # threshold — the real knob is cfg.short_delta, which pick_strikes
+            # applies to whatever the screen returns.
+            rows = await self._gateway.screen_options(
+                ids, "P", cfg.min_dte, cfg.max_dte, -0.35, -0.03,
+            )
+            if cfg.structure_type == "iron_condor":
+                rows = list(rows or []) + list(await self._gateway.screen_options(
+                    ids, "C", cfg.min_dte, cfg.max_dte, 0.03, 0.35,
+                ) or [])
 
         active = self._store.get_option_positions(_ACTIVE_STATUSES)
         busy = {p["underlying"] for p in active}
@@ -512,10 +579,22 @@ class OptionsBot:
         )
         open_count = sum(1 for p in active if p["status"] in _OPEN_STATUSES)
 
-        for sid, u_rows in sorted(_group_rows_by_underlying(_rows(rows)).items()):
-            code = by_id.get(sid)
-            if code is None:
-                continue
+        grouped = _group_rows_by_underlying(_rows(rows))
+        if cfg.universe_source is None:
+            # tasty behavior unchanged: sorted by stock id, exactly as before.
+            candidates = [
+                (by_id[sid], u_rows) for sid, u_rows in sorted(grouped.items())
+                if sid in by_id
+            ]
+        else:
+            # Watchlist rank order: the scanner's best-ranked names get the
+            # per-day slots first.
+            candidates = [
+                (code, grouped[stock_ids[code]]) for code in codes
+                if code in stock_ids and stock_ids[code] in grouped
+            ]
+
+        for code, u_rows in candidates:
             if (opened_today >= cfg.max_new_positions_per_day
                     or open_count >= cfg.max_concurrent_positions):
                 break
@@ -523,13 +602,14 @@ class OptionsBot:
                 continue
 
             try:
-                pos = await self._try_open(code, u_rows, today, open_max_loss_total)
+                pos = await self._try_open(cfg, code, u_rows, today, open_max_loss_total)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # One malformed chain must never abort the rest of the scan.
                 _logger.error(
-                    "options_entry_underlying_error", underlying=code, exc_info=True,
+                    "options_entry_underlying_error",
+                    underlying=code, strategy=cfg.name, exc_info=True,
                 )
                 continue
 
@@ -539,12 +619,12 @@ class OptionsBot:
                 open_count += 1
                 open_max_loss_total += float(pos["max_loss_usd"])
 
-    async def _try_open(self, code, u_rows, today, open_max_loss_total):
+    async def _try_open(self, cfg, code, u_rows, today, open_max_loss_total):
         """Evaluate one underlying and, if it qualifies, open the spread.
 
         Returns the inserted position dict on a filled open, else None.
         """
-        cfg = self._cfg
+        is_debit = cfg.structure_type == "bull_call_spread"
         head = u_rows[0]
 
         u = {
@@ -552,7 +632,10 @@ class OptionsBot:
             "ivp_pct": _ivp_pct(head),
             "change_pct": _change_pct(head),   # fraction → percent (verified live)
         }
-        if not passes_entry_gate(u, cfg):
+        # D-05: a bull call's entry gate is watchlist membership + the
+        # debit/liquidity/DTE gates below — the IV-regime gate does not apply
+        # to a debit structure (ivr_at_entry is still recorded when present).
+        if not is_debit and not passes_entry_gate(u, cfg):
             return None
 
         expiries = sorted({
@@ -572,9 +655,19 @@ class OptionsBot:
         if sel is None:
             return None
 
-        qty = size_position(sel["width"], sel["credit"], cfg, open_max_loss_total)
-        if qty < 1:
-            return None
+        if is_debit:
+            debit = sel["debit"]
+            qty = size_debit_position(debit, cfg, open_max_loss_total)
+            if qty < 1:
+                return None
+            credit_per_spread = -debit                                    # D-19
+            max_loss_usd = debit * _CONTRACT_MULTIPLIER * qty
+        else:
+            qty = size_position(sel["width"], sel["credit"], cfg, open_max_loss_total)
+            if qty < 1:
+                return None
+            credit_per_spread = sel["credit"]
+            max_loss_usd = (sel["width"] - sel["credit"]) * _CONTRACT_MULTIPLIER * qty
 
         position_id = uuid4().hex
         pos = {
@@ -584,12 +677,13 @@ class OptionsBot:
             "expiry": exp.isoformat(),
             "dte_at_entry": option_dte(exp, today),
             "ivr_at_entry": u["ivr_pct"],
-            "credit_per_spread": sel["credit"],
+            "credit_per_spread": credit_per_spread,
             "width": sel["width"],
             "qty": qty,
-            "max_loss_usd": (sel["width"] - sel["credit"]) * _CONTRACT_MULTIPLIER * qty,
+            "max_loss_usd": max_loss_usd,
             "status": "OPENING",
             "opened_at": now_et().isoformat(),
+            "strategy_name": cfg.name,
         }
         self._store.insert_option_position(pos)
 
@@ -651,8 +745,9 @@ class OptionsBot:
             "structure": pos["structure"],
             "expiry": pos["expiry"],
             "qty": qty,
-            "credit_per_spread": sel["credit"],
+            "credit_per_spread": pos["credit_per_spread"],
             "max_loss_usd": pos["max_loss_usd"],
+            "strategy_name": cfg.name,
         })
         return pos
 
