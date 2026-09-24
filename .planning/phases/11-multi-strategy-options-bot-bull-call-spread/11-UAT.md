@@ -3,7 +3,7 @@ status: testing
 phase: 11-multi-strategy-options-bot-bull-call-spread
 source: [11-VERIFICATION.md]
 started: 2026-09-24T17:10:54Z
-updated: 2026-09-24T17:10:54Z
+updated: 2026-09-24T21:45:00Z
 ---
 
 ## Current Test
@@ -29,12 +29,20 @@ result: [pending]
 expected: A recorded decision — either a follow-up gap-closure plan (e.g. 11-08: propagate close_legs' unwind result out of open_position; a failed unwind lands NEEDS_ATTENTION + alert instead of ABORTED "legs unwound") is scheduled, or the residual risk (an entry-unwind failure can strand live legs outside BP/busy/reconcile visibility) is explicitly accepted
 result: pass — operator decision 2026-09-24: schedule gap-closure plan 11-08 covering CR-02 + WR-06 + WR-07 (11-08-PLAN.md)
 
+### 3. Developer decision on CR-03 (fill_leg leaves the working order live when a status poll raises)
+expected: A recorded decision — schedule a follow-up gap-closure plan (e.g. 11-09: fill_leg cancels its working order on any exception after place_order; the UNWIND INCOMPLETE / close-error alerts warn that a bot-placed order may still be working) before relying on the "close manually" alert unattended, or explicitly accept the residual risk
+result: [pending]
+
+### 4. Developer decision on WR-10 / WR-11 (near-expiry escalation gaps introduced by 11-08)
+expected: A recorded decision — fold into the same follow-up plan (WR-10: expiry-day escalation must not depend on one skippable APScheduler cycle; WR-11: a persistent snapshot outage must eventually count/alert), defer explicitly, or accept
+result: [pending]
+
 ## Summary
 
-total: 2
+total: 4
 passed: 1
 issues: 0
-pending: 1
+pending: 3
 skipped: 0
 blocked: 0
 
