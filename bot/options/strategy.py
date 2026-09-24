@@ -316,6 +316,48 @@ def manage_decision(mark, credit, dte, cfg) -> Optional[str]:
     return None
 
 
+def manage_decision_debit(mark, debit, width, dte, cfg) -> Optional[str]:
+    """Return the exit reason for an open bull call spread, or None to hold.
+
+    mark_spread returns SELL-mid minus BUY-mid, which is negative for a debit
+    position (the long call costs more than the short call is worth back).
+    -mark is therefore this spread's current value, and profit = -mark - debit.
+    This function is the ONLY place that sign flip happens — mark_spread
+    itself is unchanged and used identically by both the credit and debit
+    sides.
+
+    Args:
+        mark:  mark_spread(legs, quotes) for [BUY long call, SELL short call].
+        debit: what was paid to open (== -credit_per_spread in the signed
+               net-premium convention the store uses, D-19).
+        width: short strike - long strike.
+        dte:   days to the shared expiry.
+        cfg:   OptionsConfig (debit fields: profit_target_pct_of_max,
+               manage_dte, assignment_guard_dte).
+
+    Evaluated strictly in this order, first hit wins:
+      1. "assignment_guard" — dte <= cfg.assignment_guard_dte. Same pin/
+         assignment risk as the credit side, outranks everything.
+      2. "profit_target"    — (-mark - debit) >= cfg.profit_target_pct_of_max
+         / 100 * (width - debit), i.e. captured >= that percent of the
+         spread's max profit.
+      3. "dte_exit"         — only when cfg.manage_dte is not None (a debit
+         config may leave it unset and rely on profit_target/assignment_guard
+         alone as the only exits).
+
+    There is deliberately NO stop-loss branch: "position for zero" — sizing
+    the max loss up front (size_debit_position) IS the risk control here, not
+    a mark-based exit.
+    """
+    if dte <= cfg.assignment_guard_dte:
+        return "assignment_guard"
+    if -mark - debit >= cfg.profit_target_pct_of_max / 100 * (width - debit):
+        return "profit_target"
+    if cfg.manage_dte is not None and dte <= cfg.manage_dte:
+        return "dte_exit"
+    return None
+
+
 # ============================================================
 # Internal helpers
 # ============================================================

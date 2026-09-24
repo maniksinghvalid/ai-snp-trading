@@ -22,6 +22,7 @@ from bot.options.strategy import (
     is_monthly_expiry,
     leg_is_liquid,
     manage_decision,
+    manage_decision_debit,
     mark_spread,
     option_dte,
     passes_entry_gate,
@@ -766,3 +767,53 @@ class TestManageDecision:
         cfg = replace(options_cfg, profit_target_pct_of_credit=25)
         assert manage_decision(mark=0.55, credit=0.60, dte=40, cfg=options_cfg) is None
         assert manage_decision(mark=0.40, credit=0.60, dte=40, cfg=cfg) == "profit_target"
+
+
+# ============================================================
+# manage_decision_debit
+# ============================================================
+
+class TestManageDecisionDebit:
+    """Assignment guard > profit target of max > optional DTE exit; no stop."""
+
+    def test_manage_decision_debit_holds_at_entry(self, bull_cfg):
+        assert manage_decision_debit(mark=-1.96, debit=1.96, width=10.0, dte=30, cfg=bull_cfg) is None
+
+    def test_manage_decision_debit_profit_target_nvda(self, bull_cfg):
+        """profit 4.84 >= 0.60 x 8.04 = 4.824."""
+        assert manage_decision_debit(mark=-6.80, debit=1.96, width=10.0, dte=30, cfg=bull_cfg) == "profit_target"
+
+    def test_manage_decision_debit_just_below_target_holds(self, bull_cfg):
+        assert manage_decision_debit(mark=-6.78, debit=1.96, width=10.0, dte=30, cfg=bull_cfg) is None
+
+    def test_manage_decision_debit_has_no_stop_loss(self, bull_cfg):
+        """Spread nearly worthless (a near-total loss) still just holds."""
+        assert manage_decision_debit(mark=-0.05, debit=1.96, width=10.0, dte=30, cfg=bull_cfg) is None
+
+    def test_manage_decision_debit_assignment_guard_first(self, bull_cfg):
+        """dte 1 fires the guard even though the mark is deep in profit."""
+        assert manage_decision_debit(mark=-9.0, debit=1.96, width=10.0, dte=1, cfg=bull_cfg) == "assignment_guard"
+
+    def test_manage_decision_debit_dte_exit_only_when_set(self, bull_cfg):
+        assert manage_decision_debit(mark=-1.96, debit=1.96, width=10.0, dte=5, cfg=bull_cfg) is None
+
+        cfg = SimpleNamespace(**{**vars(bull_cfg), "manage_dte": 21})
+        assert manage_decision_debit(mark=-1.96, debit=1.96, width=10.0, dte=21, cfg=cfg) == "dte_exit"
+        assert manage_decision_debit(mark=-6.80, debit=1.96, width=10.0, dte=21, cfg=cfg) == "profit_target"
+
+    def test_manage_decision_debit_target_is_config_driven(self, bull_cfg):
+        """4.04 >= 0.50 x 8.04 = 4.02."""
+        cfg = SimpleNamespace(**{**vars(bull_cfg), "profit_target_pct_of_max": 50})
+        assert manage_decision_debit(mark=-6.0, debit=1.96, width=10.0, dte=30, cfg=cfg) == "profit_target"
+
+    def test_manage_decision_debit_sign_handled_once_with_mark_spread(self, bull_cfg):
+        legs = [
+            {"code": "US.NVDA225C", "side": "BUY"},
+            {"code": "US.NVDA235C", "side": "SELL"},
+        ]
+        quotes = {
+            "US.NVDA225C": {"bid": 7.95, "ask": 8.05},
+            "US.NVDA235C": {"bid": 1.15, "ask": 1.25},
+        }
+        mark = mark_spread(legs, quotes)
+        assert manage_decision_debit(mark, debit=1.96, width=10.0, dte=30, cfg=bull_cfg) == "profit_target"
