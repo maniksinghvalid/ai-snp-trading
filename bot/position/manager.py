@@ -38,6 +38,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional
 
+from bot.execution.engine import CancelUnconfirmedError
 from bot.execution.events import FillEvent
 from bot.position.state import (
     PositionPhase,
@@ -1276,6 +1277,11 @@ class PositionManager:
         (D-07 / CFG-01) and (P1-B) returns the qty-weighted average fill price
         alongside the quantity. Returns (0, 0.0) on exception (Assumption A2:
         manage_exit returning 0 filled is valid — no fill occurred).
+
+        CR-04 (260925-ho6): manage_exit raises CancelUnconfirmedError when a
+        cancel_order failure could not be confirmed dead — exc.filled_qty/
+        avg_price are credited directly instead of falling through to the
+        generic (0, 0.0) path below.
         """
         try:
             from moomoo import TrdSide
@@ -1294,6 +1300,11 @@ class PositionManager:
                 ttl=self._cfg.exit_ttl_seconds,
             )
             return int(filled_qty), float(avg_price)
+        except CancelUnconfirmedError as exc:
+            # Confirmed-sold shares are a lower bound, so remaining is never
+            # understated; the engine's exit hold blocks any further SELL for
+            # this code until restart.
+            return int(exc.filled_qty), float(exc.avg_price)
         except Exception:
             _logger.warning("place_exit_order_error", code=code, qty=qty, exc_info=True)
             return 0, 0.0
