@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: "Completed 11-08-PLAN.md (gap closure: CR-02 incomplete-unwind NEEDS_ATTENTION, WR-06 near-expiry streak/final-cycle escalation, WR-07 _quote_markable width gate; 1330 passed 1 skipped)"
-last_updated: "2026-09-25T16:33:15.742Z"
-last_activity: "2026-09-24 -- Phase 11 plan 08 (gap closure: CR-02/WR-06/WR-07) complete"
+status: executing
+stopped_at: "Completed 11-09-PLAN.md (final gap closure: CR-03 fill_leg cancels its working order on any exception, WR-10 one-time expiry-day warning, WR-11 process-level snapshot-outage alert, IN-08 session-scoped miss streak; 1345 passed 1 skipped)"
+last_updated: "2026-09-25T17:04:30.354Z"
+last_activity: "2026-09-25 -- Phase 11 plan 09 (final gap closure: CR-03/WR-10/WR-11/IN-08) complete"
 progress:
   total_phases: 13
   completed_phases: 12
-  total_plans: 62
-  completed_plans: 63
+  total_plans: 64
+  completed_plans: 65
   percent: 92
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 ## Current Position
 
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
-Plan: 8 of 8
+Plan: 9 of 9
 Status: Complete
-Last activity: 2026-09-24 -- Phase 11 plan 08 (gap closure: CR-02/WR-06/WR-07) complete
+Last activity: 2026-09-25 -- Phase 11 plan 09 (final gap closure: CR-03/WR-10/WR-11/IN-08) complete
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -89,6 +89,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11-multi-strategy-options-bot-bull-call-spread P06 | 14min | 2 tasks | 2 files |
 | Phase 11 P07 | 20min | 3 tasks | 4 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P08 | 25min | 3 tasks | 5 files |
+| Phase 11-multi-strategy-options-bot-bull-call-spread P09 | 15min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -207,6 +208,12 @@ Recent decisions affecting current work:
 - [Phase 11-08]: CR-02: open_position returns None if unwound else False; _try_open returns pos (not a new dict) on the False branch so the SAME scan's BP/busy/concurrent-cap accounting counts the live exposure immediately
 - [Phase 11-08]: WR-06: escalate at 3 consecutive counted bad-quote manage cycles inside the guard window, or on the expiry session's final manage cycle; a snapshot-outage chunk never counts
 - [Phase 11-08]: WR-07: _quote_markable = ask-bid <= max(0.5*mid, $0.10); bid=0 accepted only when ask<=$0.10 (not a literal bid>0), so a legitimate far-OTM 0.00/0.05 wing is never stranded; gate = _quote_ok if in_guard else _quote_markable supersedes 11-07's hardcoded _quote_ok call site
+- [Phase 11-09]: CR-03: fill_leg's per-attempt try wraps everything after place_order; except GeneratorExit re-raises untouched, except BaseException shields cancel_order(order_id) then re-raises the ORIGINAL exception (never a return value) -- a partial fill before the exception is unknown exposure the caller must escalate
+- [Phase 11-09]: CR-03: no order ids added to the three hand-off alerts (not cheaply available; the unwind's close_legs runs with no callbacks) -- the leg_cancel_on_error_failed audit event carries the only order id that can still be working
+- [Phase 11-09]: WR-10: one-time _warn_expiry_unmanaged on the FIRST expiry-day manage cycle that cannot manage a position (guarded by self._expiry_warned), not a widened final-cycle window -- holds even when APScheduler drops the final fire; no new NEEDS_ATTENTION path
+- [Phase 11-09]: IN-08: self._quote_miss_streak now stores (ET session date, count) so a day-before-expiry streak can no longer make the first expiry-day miss escalate
+- [Phase 11-09]: WR-11: self._snapshot_outage_cycles is a process-level counter (reuses _QUOTE_MISS_ESCALATE_CYCLES, no new knob) that alerts once per episode and re-arms on any clean cycle -- corrects 11-08's T-11-46 rationale (OpenDWatchdog only polls get_global_state, cannot see a quote-rights/whole-batch snapshot failure while connected)
+- [Phase 11-09]: Phase 11 gap-closure loop CLOSED per operator scope (2026-09-25): CR-03 + WR-10 + WR-11 + IN-08 were the last four findings from 11-REVIEW.md @06b6787; residual T-11-56 (shutdown-order cancel failure) and T-11-57 (late-restart inside the last manage interval) accepted, not fixed
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -247,6 +254,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24T20:04:14.649Z
-Stopped at: Completed 11-08-PLAN.md (gap closure: CR-02 incomplete-unwind NEEDS_ATTENTION, WR-06 near-expiry streak/final-cycle escalation, WR-07 _quote_markable width gate; 1330 passed 1 skipped)
+Last session: 2026-09-25T17:04:30.354Z
+Stopped at: Completed 11-09-PLAN.md (final gap closure: CR-03 fill_leg cancels its working order on any exception, WR-10 one-time expiry-day warning, WR-11 process-level snapshot-outage alert, IN-08 session-scoped miss streak; 1345 passed 1 skipped)
 Resume file: None
