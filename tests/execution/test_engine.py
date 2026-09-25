@@ -77,6 +77,27 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _unfilled_status_for(gw):
+    """Build a realistic get_order_status side_effect for a never-filled order.
+
+    quick 260925-inw: the engine now re-reads after EVERY TTL cancel, not
+    only a failed one. order_list_query always returns a row for a just-
+    cancelled order (an empty result is anomalous, not the normal case) --
+    so a mock gateway that returns `[]` unconditionally is unrealistic and
+    would make the post-cancel re-read look like a failure. This returns a
+    one-row, dealt_qty=0 status: CANCELLED_ALL once gw.cancel_order has been
+    awaited for that order_id, SUBMITTED otherwise.
+    """
+    def _status(order_id=""):
+        cancelled_ids = [str(c.args[0]) for c in gw.cancel_order.await_args_list]
+        status = "CANCELLED_ALL" if str(order_id) in cancelled_ids else "SUBMITTED"
+        return [{
+            "order_id": order_id, "order_status": status,
+            "dealt_qty": 0, "dealt_avg_price": 0.0,
+        }]
+    return _status
+
+
 # ============================================================
 # test_entry_placed_simulate — manual-only live test (pytest.skip)
 # ============================================================
@@ -250,7 +271,11 @@ def test_ttl_cancel_replace():
                     "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
                 }
             ]
-        return []
+        # quick 260925-inw: the post-cancel re-read now also runs after a
+        # SUCCESSFUL cancel (site 2). A bare `[]` here would look like a
+        # failed re-read and wrongly escalate -- use the realistic
+        # never-filled-order stub instead.
+        return _unfilled_status_for(gw1)(order_id)
 
     gw1 = MagicMock()
     gw1.get_ask_price = AsyncMock(return_value=182.55)
@@ -276,12 +301,14 @@ def test_ttl_cancel_replace():
     # ----------------------------------------------------------------
     gw2 = MagicMock()
     gw2.get_ask_price = AsyncMock(return_value=182.55)
-    gw2.get_order_status = AsyncMock(return_value=[])   # never shows a fill (dealt_qty always 0)
+    gw2.cancel_order = AsyncMock()
+    # never shows a fill (dealt_qty always 0); quick 260925-inw: realistic
+    # post-cancel re-read stub (see _unfilled_status_for docstring)
+    gw2.get_order_status = AsyncMock(side_effect=_unfilled_status_for(gw2))
     # Provide enough order_id values for all retry iterations
     gw2.place_order = AsyncMock(side_effect=[
         "S2-O-1", "S2-O-2", "S2-O-3", "S2-O-4", "S2-O-5",
     ])
-    gw2.cancel_order = AsyncMock()
 
     store2 = _make_mock_store()
     engine2 = ExecutionEngine(gateway=gw2, store=store2, cfg=cfg)
@@ -307,9 +334,10 @@ def test_ttl_cancel_replace():
 
     gw3 = MagicMock()
     gw3.get_ask_price = AsyncMock(return_value=182.55)
-    gw3.get_order_status = AsyncMock(return_value=[])   # never shows a fill
     gw3.place_order = mock_place_s3
     gw3.cancel_order = AsyncMock()
+    # never shows a fill; quick 260925-inw: realistic post-cancel re-read stub
+    gw3.get_order_status = AsyncMock(side_effect=_unfilled_status_for(gw3))
 
     store3 = _make_mock_store()
     engine3 = ExecutionEngine(gateway=gw3, store=store3, cfg=cfg3)
@@ -1763,8 +1791,9 @@ def test_max_entry_chase_r_abandons_at_reprice_not_initial_placement():
     # Second call (mid-loop re-price): 184.50 + 0.05 = 184.55 > 183.82 -- abandon.
     gw.get_ask_price = AsyncMock(side_effect=[183.00, 184.50])
     gw.place_order = AsyncMock(return_value="ORDER-001")
-    gw.get_order_status = AsyncMock(return_value=[])  # never fills within TTL
     gw.cancel_order = AsyncMock()
+    # never fills within TTL; quick 260925-inw: realistic post-cancel re-read stub
+    gw.get_order_status = AsyncMock(side_effect=_unfilled_status_for(gw))
 
     store = _make_mock_store()
     engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)

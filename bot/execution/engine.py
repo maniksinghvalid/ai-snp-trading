@@ -24,7 +24,9 @@ Safety invariants (never violated):
   - Partial entry accepted as position (D-06): cancel remainder, emit FillEvent.
   - Unconfirmed cancel (CR-04 parity): if cancel_order raises and a re-read does
     not show the order filled or terminal, escalate and raise CancelUnconfirmedError
-    — never place the next order or book a still-growing qty as final.
+    — never place the next order or book a still-growing qty as final. The
+    TTL-cancel sites also re-read after a SUCCESSFUL cancel, so a partial fill in
+    the cancel window is booked, and a failed re-read escalates (260925-inw).
 
 Usage:
     engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
@@ -337,7 +339,8 @@ class ExecutionEngine:
     # --------------------------------------------------------
 
     async def _reread_order(self, order_id) -> Optional[dict]:
-        """Re-read one order's status after a failed cancel_order (CR-04 D2).
+        """Re-read one order's status after a failed cancel_order, AND after a
+        successful TTL cancel (sites 2/4, 260925-inw) (CR-04 D2).
 
         Returns the first row whose order_id matches, or None on a failed
         re-read (get_order_status raising) or no matching row -- both count
@@ -484,7 +487,8 @@ class ExecutionEngine:
 
         Raises:
             CancelUnconfirmedError: CR-04 parity (sites 1/2) -- cancel_order
-                raised and a re-read cannot confirm the order is dead.
+                raised and a re-read cannot confirm the order is dead, or a
+                successful TTL cancel whose re-read fails (260925-inw).
         """
         # D-04: price at/through current ask + buffer
         try:
@@ -599,27 +603,44 @@ class ExecutionEngine:
                 cancel_err = exc
 
             fill_event = None
-            if cancel_err is not None:
-                # CR-04 site 2: cancel failed -- re-read before trusting the
-                # order is dead. dealt=0 keeps the pre-fix "no fill" semantics
-                # when the re-read itself fails or returns no match.
-                row = await self._reread_order(order_id)
-                dealt = int(row.get("dealt_qty", 0) or 0) if row is not None else 0
-                row_avg = float(row.get("dealt_avg_price", 0.0) or 0.0) if row is not None else 0.0
-                if dealt > 0:
-                    fill_event = self._emit_entry_fill(intent, order_id, dealt, row_avg)
-                if not _cancel_confirmed(row, intent.quantity):
-                    # Unconfirmed -- never place the next attempt or abandon.
-                    await self._escalate_unconfirmed_cancel(
-                        cancel_err, code=intent.code, order_id=order_id, side="BUY",
-                        dealt_qty=dealt, qty=intent.quantity,
-                        filled_qty=dealt, avg_price=row_avg, fill=fill_event,
-                    )
-                if fill_event is not None:
-                    # Confirmed cancel, but a fill landed during the cancel
-                    # window -- previously silently dropped (a second BUY was
-                    # re-placed on top of it).
-                    return fill_event
+            # CR-04 site 2 (+ quick 260925-inw): re-read after EVERY TTL
+            # cancel, not only a failed one.
+            #   (a) A partial fill can land between the last poll and the
+            #       cancel (CANCELLED_PART, dealt_qty > 0) even when
+            #       cancel_order itself reports success -- previously
+            #       dropped under a re-placed full-size BUY.
+            #   (b) If the re-read fails on the success path too (raises, or
+            #       no matching row), the cancel is confirmed but the filled
+            #       qty is unknown, so treat it as unconfirmed (ho6 D2).
+            #       order_list_query returns today's cancelled orders, so an
+            #       empty result is anomalous.
+            #   (c) The success path deliberately skips the _cancel_confirmed
+            #       status check -- a successful cancel is trusted, and
+            #       escalating on a transient non-terminal status would halt
+            #       every normal re-price.
+            #   (d) Rate budget: this adds ONE order_list_query per TTL
+            #       expiry. The gateway cap is 10 calls/30s (RATE-01 retries
+            #       on the cap); paper account 1727266 is shared with the
+            #       options bot. With rules.json today (entry poll 5s over a
+            #       20s TTL) that is about 4 polls + 1 re-read per attempt.
+            row = await self._reread_order(order_id)
+            dealt = int(row.get("dealt_qty", 0) or 0) if row is not None else 0
+            row_avg = float(row.get("dealt_avg_price", 0.0) or 0.0) if row is not None else 0.0
+            if dealt > 0:
+                fill_event = self._emit_entry_fill(intent, order_id, dealt, row_avg)
+            if row is None or (cancel_err is not None and not _cancel_confirmed(row, intent.quantity)):
+                # Unconfirmed -- never place the next attempt or abandon.
+                await self._escalate_unconfirmed_cancel(
+                    cancel_err or "post-cancel re-read failed",
+                    code=intent.code, order_id=order_id, side="BUY",
+                    dealt_qty=dealt, qty=intent.quantity,
+                    filled_qty=dealt, avg_price=row_avg, fill=fill_event,
+                )
+            if fill_event is not None:
+                # Confirmed cancel, but a fill landed during the cancel
+                # window -- previously silently dropped (a second BUY was
+                # re-placed on top of it).
+                return fill_event
 
             _logger.info("entry_ttl_expired", order_id=order_id, attempt=attempt)
 
@@ -726,7 +747,8 @@ class ExecutionEngine:
 
         Raises:
             CancelUnconfirmedError: CR-04 parity (sites 3/4) -- cancel_order
-                raised and a re-read cannot confirm the order is dead. Also
+                raised and a re-read cannot confirm the order is dead, or a
+                successful TTL cancel whose re-read fails (260925-inw). Also
                 raised immediately (D5) when `code` is currently held after an
                 earlier unconfirmed cancel -- no order is placed in that case.
         """
@@ -881,36 +903,42 @@ class ExecutionEngine:
                 except Exception as exc:
                     cancel_err = exc
 
-                if cancel_err is not None:
-                    # CR-04 site 4: cancel failed -- re-read before trusting
-                    # the order is dead; credit any dealt qty as a lower bound.
-                    row = await self._reread_order(order_id)
-                    dealt = int(row.get("dealt_qty", 0) or 0) if row is not None else 0
-                    dealt_price = float(row.get("dealt_avg_price", 0.0) or 0.0) if row is not None else 0.0
-                    if dealt > 0:
-                        total_filled += dealt
-                        total_notional += dealt * dealt_price
-                        remaining = qty - total_filled
-                        append_audit({
-                            "event": "exit_fill_detected",
-                            "code": code,
-                            "order_id": order_id,
-                            "filled_this_round": dealt,
-                            "remaining": remaining,
-                        })
-                        _logger.info("exit_fill_detected", code=code, order_id=order_id,
-                                     filled=dealt, remaining=remaining)
+                # CR-04 site 4 (+ quick 260925-inw): re-read after EVERY TTL
+                # cancel, not only a failed one -- see the site 2 comment in
+                # _manage_entry_order for the full rationale and the rate
+                # budget (here: one order_list_query per TTL expiry, exit
+                # cadence 10s over a 15s TTL). A fill that completes during a
+                # SUCCESSFUL cancel is credited before sizing the next SELL;
+                # a failed re-read escalates and sets the D5 exit hold, so no
+                # later SELL can over-sell into a short.
+                row = await self._reread_order(order_id)
+                dealt = int(row.get("dealt_qty", 0) or 0) if row is not None else 0
+                dealt_price = float(row.get("dealt_avg_price", 0.0) or 0.0) if row is not None else 0.0
+                if dealt > 0:
+                    total_filled += dealt
+                    total_notional += dealt * dealt_price
+                    remaining = qty - total_filled
+                    append_audit({
+                        "event": "exit_fill_detected",
+                        "code": code,
+                        "order_id": order_id,
+                        "filled_this_round": dealt,
+                        "remaining": remaining,
+                    })
+                    _logger.info("exit_fill_detected", code=code, order_id=order_id,
+                                 filled=dealt, remaining=remaining)
 
-                    if not _cancel_confirmed(row, order_qty):
-                        avg_price = total_notional / total_filled if total_filled > 0 else 0.0
-                        await self._escalate_unconfirmed_cancel(
-                            cancel_err, code=code, order_id=order_id, side="SELL",
-                            dealt_qty=dealt, qty=order_qty,
-                            filled_qty=total_filled, avg_price=avg_price,
-                        )
+                if row is None or (cancel_err is not None and not _cancel_confirmed(row, order_qty)):
+                    avg_price = total_notional / total_filled if total_filled > 0 else 0.0
+                    await self._escalate_unconfirmed_cancel(
+                        cancel_err or "post-cancel re-read failed",
+                        code=code, order_id=order_id, side="SELL",
+                        dealt_qty=dealt, qty=order_qty,
+                        filled_qty=total_filled, avg_price=avg_price,
+                    )
 
-                    if remaining <= 0:
-                        break
+                if remaining <= 0:
+                    break
 
                 escalation_rounds += 1
                 # Finding 2.4: fall back to the last known bid_price on failure.
