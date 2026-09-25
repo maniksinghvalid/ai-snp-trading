@@ -1715,6 +1715,83 @@ def test_manage_guard_window_closes_despite_one_sided_far_otm_wing(
 
 
 # ============================================================
+# CR-03: a fill_leg exception never leaves a working order; every hand-off
+# alert warns about working orders
+# ============================================================
+
+def test_manage_close_poll_error_cancels_the_order_and_flags_needs_attention(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    """End-to-end (b) proof with the REAL LegExecutor: a failed status poll
+    during the close must cancel the resting order, never book CLOSED."""
+    from types import SimpleNamespace
+    from bot.options.execution import LegExecutor
+
+    _freeze(monkeypatch, SESSION_NOON)
+    _seed_open_spread(store, "P1", qty=2, expiry=EXPIRY, credit_per_spread=2.0)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+    _snapshot(gateway, {SHORT_P: {"bid": 0.55, "ask": 0.65},
+                        LONG_P: {"bid": 0.15, "ask": 0.25}})
+    gateway.place_order = AsyncMock(return_value="X1")
+    gateway.cancel_order = AsyncMock()
+    gateway.get_order_status = AsyncMock(
+        side_effect=RuntimeError("order_list_query rate limit persists")
+    )
+    bot = make_bot()
+    bot._executor = LegExecutor(gateway, SimpleNamespace(
+        limit_buffer_usd=0.02, poll_interval_s=0.01, ttl_s=0.05,
+        escalation_step_usd=0.03, max_retries=2,
+    ))
+
+    _run(bot._job_manage())
+
+    assert _statuses(store, "NEEDS_ATTENTION") == ["P1"]
+    assert store.get_option_positions(("CLOSED",)) == []
+    assert [c.args[0] for c in gateway.place_order.call_args_list] == [SHORT_P]
+    assert [c.args[0] for c in gateway.cancel_order.await_args_list] == ["X1"]
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "close incomplete" in body
+    assert SHORT_P in body
+    assert LONG_P in body
+    assert "cancel any working orders" in body
+
+
+def test_incomplete_unwind_alert_warns_about_working_orders(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = MagicMock(
+        open_position=AsyncMock(return_value=False), close_legs=AsyncMock(),
+    )
+
+    _run(bot._job_entry_scan())
+
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "UNWIND INCOMPLETE" in body
+    assert "cancel any working orders" in body
+
+
+@pytest.mark.parametrize("status", ["OPENING", "CLOSING"])
+def test_reconcile_restart_alert_warns_about_working_orders(
+    make_bot, store, gateway, alerter, status,
+):
+    _seed_open_spread(store, status=status)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+
+    _run(make_bot().reconcile(startup=True))
+
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert f"restarted mid-{status.lower()}" in body
+    assert SHORT_P in body
+    assert LONG_P in body
+    assert "cancel any working orders" in body
+
+
+# ============================================================
 # EOD
 # ============================================================
 

@@ -199,6 +199,94 @@ def test_unknown_order_id_rows_are_ignored():
 
 
 # ============================================================
+# fill_leg — CR-03: no working order is left behind on an exception
+# ============================================================
+
+@pytest.mark.parametrize("case", ["poll_raises", "poll_raises_after_partial", "on_placed_raises"])
+def test_fill_leg_cancels_working_order_when_an_await_raises(monkeypatch, case):
+    from bot.options import execution as execution_module
+    log = MagicMock()
+    monkeypatch.setattr(execution_module, "_logger", log)
+
+    gw = _gw()
+    on_placed = None
+    qty = 1
+
+    if case == "poll_raises":
+        gw.get_order_status = AsyncMock(side_effect=RuntimeError("poll failed"))
+    elif case == "poll_raises_after_partial":
+        qty = 2
+        polls = itertools.count()
+
+        def _status(oid):
+            if next(polls) == 0:
+                return [_row(oid, 1, 2)]
+            raise RuntimeError("poll failed")
+
+        gw.get_order_status = AsyncMock(side_effect=_status)
+    else:  # on_placed_raises
+        async def on_placed(order_id):
+            raise RuntimeError("persist failed")
+
+    with pytest.raises(RuntimeError):
+        _run(LegExecutor(gw, _cfg()).fill_leg(
+            SHORT, "SELL", qty, 2.00, 2.10, on_placed=on_placed,
+        ))
+
+    assert gw.place_order.await_count == 1
+    assert [c.args for c in gw.cancel_order.await_args_list] == [("O1",)]
+    log.warning.assert_any_call(
+        "leg_cancelled_on_error", code=SHORT, side="SELL", order_id="O1",
+    )
+
+
+def test_fill_leg_cancels_working_order_on_task_cancellation():
+    gw = _gw()
+
+    async def scenario():
+        polled = asyncio.Event()
+
+        async def _blocked(oid):
+            polled.set()
+            await asyncio.Event().wait()
+
+        gw.get_order_status = AsyncMock(side_effect=_blocked)
+
+        task = asyncio.create_task(
+            LegExecutor(gw, _cfg()).fill_leg(SHORT, "SELL", 1, 2.00, 2.10)
+        )
+        await polled.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+    assert [c.args for c in gw.cancel_order.await_args_list] == [("O1",)]
+
+
+def test_fill_leg_cancel_failure_on_error_is_logged_audited_and_original_raised(monkeypatch):
+    from bot.options import execution as execution_module
+    log = MagicMock()
+    monkeypatch.setattr(execution_module, "_logger", log)
+    audit = []
+    monkeypatch.setattr(execution_module, "append_audit", audit.append)
+
+    gw = _gw()
+    gw.get_order_status = AsyncMock(side_effect=RuntimeError("poll failed"))
+    gw.cancel_order = AsyncMock(side_effect=RuntimeError("cancel failed"))
+
+    with pytest.raises(RuntimeError, match="poll failed"):
+        _run(LegExecutor(gw, _cfg()).fill_leg(SHORT, "SELL", 1, 2.00, 2.10))
+
+    log.error.assert_any_call(
+        "leg_cancel_on_error_failed", code=SHORT, side="SELL", order_id="O1", exc_info=True,
+    )
+    assert audit == [{
+        "event": "leg_cancel_on_error_failed", "code": SHORT, "side": "SELL", "order_id": "O1",
+    }]
+
+
+# ============================================================
 # open_position
 # ============================================================
 
@@ -350,6 +438,38 @@ def test_open_position_incomplete_unwind_returns_false(monkeypatch, case):
 
     if case == "unwind_raises":
         assert log.error.call_args_list[0].args[0] == "open_position_unwind_error"
+
+
+def test_unwind_poll_error_cancels_the_unwind_order(monkeypatch):
+    """CR-03: the reviewer's repro_unwind_resting.py. The wing (O1) fills; the
+    short (O2-O4) never does, so open_position unwinds by selling the wing
+    back (O5) aggressively. Once the rate limit kicks in, every poll after
+    O1's fails, so the unwind's own order (O5) must be cancelled too."""
+    from bot.options import execution as execution_module
+    audit = []
+    monkeypatch.setattr(execution_module, "append_audit", audit.append)
+
+    gw = _gw()
+
+    def _status(oid):
+        if oid == "O1":
+            return [_row(oid, 1, 1)]
+        if oid in ("O2", "O3", "O4"):
+            return [_row(oid, 0, 1)]
+        raise RuntimeError("order_list_query rate limit persists")
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    result = _run(LegExecutor(gw, _cfg()).open_position(_legs(), 1, QUOTES))
+
+    assert result is False
+    assert [c.args[0] for c in gw.place_order.call_args_list] == [
+        WING, SHORT, SHORT, SHORT, WING,
+    ]
+    assert [c.args[0] for c in gw.cancel_order.await_args_list] == ["O2", "O3", "O4", "O5"]
+    unwound_events = [e for e in audit if e["event"] == "open_position_unwound"]
+    assert len(unwound_events) == 1
+    assert unwound_events[0]["complete"] is False
 
 
 # ============================================================

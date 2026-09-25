@@ -91,6 +91,11 @@ _CONTRACT_MULTIPLIER = 100
 
 _ACTIVE_STATUSES = ("OPENING", "OPEN", "CLOSING", "NEEDS_ATTENTION")
 
+# Appended to every alert that hands legs to the operator mid-order (CR-03).
+# fill_leg cancels its own order on an exception, but a failed cancel (OpenD
+# down, or the gateway already closed at shutdown) can leave it working.
+_WORKING_ORDERS_HINT = "cancel any working orders on these codes in moomoo before closing manually."
+
 # Inside the assignment-guard window, only this many CONSECUTIVE manage cycles
 # with an unusable per-position quote hand a position to the operator (WR-06).
 # At the 5-minute manage interval that is 10 minutes after the first counted
@@ -510,9 +515,11 @@ class OptionsBot:
 
             if startup and status in ("OPENING", "CLOSING"):
                 self._store.set_position_status(pid, "NEEDS_ATTENTION")
+                codes = [leg["code"] for leg in legs]
                 await self._alerter.send(
                     f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
-                    f"restarted mid-{_esc(str(status).lower())}; close manually."
+                    f"restarted mid-{_esc(str(status).lower())} "
+                    f"({_esc(', '.join(codes))}); {_WORKING_ORDERS_HINT}"
                 )
                 append_audit({
                     "event": "options_reconcile_incomplete",
@@ -909,7 +916,7 @@ class OptionsBot:
             await self._alerter.send(
                 f"<b>Options NEEDS ATTENTION</b> {_esc(code)} — {_esc(cfg.name)} entry "
                 f"failed; UNWIND INCOMPLETE — legs still open ({_esc(', '.join(codes))}); "
-                f"close manually."
+                f"{_WORKING_ORDERS_HINT}"
             )
             append_audit({
                 "event": "options_entry_unwind_incomplete",
@@ -1163,7 +1170,8 @@ class OptionsBot:
             self._store.set_position_status(pid, "NEEDS_ATTENTION")
             await self._alerter.send(
                 f"<b>Options NEEDS ATTENTION</b> {_esc(pos.get('underlying'))} — "
-                f"close incomplete — check the account."
+                f"close incomplete ({_esc(', '.join(leg['code'] for leg in legs))}) — "
+                f"check the account; {_WORKING_ORDERS_HINT}"
             )
             append_audit({
                 "event": "options_close_incomplete",

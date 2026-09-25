@@ -6,7 +6,8 @@ Moomoo's API has no multi-leg/combo order for paper accounts, so a spread is
 placed as sequential single-leg LIMIT orders. This module owns that loop:
 
   fill_leg      — mid-anchored limit, polled to a TTL, escalated toward and then
-                  through the natural price, cancelled on every exit path.
+                  through the natural price, cancelled on every exit path,
+                  including an exception or task cancellation after placement (CR-03).
   open_position — places the legs in the order given (pick_strikes returns the
                   long wings FIRST, so protection is bought before risk is sold),
                   persists each order_id before the next leg is placed, and
@@ -75,8 +76,23 @@ class LegExecutor:
             partial fill has to tell the caller how many contracts actually
             filled, otherwise the unwind path cannot size its closing order.
 
-        Guarantee: no resting order is left behind on any return path — the
-        working order is cancelled before every escalation and before giving up.
+        Guarantee (CR-03): every order this method places is cancelled before
+        it returns or raises, unless it filled.
+
+        - On the TTL path the cancel runs before every escalation and before
+          giving up.
+        - On ANY exception or task cancellation after place_order returned an
+          order_id (a failed status poll, a failing on_placed, CancelledError),
+          a shielded cancel_order runs first and the original exception is
+          re-raised.
+        - So an exception never means "nothing filled". The order may have
+          partly filled, and callers must escalate: open_position's unwind
+          returns False, and the manage close ends NEEDS_ATTENTION.
+
+        Limits: a cancel that itself fails (OpenD down, or the gateway already
+        closed at shutdown) may leave the order working. It is logged and
+        audited as leg_cancel_on_error_failed with its order_id. If
+        place_order itself raises, there is no order_id to cancel.
         """
         cfg = self._cfg
         mid = (float(bid) + float(ask)) / 2
@@ -91,44 +107,87 @@ class LegExecutor:
 
         for attempt in range(cfg.max_retries + 1):
             order_id = await self._gw.place_order(code, int(qty), price, trd_side)
-            if on_placed is not None:
-                await on_placed(order_id)
-            _logger.info(
-                "leg_order_placed",
-                code=code, side=side, qty=int(qty), price=price,
-                order_id=order_id, attempt=attempt,
-            )
+            try:
+                if on_placed is not None:
+                    await on_placed(order_id)
+                _logger.info(
+                    "leg_order_placed",
+                    code=code, side=side, qty=int(qty), price=price,
+                    order_id=order_id, attempt=attempt,
+                )
 
-            deadline = loop.time() + cfg.ttl_s
-            while loop.time() < deadline:
-                await asyncio.sleep(cfg.poll_interval_s)
+                deadline = loop.time() + cfg.ttl_s
+                while loop.time() < deadline:
+                    await asyncio.sleep(cfg.poll_interval_s)
+                    dealt_qty, avg_price = await self._poll(order_id)
+                    if dealt_qty >= int(qty):
+                        _logger.info(
+                            "leg_filled", code=code, order_id=order_id,
+                            filled_qty=dealt_qty, avg_price=avg_price,
+                        )
+                        return (order_id, avg_price, dealt_qty)
+
+                # TTL expired — cancel before doing anything else, then re-read
+                # once: the remainder may have filled while the cancel was in flight.
+                try:
+                    await self._gw.cancel_order(order_id)
+                except Exception:
+                    pass    # already fully filled / already cancelled — swallow (engine parity)
+
                 dealt_qty, avg_price = await self._poll(order_id)
-                if dealt_qty >= int(qty):
+                if dealt_qty > 0:
                     _logger.info(
-                        "leg_filled", code=code, order_id=order_id,
-                        filled_qty=dealt_qty, avg_price=avg_price,
+                        "leg_partially_filled", code=code, order_id=order_id,
+                        filled_qty=dealt_qty, requested_qty=int(qty), avg_price=avg_price,
                     )
                     return (order_id, avg_price, dealt_qty)
 
-            # TTL expired — cancel before doing anything else, then re-read once:
-            # the remainder may have filled while the cancel was in flight.
-            try:
-                await self._gw.cancel_order(order_id)
-            except Exception:
-                pass    # already fully filled / already cancelled — swallow (engine parity)
-
-            dealt_qty, avg_price = await self._poll(order_id)
-            if dealt_qty > 0:
-                _logger.info(
-                    "leg_partially_filled", code=code, order_id=order_id,
-                    filled_qty=dealt_qty, requested_qty=int(qty), avg_price=avg_price,
-                )
-                return (order_id, avg_price, dealt_qty)
-
-            if attempt < cfg.max_retries:
-                # Walk the limit toward — and then through — the natural price.
-                step = cfg.escalation_step_usd if side == "BUY" else -cfg.escalation_step_usd
-                price = max(round(price + step, 2), _MIN_LIMIT_PRICE)
+                if attempt < cfg.max_retries:
+                    # Walk the limit toward — and then through — the natural price.
+                    step = (
+                        cfg.escalation_step_usd if side == "BUY"
+                        else -cfg.escalation_step_usd
+                    )
+                    price = max(round(price + step, 2), _MIN_LIMIT_PRICE)
+            except GeneratorExit:
+                # A coroutine being closed cannot await, so it must propagate
+                # untouched — there is no way to run the cancel here.
+                raise
+            except BaseException:
+                # BaseException, not Exception: CancelledError has not been an
+                # Exception since Python 3.8, and asyncio.run / APScheduler
+                # cancel running job tasks at shutdown — that path must cancel
+                # the resting order too (CR-03). asyncio.shield means a SECOND
+                # task cancellation during the broker cancel cannot abort it.
+                # Never return a value here: a partial fill before the
+                # exception is unknown exposure, and the caller must escalate
+                # (open_position's unwind, or the manage close's
+                # NEEDS_ATTENTION), not silently treat it as "nothing filled".
+                # ponytail: at kill-switch shutdown, _shutdown closes the
+                # gateway BEFORE scheduler.shutdown cancels the job, so this
+                # cancel fails and is logged/audited below; the row stays
+                # OPENING/CLOSING, and the next startup's reconcile alert
+                # (with the working-orders hint) is the operator's signal.
+                # Upgrade path: cancel and await jobs before gateway.close.
+                # A repeat cancel of an order the TTL path already cancelled,
+                # or that has just filled, fails the same way — a false alarm
+                # on the safe side.
+                try:
+                    await asyncio.shield(self._gw.cancel_order(order_id))
+                except Exception:
+                    _logger.error(
+                        "leg_cancel_on_error_failed",
+                        code=code, side=side, order_id=order_id, exc_info=True,
+                    )
+                    append_audit({
+                        "event": "leg_cancel_on_error_failed",
+                        "code": code, "side": side, "order_id": order_id,
+                    })
+                else:
+                    _logger.warning(
+                        "leg_cancelled_on_error", code=code, side=side, order_id=order_id,
+                    )
+                raise
 
         _logger.warning(
             "leg_fill_abandoned",
