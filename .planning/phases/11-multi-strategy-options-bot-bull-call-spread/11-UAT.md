@@ -31,18 +31,18 @@ result: pass — operator decision 2026-09-24: schedule gap-closure plan 11-08 c
 
 ### 3. Developer decision on CR-03 (fill_leg leaves the working order live when a status poll raises)
 expected: A recorded decision — schedule a follow-up gap-closure plan (e.g. 11-09: fill_leg cancels its working order on any exception after place_order; the UNWIND INCOMPLETE / close-error alerts warn that a bot-placed order may still be working) before relying on the "close manually" alert unattended, or explicitly accept the residual risk
-result: [pending]
+result: pass — operator decision 2026-09-25: fold into gap-closure plan 11-09 (11-09-PLAN.md)
 
 ### 4. Developer decision on WR-10 / WR-11 (near-expiry escalation gaps introduced by 11-08)
 expected: A recorded decision — fold into the same follow-up plan (WR-10: expiry-day escalation must not depend on one skippable APScheduler cycle; WR-11: a persistent snapshot outage must eventually count/alert), defer explicitly, or accept
-result: [pending]
+result: pass — operator decision 2026-09-25: fold into gap-closure plan 11-09 (11-09-PLAN.md)
 
 ## Summary
 
 total: 4
-passed: 1
+passed: 3
 issues: 0
-pending: 3
+pending: 1
 skipped: 0
 blocked: 0
 

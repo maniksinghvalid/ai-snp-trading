@@ -280,7 +280,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8. Options Premium Selling (tasty_credit_spreads) | 5/5 waves | Built; live paper UAT pending | 2026-08-17 |
 | 9. Options Backtester | 5/5 | Built + gap-closure done; evidence run in progress (free-tier cache warm, ~1–2 days) | - |
 | 10. External Strategy Research | 6/6 | Complete    | 2026-08-18 |
-| 11. Multi-strategy options bot (bull_call_spread) | 8/8 | Verification human_needed (CR-03, WR-10/11 decision + live UAT) | - |
+| 11. Multi-strategy options bot (bull_call_spread) | 8/9 | Gap closure 11-09 planned (CR-03, WR-10, WR-11, IN-08); live UAT pending | - |
 
 ### Phase 8: Options Premium Selling (tasty_credit_spreads)
 
@@ -440,7 +440,7 @@ Plans:
   7. Per-strategy caps (entries/day, concurrent) are counted per strategy while the daily-loss breaker, BP headroom and one-position-per-underlying are global — proven by service tests
   8. Safety invariants unchanged (LIMIT only; longs-first open / shorts-first close; SAFE-OG-01 reconcile scope; own DB/kill file/report dir; one instance; SIMULATE only) and the full suite is green (`python3 -m pytest -q`)
 
-**Plans:** 8/8 plans complete
+**Plans:** 8/9 plans complete
 
 Plans:
 **Wave 1**
@@ -465,3 +465,7 @@ Plans:
 **Gap closure 2** *(11-REVIEW.md CR-02 (EX-02) + WR-06 + WR-07 — operator decision 2026-09-24)*
 
 - [x] 11-08-PLAN.md — failed entry unwind → NEEDS_ATTENTION + truthful alert, counted in BP/busy/caps (CR-02); near-expiry escalation after 3 consecutive misses or the expiry session's final cycle, snapshot outages never count (WR-06); _quote_markable width gate for every decision outside the guard window (WR-07) (MSO-05/07/08) [Wave 1, gap_closure]
+
+**Gap closure 3** *(11-REVIEW.md third review CR-03 + WR-10 + WR-11 + IN-08 — operator decision 2026-09-25)*
+
+- [ ] 11-09-PLAN.md — fill_leg cancels its working order on any exception/cancellation then re-raises, hand-off alerts warn to cancel working orders (CR-03); one-time expiry-day warning on the first unmanageable cycle (WR-10); process-level snapshot-outage alert once per episode (WR-11); miss streak scoped to the ET session (IN-08) (MSO-05/07/08) [Wave 1, gap_closure]
