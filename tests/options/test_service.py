@@ -1590,7 +1590,10 @@ def test_manage_snapshot_outage_never_escalates_near_expiry(
         _run(bot._job_manage())
 
     assert _statuses(store, "OPEN") == ["B1"]
-    alerter.send.assert_not_awaited()
+    # WR-11: the position is never escalated, but the process alerts once
+    # after _QUOTE_MISS_ESCALATE_CYCLES consecutive outage cycles
+    assert alerter.send.await_count == 1
+    assert alerter.send.await_args[0][0].startswith("<b>Options snapshot outage</b>")
     assert not [
         e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
     ]
@@ -1897,6 +1900,87 @@ def test_expiry_day_warning_keeps_the_automated_close(
     assert alerter.send.await_count == 2
     assert "expires today" in alerter.send.await_args_list[0][0][0]
     assert "Options exit" in alerter.send.await_args_list[1][0][0]
+
+
+# ============================================================
+# WR-11: a persistent snapshot outage is alerted (process level) and never
+# hides an expiring position
+# ============================================================
+
+def test_snapshot_outage_alerts_once_after_consecutive_cycles_and_rearms(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    _freeze(monkeypatch, SESSION_NOON)
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_open_spread(store, "P1", qty=2, expiry=EXPIRY, credit_per_spread=2.0)
+    gateway.get_option_positions = AsyncMock(return_value={LONG_P: 2, SHORT_P: -2})
+    outage = AsyncMock(return_value=(-1, "no US option quote right"))
+    gateway.get_market_snapshot = outage
+    bot = make_bot()
+    bot._executor = _fake_executor()
+
+    for _ in range(2):
+        _run(bot._job_manage())
+    alerter.send.assert_not_awaited()
+
+    _run(bot._job_manage())
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert body.startswith("<b>Options snapshot outage</b>")
+    assert "3 consecutive" in body
+    assert "1 open position" in body
+    outage_events = [e for e in audit_events if e["event"] == "options_snapshot_outage_alert"]
+    assert len(outage_events) == 1
+    assert outage_events[0]["cycles"] == 3
+    assert outage_events[0]["positions"] == 1
+
+    _run(bot._job_manage())
+    assert alerter.send.await_count == 1
+
+    _snapshot(gateway, {SHORT_P: {"bid": 1.55, "ask": 1.65}, LONG_P: {"bid": 0.45, "ask": 0.55}})
+    _run(bot._job_manage())
+    assert bot._snapshot_outage_cycles == 0
+    assert _statuses(store, "OPEN") == ["P1"]
+    assert alerter.send.await_count == 1
+
+    gateway.get_market_snapshot = outage
+    for _ in range(3):
+        _run(bot._job_manage())
+    assert alerter.send.await_count == 2
+    outage_events = [e for e in audit_events if e["event"] == "options_snapshot_outage_alert"]
+    assert len(outage_events) == 2
+    bot._executor.close_legs.assert_not_awaited()
+
+
+def test_expiry_day_snapshot_outage_warns_before_cutoff(
+    options_book, make_bot, store, gateway, alerter, monkeypatch,
+):
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _freeze(monkeypatch, datetime(2026, 8, 17, 15, 48, tzinfo=_ET))
+    _seed_bull_spread(store, expiry="2026-08-17")
+    gateway.get_option_positions = AsyncMock(return_value={LONG_C: 5, SHORT_C: -5})
+    gateway.get_market_snapshot = AsyncMock(return_value=(-1, "snapshot failed"))
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    _run(bot._job_manage())
+
+    assert _statuses(store, "OPEN") == ["B1"]
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "expires today" in body
+    assert "snapshot_outage" in body
+    warned = [e for e in audit_events if e["event"] == "options_expiry_day_unmanaged"]
+    assert len(warned) == 1
+    assert warned[0]["reason"] == "snapshot_outage"
+    assert warned[0]["codes"] == [LONG_C, SHORT_C]
+
+    _freeze(monkeypatch, datetime(2026, 8, 17, 15, 50, tzinfo=_ET))
+    _run(bot._job_manage())
+    assert alerter.send.await_count == 1
+    bot._executor.close_legs.assert_not_awaited()
 
 
 # ============================================================

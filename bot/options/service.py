@@ -404,6 +404,10 @@ class OptionsBot:
         # position_ids already sent the one-time expiry-day warning (WR-10).
         # In memory, so a restart re-arms it: at most one extra alert.
         self._expiry_warned: set = set()
+        # Consecutive manage cycles with any failed snapshot chunk (WR-11).
+        # It is process health, not a per-position streak, and a clean cycle
+        # resets it.
+        self._snapshot_outage_cycles: int = 0
 
         # OpenDWatchdog duck-types bot._entries_enabled/_store/_position_manager/
         # _bar_agg. The options bot has neither a PositionManager nor a bar
@@ -979,7 +983,11 @@ class OptionsBot:
             _logger.error("options_manage_error", exc_info=True)
 
     async def _manage_once(self, today) -> None:
-        """Reconcile, snapshot, then mark/close each open position (locked body)."""
+        """Reconcile, snapshot, then mark/close each open position (locked body).
+
+        Counts consecutive snapshot-outage cycles and alerts once at
+        _QUOTE_MISS_ESCALATE_CYCLES (WR-11); a clean cycle resets the counter.
+        """
         await self.reconcile()
 
         positions = self._store.get_option_positions(("OPEN",))
@@ -1003,16 +1011,56 @@ class OptionsBot:
                     "bid": row.get("bid_price"), "ask": row.get("ask_price"),
                 }
 
+        # Process-level: a persistent snapshot outage while OpenD stays
+        # connected is otherwise invisible. OpenDWatchdog only polls
+        # get_global_state (connection/login) and cannot see a quote-rights
+        # error or a whole-batch rejection while connected (corrects 11-08's
+        # T-11-46 rationale). The `==` fires the alert once per episode; a
+        # clean cycle resets and re-arms it. Outages still never touch the
+        # per-position streak (operator scope) — that is WR-10's expiry
+        # warning with reason "snapshot_outage" below.
+        if not unsnapped:
+            self._snapshot_outage_cycles = 0
+        else:
+            self._snapshot_outage_cycles += 1
+            if self._snapshot_outage_cycles == _QUOTE_MISS_ESCALATE_CYCLES:
+                affected = sum(
+                    1 for p in positions
+                    if any(leg["code"] in unsnapped for leg in p["legs"])
+                )
+                await self._alerter.send(
+                    f"<b>Options snapshot outage</b> — option quote snapshot failing "
+                    f"for {_esc(self._snapshot_outage_cycles)} consecutive manage "
+                    f"cycles; {_esc(affected)} open position(s) unmanaged (no exits, "
+                    f"no assignment guard). Check OpenD option quote rights and the "
+                    f"options log."
+                )
+                append_audit({
+                    "event": "options_snapshot_outage_alert",
+                    "cycles": self._snapshot_outage_cycles,
+                    "codes": len(unsnapped),
+                    "positions": affected,
+                })
+                _logger.error(
+                    "options_snapshot_outage_alert",
+                    cycles=self._snapshot_outage_cycles, codes=len(unsnapped),
+                    positions=affected,
+                )
+
         unrealized_total = 0.0
         for pos in positions:
             outage = [leg["code"] for leg in pos["legs"] if leg["code"] in unsnapped]
             if outage:
                 # A whole-chunk snapshot failure is never a per-position quote
-                # miss: it neither grows nor resets the WR-06 streak.
+                # miss: it neither grows nor resets the WR-06 streak. On expiry
+                # day the position still surfaces through the one-time expiry
+                # warning (WR-10/WR-11).
                 _logger.warning(
                     "options_manage_snapshot_outage",
                     position_id=pos["position_id"], codes=outage,
                 )
+                if option_dte(date.fromisoformat(pos["expiry"]), today) <= 0:
+                    await self._warn_expiry_unmanaged(pos, outage, "snapshot_outage", today)
                 continue
             try:
                 unrealized_total += await self._manage_position(pos, quotes, today)
