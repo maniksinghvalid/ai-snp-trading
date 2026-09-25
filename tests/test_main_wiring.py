@@ -102,3 +102,22 @@ def test_armed_stop_dispatches_through_real_construction(monkeypatch):
         "arm_stop_protection() did not reach gateway.subscribe_quote — "
         "_gateway was None (unwired) so the D-02 tick-stop path is dead."
     )
+
+
+# ============================================================
+# CR-04 parity (quick 260925-ho6) — alerter wired into ExecutionEngine
+# ============================================================
+
+def test_cr04_main_wires_alerter_into_engine(monkeypatch):
+    """CR-04 D3 step 5 / D6: bot/main.py must construct the alerter before the
+    engine and pass it in, so an unconfirmed cancel can dispatch a Telegram
+    alert. Guards the dead-wiring class of bug test_main_wiring.py exists for.
+    """
+    from bot.service.alerter import TelegramAlerter
+
+    captured_pm, _ = _drive_real_main(monkeypatch)
+
+    assert isinstance(captured_pm._engine._alerter, TelegramAlerter), (
+        "bot/main.py did not pass alerter= into ExecutionEngine(...); "
+        "_alerter is None so an unconfirmed cancel can never alert (CR-04)."
+    )

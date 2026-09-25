@@ -1369,6 +1369,28 @@ class TestRegisterPosition:
 
 
 # ============================================================
+# CR-04 parity (quick 260925-ho6) — CancelUnconfirmedError handling
+# ============================================================
+
+def test_cr04_place_exit_order_credits_filled_qty_on_cancel_unconfirmed(manager, mock_engine):
+    """CR-04 D6: when engine.manage_exit raises CancelUnconfirmedError,
+    _place_exit_order must credit the confirmed-sold shares (a lower bound)
+    instead of falling through to the generic except-Exception (0, 0.0) path.
+    """
+    from bot.execution.engine import CancelUnconfirmedError
+
+    mock_engine.manage_exit = AsyncMock(
+        side_effect=CancelUnconfirmedError(
+            "x", code="US.AAPL", order_id="O1", filled_qty=40, avg_price=101.5,
+        )
+    )
+
+    result = asyncio.run(manager._place_exit_order("US.AAPL", 100))
+
+    assert result == (40, 101.5)
+
+
+# ============================================================
 # Test: order_id-only matching — source inspection
 # ============================================================
 

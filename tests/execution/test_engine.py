@@ -1103,6 +1103,382 @@ def test_max_entry_chase_r_abandons_before_the_first_placement():
     store.expire_pending_intent.assert_called_once()
 
 
+# ============================================================
+# CR-04 parity (quick 260925-ho6)
+# ============================================================
+# Regression coverage for the four cancel-swallow sites in engine.py (see
+# 260925-ho6-CONTEXT.md). Core property: a gateway whose cancel_order raises
+# once while the order is still working must never produce a second live
+# order for the same intent/position, and known-filled shares must never be
+# silently dropped.
+
+
+def _cr04_find_audit_event(audit_mock, event_name):
+    """Return the first append_audit call dict whose 'event' key matches, or None."""
+    for c in audit_mock.call_args_list:
+        entry = c.args[0]
+        if entry.get("event") == event_name:
+            return entry
+    return None
+
+
+def test_cr04_entry_ttl_cancel_unconfirmed_raises_no_second_buy():
+    """CR-04 site 2 (entry TTL expiry): cancel_order raises, re-read still
+    SUBMITTED/dealt 0 (unconfirmed) -- must raise CancelUnconfirmedError and
+    never place a second BUY for the same intent.
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "SUBMITTED",
+            "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "BUY",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        # DID NOT RAISE (behavioral failure, not ImportError) is the expected
+        # red-run outcome here -- CancelUnconfirmedError is imported only
+        # AFTER this block so an unimplemented fix never masks itself as
+        # an ImportError swallowed by pytest.raises(Exception).
+        with pytest.raises(Exception) as ei:
+            _run(engine._manage_entry_order(_MockIntent()))
+
+        from bot.execution.engine import CancelUnconfirmedError
+        assert isinstance(ei.value, CancelUnconfirmedError)
+        assert ei.value.fill is None
+        assert ei.value.filled_qty == 0
+        assert gw.place_order.await_count == 1
+        store.expire_pending_intent.assert_not_called()
+
+        entry = _cr04_find_audit_event(audit, "cancel_unconfirmed")
+        assert entry is not None, "cancel_unconfirmed must be audited"
+        assert entry["order_id"] == "ORD-1"
+        assert entry["side"] == "BUY"
+        assert entry["error"] == "rate limit"
+
+    assert gw.cancel_order.await_count == 2
+
+
+def test_cr04_entry_partial_cancel_unconfirmed_raises_with_fill():
+    """CR-04 site 1 (entry remainder cancel): cancel_order raises while the
+    order is FILLED_PART; re-read confirms only the same partial -- must raise
+    with the known-filled shares attached (exc.fill), never silently return.
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "FILLED_PART",
+            "qty": 100, "dealt_qty": 40, "dealt_avg_price": 182.60, "trd_side": "BUY",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        with pytest.raises(Exception) as ei:
+            _run(engine._manage_entry_order(_MockIntent()))
+
+        from bot.execution.engine import CancelUnconfirmedError
+        assert isinstance(ei.value, CancelUnconfirmedError)
+        assert ei.value.fill is not None
+        assert ei.value.fill.filled_qty == 40
+        assert ei.value.fill.order_id == "ORD-1"
+        assert ei.value.filled_qty == 40
+        assert gw.place_order.await_count == 1
+
+        assert _cr04_find_audit_event(audit, "entry_fill_detected") is not None
+
+
+def test_cr04_exit_ttl_cancel_unconfirmed_raises_and_holds():
+    """CR-04 site 4 (exit TTL) + D5 exit hold: cancel_order raises while the
+    exit order is unfilled -- must raise CancelUnconfirmedError, place no
+    second SELL, and hold ALL later manage_exit calls for the same code until
+    restart.
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        if order_id == "ORD-1":
+            return [{
+                "order_id": "ORD-1", "code": "US.AAPL", "order_status": "SUBMITTED",
+                "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "SELL",
+            }]
+        return [{
+            "order_id": "ORD-2", "code": "US.AAPL", "order_status": "FILLED_ALL",
+            "qty": 100, "dealt_qty": 100, "dealt_avg_price": 182.20, "trd_side": "SELL",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        with pytest.raises(Exception) as ei:
+            _run(engine.manage_exit(
+                code="US.AAPL", qty=100, side="SELL",
+                escalation_step=0.10, escalation_cadence=0.01, ttl=0.05,
+            ))
+        from bot.execution.engine import CancelUnconfirmedError
+        assert isinstance(ei.value, CancelUnconfirmedError)
+        assert ei.value.filled_qty == 0
+        assert gw.place_order.await_count == 1
+
+        with pytest.raises(Exception) as ei2:
+            _run(engine.manage_exit(
+                code="US.AAPL", qty=100, side="SELL",
+                escalation_step=0.10, escalation_cadence=0.01, ttl=0.05,
+            ))
+        assert isinstance(ei2.value, CancelUnconfirmedError)
+        assert ei2.value.filled_qty == 0
+        assert gw.place_order.await_count == 1, "hold must block the second call before place_order"
+
+        blocked = _cr04_find_audit_event(audit, "exit_blocked_cancel_unconfirmed")
+        assert blocked is not None
+        assert blocked["code"] == "US.AAPL"
+
+
+def test_cr04_exit_partial_cancel_unconfirmed_raises_with_filled_qty():
+    """CR-04 site 3 (exit remainder cancel): cancel_order raises while the
+    exit order is FILLED_PART; re-read confirms only the same partial -- must
+    raise with the known-filled shares as a lower bound, never place another
+    SELL for the remainder.
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        if order_id == "ORD-1":
+            return [{
+                "order_id": "ORD-1", "code": "US.AAPL", "order_status": "FILLED_PART",
+                "qty": 100, "dealt_qty": 40, "dealt_avg_price": 182.40, "trd_side": "SELL",
+            }]
+        return [{
+            "order_id": "ORD-2", "code": "US.AAPL", "order_status": "FILLED_ALL",
+            "qty": 60, "dealt_qty": 60, "dealt_avg_price": 182.30, "trd_side": "SELL",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit"):
+        with pytest.raises(Exception) as ei:
+            _run(engine.manage_exit(
+                code="US.AAPL", qty=100, side="SELL",
+                escalation_step=0.10, escalation_cadence=0.01, ttl=0.05,
+            ))
+
+        from bot.execution.engine import CancelUnconfirmedError
+        assert isinstance(ei.value, CancelUnconfirmedError)
+        assert ei.value.filled_qty == 40
+        assert ei.value.avg_price == pytest.approx(182.40)
+        assert gw.place_order.await_count == 1
+
+
+def test_cr04_entry_ttl_fill_during_failed_cancel_returns_fill():
+    """CR-04 D4 preservation case (entry site 2): cancel_order raises but the
+    re-read shows the order fully filled during the cancel window -- must
+    return the FillEvent (today's bug silently drops this fill and re-places).
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.execution.events import FillEvent
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        cancelled_ids = [str(c.args[0]) for c in gw.cancel_order.await_args_list]
+        if order_id in cancelled_ids:
+            return [{
+                "order_id": order_id, "code": "US.AAPL", "order_status": "FILLED_ALL",
+                "qty": 100, "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
+            }]
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "SUBMITTED",
+            "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "BUY",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        fill_event = _run(engine._manage_entry_order(_MockIntent()))
+
+        assert fill_event is not None
+        assert isinstance(fill_event, FillEvent)
+        assert fill_event.order_id == "ORD-1"
+        assert fill_event.filled_qty == 100
+        assert gw.place_order.await_count == 1
+        assert _cr04_find_audit_event(audit, "cancel_unconfirmed") is None
+
+
+def test_cr04_preserve_exit_partial_completes_during_failed_cancel():
+    """CR-04 D4 preservation case (exit site 3): cancel_order raises but the
+    re-read shows the order fully filled during the cancel window -- manage_exit
+    must return normally (no escalation). Passes on the unfixed code too (pin).
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        cancelled_ids = [str(c.args[0]) for c in gw.cancel_order.await_args_list]
+        if order_id in cancelled_ids:
+            return [{
+                "order_id": order_id, "code": "US.AAPL", "order_status": "FILLED_ALL",
+                "qty": 100, "dealt_qty": 100, "dealt_avg_price": 182.40, "trd_side": "SELL",
+            }]
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "FILLED_PART",
+            "qty": 100, "dealt_qty": 40, "dealt_avg_price": 182.40, "trd_side": "SELL",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        total_filled, avg_price = _run(engine.manage_exit(
+            code="US.AAPL", qty=100, side="SELL",
+            escalation_step=0.10, escalation_cadence=0.01, ttl=0.05,
+        ))
+
+        assert total_filled == 100
+        assert avg_price == pytest.approx(182.40)
+        assert gw.place_order.await_count == 1
+        assert _cr04_find_audit_event(audit, "cancel_unconfirmed") is None
+
+
+def test_cr04_preserve_entry_ttl_confirmed_cancelled_proceeds():
+    """CR-04 D4 preservation case (entry site 2): cancel_order raises but the
+    re-read confirms CANCELLED_ALL (dealt 0, terminal) -- proceeds to the next
+    retry attempt exactly as today. Passes on the unfixed code too (pin).
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()  # entry_max_retries=2 (default)
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.cancel_order = AsyncMock(
+        side_effect=[GatewayError("rate limit"), None, None, None, None]
+    )
+
+    def _status(order_id=""):
+        cancelled_ids = [str(c.args[0]) for c in gw.cancel_order.await_args_list]
+        if order_id == "ORD-1" and "ORD-1" in cancelled_ids:
+            return [{
+                "order_id": "ORD-1", "code": "US.AAPL", "order_status": "CANCELLED_ALL",
+                "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "BUY",
+            }]
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "SUBMITTED",
+            "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "BUY",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        result = _run(engine._manage_entry_order(_MockIntent()))
+
+        assert result is None
+        assert gw.place_order.await_count == cfg.entry_max_retries + 1
+        store.expire_pending_intent.assert_called_once()
+        assert _cr04_find_audit_event(audit, "cancel_unconfirmed") is None
+
+
+def test_cr04_alerter_notified_once_on_unconfirmed_cancel():
+    """D3 step 5 / ALERT-04: an unconfirmed cancel dispatches exactly one
+    Telegram alert naming the order_id; the constructor accepts alerter=None
+    by default so existing 3-arg constructions keep working.
+    """
+    from bot.execution.engine import ExecutionEngine, CancelUnconfirmedError
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "SUBMITTED",
+            "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "BUY",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    store = _make_mock_store()
+    alerter = MagicMock()
+    alerter.send = AsyncMock()
+    engine = ExecutionEngine(gateway=gw, store=store, cfg=cfg, alerter=alerter)
+
+    with patch("bot.execution.engine.append_audit"):
+        with pytest.raises(Exception) as ei:
+            _run(engine._manage_entry_order(_MockIntent()))
+        assert isinstance(ei.value, CancelUnconfirmedError)
+
+    assert alerter.send.await_count == 1
+    assert "ORD-1" in alerter.send.await_args.args[0]
+
+
 def test_max_entry_chase_r_abandons_at_reprice_not_initial_placement():
     """The initial ask is within the cap (order placed, no fill within TTL);
     the RE-PRICE ask has moved beyond the cap -- must abandon at that point,
