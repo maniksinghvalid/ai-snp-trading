@@ -1479,6 +1479,56 @@ def test_cr04_alerter_notified_once_on_unconfirmed_cancel():
     assert "ORD-1" in alerter.send.await_args.args[0]
 
 
+def test_cr04_exit_hold_blocks_new_entry_for_held_code():
+    """D5 follow-through: once an unconfirmed exit cancel holds a code, a new
+    entry for that code must be blocked. Otherwise, after the stray SELL fills
+    and reconcile marks the old position closed, a re-entry would open a
+    position whose every stop-out and force-close manage_exit refuses.
+    """
+    from bot.execution.engine import ExecutionEngine
+    from bot.gateway.gateway import GatewayError
+
+    cfg = _MockCfg()
+    gw = MagicMock()
+    gw.place_order = AsyncMock(side_effect=["ORD-1", "ORD-2", "ORD-3"])
+    gw.get_ask_price = AsyncMock(return_value=182.55)
+    gw.get_bid_price = AsyncMock(return_value=182.40)
+    gw.get_positions = AsyncMock(return_value=(0, None))
+    gw.cancel_order = AsyncMock(side_effect=[GatewayError("rate limit"), None])
+
+    def _status(order_id=""):
+        if order_id == "ORD-1":
+            return [{
+                "order_id": "ORD-1", "code": "US.AAPL", "order_status": "SUBMITTED",
+                "qty": 100, "dealt_qty": 0, "dealt_avg_price": 0.0, "trd_side": "SELL",
+            }]
+        if order_id == "":
+            return []  # consume_intent's open-order guard sees nothing open
+        return [{
+            "order_id": order_id, "code": "US.AAPL", "order_status": "FILLED_ALL",
+            "qty": 100, "dealt_qty": 100, "dealt_avg_price": 182.60, "trd_side": "BUY",
+        }]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+    engine = ExecutionEngine(gateway=gw, store=_make_mock_store(), cfg=cfg)
+
+    with patch("bot.execution.engine.append_audit") as audit:
+        with pytest.raises(Exception):
+            _run(engine.manage_exit(
+                code="US.AAPL", qty=100, side="SELL",
+                escalation_step=0.10, escalation_cadence=0.01, ttl=0.05,
+            ))
+        assert gw.place_order.await_count == 1
+
+        result = _run(engine.consume_intent(_MockIntent()))
+
+        assert result is None
+        assert gw.place_order.await_count == 1, "held code must not get a new entry BUY"
+        blocked = _cr04_find_audit_event(audit, "entry_blocked_cancel_unconfirmed")
+        assert blocked is not None
+        assert blocked["code"] == "US.AAPL"
+
+
 def test_max_entry_chase_r_abandons_at_reprice_not_initial_placement():
     """The initial ask is within the cap (order placed, no fill within TTL);
     the RE-PRICE ask has moved beyond the cap -- must abandon at that point,

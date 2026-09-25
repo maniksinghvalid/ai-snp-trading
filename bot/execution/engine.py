@@ -235,6 +235,7 @@ class ExecutionEngine:
 
         Returns:
             FillEvent on any fill (full or partial, D-06), or None if:
+              - The code is under a CR-04 exit hold (D5), OR
               - Duplicate detected by broker-verified guard (EXEC-04), OR
               - Abandoned after exceeding entry_max_retries (D-05).
 
@@ -243,6 +244,24 @@ class ExecutionEngine:
                 _manage_entry_order when a cancel_order failure cannot be
                 confirmed dead by a re-read.
         """
+        # CR-04 D5: manage_exit refuses every SELL for a held code until restart,
+        # so a new position here could never be stopped out or force-closed.
+        held = self._exit_hold.get(intent.code)
+        if held is not None:
+            _logger.warning(
+                "entry_blocked_cancel_unconfirmed",
+                code=intent.code,
+                intent_id=intent.intent_id,
+                order_id=held,
+            )
+            append_audit({
+                "event": "entry_blocked_cancel_unconfirmed",
+                "code": intent.code,
+                "intent_id": intent.intent_id,
+                "order_id": held,
+            })
+            return None
+
         # ---- EXEC-04: Broker-verified duplicate guard (BEFORE any place_order) ----
         # Check 1: Broker has an open position for this code → block
         try:
