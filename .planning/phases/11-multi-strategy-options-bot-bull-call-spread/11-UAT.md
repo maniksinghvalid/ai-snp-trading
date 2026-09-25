@@ -37,12 +37,16 @@ result: pass — operator decision 2026-09-25: fold into gap-closure plan 11-09 
 expected: A recorded decision — fold into the same follow-up plan (WR-10: expiry-day escalation must not depend on one skippable APScheduler cycle; WR-11: a persistent snapshot outage must eventually count/alert), defer explicitly, or accept
 result: pass — operator decision 2026-09-25: fold into gap-closure plan 11-09 (11-09-PLAN.md)
 
+### 5. Developer decision on CR-04 (fill_leg's TTL path swallows a failed cancel, then places the next attempt)
+expected: A recorded decision — schedule one narrowly-scoped fix (fill_leg raises instead of placing the next attempt when the TTL cancel failed and the order is not fully filled, so the 11-09 cancel-on-error path retries/audits it and callers escalate; replace test_cancel_failure_does_not_break_the_loop), or explicitly accept the residual risk (a clean ABORTED/CLOSED outcome can hide a live, untracked order that may fill into a naked short)
+result: [pending]
+
 ## Summary
 
-total: 4
+total: 5
 passed: 3
 issues: 0
-pending: 1
+pending: 2
 skipped: 0
 blocked: 0
 
