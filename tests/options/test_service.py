@@ -1450,6 +1450,50 @@ def test_clean_unwind_keeps_aborted_contract(
     assert _statuses(store, "NEEDS_ATTENTION") == []
 
 
+def test_entry_scan_open_position_error_flags_needs_attention(
+    make_bot, store, gateway, alerter, monkeypatch,
+):
+    """EX-03 (and CR-04): an open_position exception — for example CR-04's
+    unconfirmed TTL cancel on an opening leg — must reach the CR-02
+    NEEDS_ATTENTION branch, not leave the row OPENING with no alert."""
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = MagicMock(
+        open_position=AsyncMock(
+            side_effect=RuntimeError("cancel of O3 unconfirmed: dealt 0/2")
+        ),
+        close_legs=AsyncMock(),
+    )
+
+    _run(bot._job_entry_scan())
+
+    rows = store.get_option_positions(("NEEDS_ATTENTION",))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["underlying"] == "US.SPY"
+    assert row["closed_at"] is None
+    assert _statuses(store, "OPENING") == []
+    assert _statuses(store, "ABORTED") == []
+
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "UNWIND INCOMPLETE" in body
+    assert "cancel any working orders" in body
+
+    incomplete = [e for e in audit_events if e["event"] == "options_entry_unwind_incomplete"]
+    assert len(incomplete) == 1
+    assert incomplete[0]["position_id"] == row["position_id"]
+    assert not [e for e in audit_events if e["event"] == "options_position_aborted"]
+
+    error_events = [c.args[0] for c in log.error.call_args_list]
+    assert "options_entry_open_error" in error_events
+    assert "options_entry_underlying_error" not in error_events
+
+
 # ============================================================
 # WR-06: near-expiry escalation needs a streak (or the expiry session's final cycle)
 # ============================================================

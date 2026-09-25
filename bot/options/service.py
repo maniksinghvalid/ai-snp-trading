@@ -800,7 +800,7 @@ class OptionsBot:
 
         Returns the inserted position dict on a filled open OR an incomplete
         unwind (CR-02, so the row's live exposure is counted by the current
-        scan too), else None.
+        scan too), or an open_position exception (EX-03), else None.
         """
         is_debit = cfg.structure_type == "bull_call_spread"
         head = u_rows[0]
@@ -892,10 +892,28 @@ class OptionsBot:
                 leg_ids[leg["code"]], price=price, status="FILLED",
             )
 
-        filled = await self._executor.open_position(
-            sel["legs"], qty, quotes,
-            on_leg_placed=_on_placed, on_leg_filled=_on_filled,
-        )
+        try:
+            filled = await self._executor.open_position(
+                sel["legs"], qty, quotes,
+                on_leg_placed=_on_placed, on_leg_filled=_on_filled,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # EX-03: an open_position exception (for example CR-04's
+            # unconfirmed TTL cancel on an opening leg) means legs may be
+            # filled and one order may still be working — exactly the CR-02
+            # incomplete-unwind state below, so that branch is reused
+            # unchanged rather than duplicated. There is no automatic unwind
+            # of whatever filled: legs open longs-first, so any partial fill
+            # is covered by a same-qty wing (defined risk), and the alert
+            # below names every code plus _WORKING_ORDERS_HINT.
+            _logger.error(
+                "options_entry_open_error",
+                position_id=position_id, underlying=code, strategy=cfg.name,
+                exc_info=True,
+            )
+            filled = False
 
         if filled is None:
             # The executor already unwound whatever filled; the ABORTED row is
