@@ -1792,6 +1792,114 @@ def test_reconcile_restart_alert_warns_about_working_orders(
 
 
 # ============================================================
+# IN-08 / WR-10: the miss streak is per ET session; an expiry-day position
+# is surfaced on its first unmanageable cycle
+# ============================================================
+
+_BAD_BULL_QUOTES = {
+    LONG_C: {"bid": 3.56, "ask": 3.60}, SHORT_C: {"bid": "N/A", "ask": "N/A"},
+}
+
+
+def test_manage_near_expiry_streak_resets_on_a_new_session(
+    options_book, make_bot, store, alerter, monkeypatch,
+):
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_bull_spread(store, expiry="2026-08-18")   # 1 DTE from 2026-08-17
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    for hh, mm in [(15, 45), (15, 50)]:
+        _freeze(monkeypatch, datetime(2026, 8, 17, hh, mm, tzinfo=_ET))
+        pos = store.get_option_positions(("OPEN",))[0]
+        _run(bot._manage_position(pos, _BAD_BULL_QUOTES, date(2026, 8, 17)))
+        assert _statuses(store, "OPEN") == ["B1"]
+
+    _freeze(monkeypatch, datetime(2026, 8, 18, 9, 35, tzinfo=_ET))
+    pos = store.get_option_positions(("OPEN",))[0]
+    _run(bot._manage_position(pos, _BAD_BULL_QUOTES, date(2026, 8, 18)))
+
+    assert _statuses(store, "OPEN") == ["B1"]
+    assert not [
+        e for e in audit_events if e["event"] == "options_manage_unquotable_near_expiry"
+    ]
+    log.warning.assert_any_call(
+        "options_manage_unquotable_near_expiry_retry",
+        position_id="B1", codes=[SHORT_C], dte=0, streak=1,
+    )
+    bot._executor.close_legs.assert_not_awaited()
+
+
+def test_expiry_day_unquotable_warns_before_cutoff_even_if_final_cycle_is_skipped(
+    options_book, make_bot, store, alerter, monkeypatch,
+):
+    audit_events = []
+    monkeypatch.setattr(service, "append_audit", audit_events.append)
+    _seed_bull_spread(store, expiry="2026-08-17")   # expires TODAY
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor()
+
+    _freeze(monkeypatch, datetime(2026, 8, 17, 15, 43, tzinfo=_ET))
+    pos = store.get_option_positions(("OPEN",))[0]
+    _run(bot._manage_position(pos, _BAD_BULL_QUOTES, TODAY))
+
+    assert _statuses(store, "OPEN") == ["B1"]
+    assert alerter.send.await_count == 1
+    body = alerter.send.await_args[0][0]
+    assert "expires today" in body
+    assert SHORT_C in body
+    assert "15:55" in body
+    warned = [e for e in audit_events if e["event"] == "options_expiry_day_unmanaged"]
+    assert len(warned) == 1
+    assert warned[0]["position_id"] == "B1"
+    assert warned[0]["codes"] == [SHORT_C]
+    assert warned[0]["reason"] == "no_quote"
+
+    _freeze(monkeypatch, datetime(2026, 8, 17, 15, 48, tzinfo=_ET))
+    pos = store.get_option_positions(("OPEN",))[0]
+    _run(bot._manage_position(pos, _BAD_BULL_QUOTES, TODAY))
+    assert alerter.send.await_count == 1
+    assert _statuses(store, "OPEN") == ["B1"]
+
+    # The 15:53 fire is dropped by max_instances=1; 15:58 is past the cutoff,
+    # so no further cycle can ever run — the 15:43 warning must already stand.
+    _freeze(monkeypatch, datetime(2026, 8, 17, 15, 58, tzinfo=_ET))
+    assert bot._is_rth_now() is False
+    assert alerter.send.await_count == 1
+    bot._executor.close_legs.assert_not_awaited()
+
+
+def test_expiry_day_warning_keeps_the_automated_close(
+    options_book, make_bot, store, alerter, monkeypatch,
+):
+    _seed_bull_spread(store, expiry="2026-08-17")
+    bot = make_bot(options_book.strategies[1], strategies=options_book.strategies)
+    bot._executor = _fake_executor(exit_prices={LONG_C: 3.58, SHORT_C: 1.62})
+
+    _freeze(monkeypatch, datetime(2026, 8, 17, 9, 35, tzinfo=_ET))
+    pos = store.get_option_positions(("OPEN",))[0]
+    _run(bot._manage_position(pos, _BAD_BULL_QUOTES, TODAY))
+    assert _statuses(store, "OPEN") == ["B1"]
+
+    _freeze(monkeypatch, datetime(2026, 8, 17, 9, 40, tzinfo=_ET))
+    pos = store.get_option_positions(("OPEN",))[0]
+    good_quotes = {LONG_C: {"bid": 3.56, "ask": 3.60}, SHORT_C: {"bid": 1.60, "ask": 1.64}}
+    _run(bot._manage_position(pos, good_quotes, TODAY))
+
+    assert _statuses(store, "CLOSED") == ["B1"]
+    closed = store.get_option_positions(("CLOSED",))[0]
+    assert closed["close_reason"] == "assignment_guard"
+    assert bot._executor.close_legs.await_args.kwargs["aggressive"] is True
+    assert _statuses(store, "NEEDS_ATTENTION") == []
+    assert alerter.send.await_count == 2
+    assert "expires today" in alerter.send.await_args_list[0][0][0]
+    assert "Options exit" in alerter.send.await_args_list[1][0][0]
+
+
+# ============================================================
 # EOD
 # ============================================================
 

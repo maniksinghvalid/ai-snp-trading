@@ -393,13 +393,17 @@ class OptionsBot:
         # scans (a code is a code regardless of which strategy's universe it
         # came from, so one cache is correct and saves a repeat gateway call).
         self._stock_ids: dict = {}
-        # position_id -> consecutive counted invalid-quote manage cycles inside
-        # the guard window (WR-06). In memory by design: a restart starts the
-        # count over, which costs at most N-1 extra cycles.
+        # position_id -> (ET session date, consecutive counted invalid-quote
+        # manage cycles inside the guard window that session) (WR-06, IN-08).
+        # A new session starts the count over. In memory by design: a restart
+        # starts the count over, which costs at most N-1 extra cycles.
         # ponytail: an entry of a row that left OPEN through reconcile stays as
-        # a stale int, bounded by the positions one process ever holds. Prune
+        # a stale tuple, bounded by the positions one process ever holds. Prune
         # it in _manage_once if that ever matters.
         self._quote_miss_streak: dict = {}
+        # position_ids already sent the one-time expiry-day warning (WR-10).
+        # In memory, so a restart re-arms it: at most one extra alert.
+        self._expiry_warned: set = set()
 
         # OpenDWatchdog duck-types bot._entries_enabled/_store/_position_manager/
         # _bar_agg. The options bot has neither a PositionManager nor a bar
@@ -1058,6 +1062,11 @@ class OptionsBot:
         assignment_guard close_legs(aggressive=True) path — there the mark
         cannot change the decision and is never returned as P&L.
 
+        On expiry day (dte <= 0), a counted miss below the escalation
+        threshold also sends the one-time expiry warning (WR-10), so a
+        dropped final cycle cannot let the position expire unannounced. The
+        streak itself is scoped to the ET session (IN-08).
+
         Returns its unrealized P&L in dollars (0.0 once a close is attempted).
         """
         pid = pos["position_id"]
@@ -1089,8 +1098,9 @@ class OptionsBot:
             self._quote_miss_streak.pop(pid, None)
         if bad:
             if in_guard:
-                streak = self._quote_miss_streak.get(pid, 0) + 1
-                self._quote_miss_streak[pid] = streak
+                day, prev = self._quote_miss_streak.get(pid, (today, 0))
+                streak = (prev if day == today else 0) + 1
+                self._quote_miss_streak[pid] = (today, streak)
                 # The last automated cycle before the contract expires (WR-06):
                 # ponytail: a cycle delayed by the lock can read as final one
                 # cycle early, which fails toward the human; the upgrade path
@@ -1105,6 +1115,8 @@ class OptionsBot:
                         "options_manage_unquotable_near_expiry_retry",
                         position_id=pid, codes=bad, dte=dte, streak=streak,
                     )
+                    if dte <= 0:
+                        await self._warn_expiry_unmanaged(pos, bad, "no_quote", today)
                     return 0.0
                 self._quote_miss_streak.pop(pid, None)
                 self._store.set_position_status(pid, "NEEDS_ATTENTION")
@@ -1209,6 +1221,35 @@ class OptionsBot:
             "strategy_name": pos.get("strategy_name"),
         })
         return 0.0
+
+    async def _warn_expiry_unmanaged(self, pos, codes, reason, today) -> None:
+        """One-time heads-up that an expiry-day position could not be managed
+        this cycle (WR-10/WR-11); no status change, and the automated close
+        stays armed."""
+        pid = pos["position_id"]
+        if pid in self._expiry_warned:
+            return
+        self._expiry_warned.add(pid)
+
+        cutoff = _manage_cutoff(today).strftime("%H:%M")
+        await self._alerter.send(
+            f"<b>Options expiry warning</b> {_esc(pos.get('underlying'))} — "
+            f"{_esc(pos.get('strategy_name') or '')} position expires today and "
+            f"could not be managed ({_esc(reason)}: {_esc(', '.join(codes))}). "
+            f"The bot keeps retrying until {_esc(cutoff)} ET; if it is still open "
+            f"then, close it manually."
+        )
+        append_audit({
+            "event": "options_expiry_day_unmanaged",
+            "position_id": pid,
+            "underlying": pos.get("underlying"),
+            "strategy_name": pos.get("strategy_name"),
+            "codes": codes,
+            "reason": reason,
+        })
+        _logger.warning(
+            "options_expiry_day_unmanaged", position_id=pid, codes=codes, reason=reason,
+        )
 
     async def _check_daily_breaker(self, today, unrealized_total: float) -> None:
         """Trip the daily-loss breaker once per day (the meta key IS the guard).
