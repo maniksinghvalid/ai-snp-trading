@@ -39,14 +39,14 @@ result: pass — operator decision 2026-09-25: fold into gap-closure plan 11-09 
 
 ### 5. Developer decision on CR-04 (fill_leg's TTL path swallows a failed cancel, then places the next attempt)
 expected: A recorded decision — schedule one narrowly-scoped fix (fill_leg raises instead of placing the next attempt when the TTL cancel failed and the order is not fully filled, so the 11-09 cancel-on-error path retries/audits it and callers escalate; replace test_cancel_failure_does_not_break_the_loop), or explicitly accept the residual risk (a clean ABORTED/CLOSED outcome can hide a live, untracked order that may fill into a naked short)
-result: [pending]
+result: pass — operator decision 2026-09-25: fixed via quick task 260925-goi (commits 2cb1d0f, 7689f2b; .planning/quick/260925-goi-fix-cr-04-fill-leg-ttl-cancel-swallow/)
 
 ## Summary
 
 total: 5
-passed: 3
+passed: 4
 issues: 0
-pending: 2
+pending: 1
 skipped: 0
 blocked: 0
 

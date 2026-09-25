@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
 Plan: 9 of 9
 Status: Complete
-Last activity: 2026-09-25 -- Phase 11 plan 09 (final gap closure: CR-03/WR-10/WR-11/IN-08) complete
+Last activity: 2026-09-25 - Completed quick task 260925-goi: Fix CR-04 fill_leg TTL cancel swallow
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -243,6 +243,7 @@ None yet.
 | 260819-bjv | Fix gateway _reconcile_core misclassifying options-bot legs as external: skip option codes (via _OPTION_CODE_RE) in orphan-adoption loop — OptionsService.reconcile() is their sole owner; dedupe reconcile_external_position_ignored to once/code/process (was 4 lines every ~75s); 3 regression tests | 2026-08-19 | 6ca0d36 | [260819-bjv-fix-gateway-py-reconcile-core-misclassif](./quick/260819-bjv-fix-gateway-py-reconcile-core-misclassif/) |
 | 260824-avx | Fix intraday rescan crash: run_intraday_rescan unconditionally protects managed active codes (open positions/pending intents) from eviction/unsubscribe; gateway.unsubscribe treats "not been subscribed" as benign so cleanup never aborts the rescan or skips premarket-high seeding | 2026-08-24 | b1962ef | [260824-avx-fix-intraday-rescan-crash-protect-manage](./quick/260824-avx-fix-intraday-rescan-crash-protect-manage/) |
 | 260827-j29 | Fix opened_at NOT NULL crash in register_position (filled position left unmanaged: no stop/trail/force-close, 2026-08-27 US.CRM) + re-create the one-shot force_close job after it fires (no force-close armed 2026-08-26/27) | 2026-08-27 | 247da3d | [260827-j29-fix-opened-at-not-null-crash-on-position](./quick/260827-j29-fix-opened-at-not-null-crash-on-position/) |
+| 260925-goi | Fix CR-04 (phase 11): options fill_leg raises instead of escalating when a TTL cancel_order fails and the order is not fully filled (no second live order, no stale partial qty); _try_open routes any open_position exception to the CR-02 NEEDS_ATTENTION + working-orders alert (EX-03 routing) | 2026-09-25 | 7689f2b | [260925-goi-fix-cr-04-fill-leg-ttl-cancel-swallow](./quick/260925-goi-fix-cr-04-fill-leg-ttl-cancel-swallow/) |
 
 ## Deferred Items
 
