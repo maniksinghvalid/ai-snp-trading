@@ -7,7 +7,8 @@ placed as sequential single-leg LIMIT orders. This module owns that loop:
 
   fill_leg      — mid-anchored limit, polled to a TTL, escalated toward and then
                   through the natural price, cancelled on every exit path,
-                  including an exception or task cancellation after placement (CR-03).
+                  including an exception or task cancellation after placement (CR-03);
+                  a failed TTL cancel raises instead of escalating (CR-04).
   open_position — places the legs in the order given (pick_strikes returns the
                   long wings FIRST, so protection is bought before risk is sold),
                   persists each order_id before the next leg is placed, and
@@ -88,11 +89,19 @@ class LegExecutor:
         - So an exception never means "nothing filled". The order may have
           partly filled, and callers must escalate: open_position's unwind
           returns False, and the manage close ends NEEDS_ATTENTION.
+        - On the TTL path, if the cancel raises and the order is not fully
+          filled, fill_leg raises RuntimeError instead of escalating or
+          returning a quantity (CR-04), so the retry below runs. A fill that
+          landed during the cancel (dealt_qty >= qty) is not affected.
 
         Limits: a cancel that itself fails (OpenD down, or the gateway already
         closed at shutdown) may leave the order working. It is logged and
         audited as leg_cancel_on_error_failed with its order_id. If
         place_order itself raises, there is no order_id to cancel.
+
+        Raises:
+            RuntimeError: the TTL cancel raised and the order is not fully
+                filled (CR-04), chained from the gateway's exception.
         """
         cfg = self._cfg
         mid = (float(bid) + float(ask)) / 2
@@ -129,12 +138,36 @@ class LegExecutor:
 
                 # TTL expired — cancel before doing anything else, then re-read
                 # once: the remainder may have filled while the cancel was in flight.
+                cancel_error = None
                 try:
                     await self._gw.cancel_order(order_id)
-                except Exception:
-                    pass    # already fully filled / already cancelled — swallow (engine parity)
+                except Exception as exc:
+                    cancel_error = exc
 
                 dealt_qty, avg_price = await self._poll(order_id)
+
+                # CR-04: the order may still be working. Placing the next
+                # attempt would put a second live order out for this leg, and
+                # returning dealt_qty here would size the unwind or close at
+                # a quantity that can still grow.
+                # ponytail: "unconfirmed" means the cancel raised and the
+                # order is not fully filled; order_status is not consulted,
+                # because _poll returns only dealt/avg and a second
+                # order_list_query per TTL expiry spends the rate budget
+                # shared with the equity bot. Ceiling: a false NEEDS_ATTENTION
+                # alarm when the broker already ended the order on its own.
+                # Upgrade path: have _poll return order_status too.
+                if cancel_error is not None and dealt_qty < int(qty):
+                    # Chain from a same-message copy, not the live object: the
+                    # shielded retry just below may raise that exact instance
+                    # again while this exception is the one being handled, and
+                    # Python's implicit context chaining would then link the
+                    # two into a cycle that hangs traceback rendering.
+                    raise RuntimeError(
+                        f"cancel of {order_id} unconfirmed: {code} {side} "
+                        f"dealt {dealt_qty}/{int(qty)}"
+                    ) from Exception(str(cancel_error))
+
                 if dealt_qty > 0:
                     _logger.info(
                         "leg_partially_filled", code=code, order_id=order_id,

@@ -164,10 +164,50 @@ def test_sell_escalates_downward():
     assert _prices(gw) == [2.03, 2.00, 1.97]
 
 
-def test_cancel_failure_does_not_break_the_loop():
-    gw = _gw(dealt=0)
-    gw.cancel_order = AsyncMock(side_effect=RuntimeError("already filled"))
-    assert _run(LegExecutor(gw, _cfg()).fill_leg(SHORT, "SELL", 1, 2.00, 2.10)) is None
+@pytest.mark.parametrize("dealt, qty", [(0, 1), (1, 3)])
+def test_ttl_cancel_failure_raises_and_places_no_next_attempt(monkeypatch, dealt, qty):
+    """CR-04: every cancel fails, so fill_leg must raise instead of escalating
+    or returning a quantity while the previous order may still be working."""
+    from bot.options import execution as execution_module
+    audit = []
+    monkeypatch.setattr(execution_module, "append_audit", audit.append)
+
+    gw = _gw(dealt=dealt, qty=qty)
+    gw.cancel_order = AsyncMock(side_effect=RuntimeError("modify_order failed"))
+
+    with pytest.raises(
+        RuntimeError, match=rf"cancel of O1 unconfirmed.*dealt {dealt}/{qty}"
+    ) as excinfo:
+        _run(LegExecutor(gw, _cfg()).fill_leg(SHORT, "SELL", qty, 2.00, 2.10))
+
+    assert str(excinfo.value.__cause__) == "modify_order failed"
+    gw.place_order.assert_awaited_once()
+    assert [c.args for c in gw.cancel_order.await_args_list] == [("O1",), ("O1",)]
+    assert audit == [{
+        "event": "leg_cancel_on_error_failed", "code": SHORT, "side": "SELL", "order_id": "O1",
+    }]
+
+
+def test_ttl_cancel_failure_after_full_fill_still_returns_the_fill():
+    """PRESERVATION: a fill that lands during the cancel is not a false alarm
+    (pin against an over-eager fix). Mutation-tested via the SUMMARY."""
+    gw = _gw()
+    state = {"cancelled": False}
+
+    async def _cancel(oid):
+        state["cancelled"] = True
+        raise RuntimeError("order already filled")
+
+    gw.cancel_order = AsyncMock(side_effect=_cancel)
+    gw.get_order_status = AsyncMock(
+        side_effect=lambda oid: [_row(oid, 1 if state["cancelled"] else 0, 1)]
+    )
+
+    result = _run(LegExecutor(gw, _cfg()).fill_leg(SHORT, "SELL", 1, 2.00, 2.10))
+
+    assert result == ("O1", 2.05, 1)
+    gw.place_order.assert_awaited_once()
+    gw.cancel_order.assert_awaited_once_with("O1")
 
 
 def test_partial_fill_at_ttl_is_cancelled_and_returned():
@@ -467,6 +507,77 @@ def test_unwind_poll_error_cancels_the_unwind_order(monkeypatch):
         WING, SHORT, SHORT, SHORT, WING,
     ]
     assert [c.args[0] for c in gw.cancel_order.await_args_list] == ["O2", "O3", "O4", "O5"]
+    unwound_events = [e for e in audit if e["event"] == "open_position_unwound"]
+    assert len(unwound_events) == 1
+    assert unwound_events[0]["complete"] is False
+
+
+def test_open_position_short_leg_ttl_cancel_failure_raises_never_clean_unwind(monkeypatch):
+    """CR-04: the reviewer's repro at open_position level. open_position is
+    byte-unchanged; the opening fill_leg call is outside the unwind's try, so
+    an opening-leg failure raises out of open_position instead of a clean
+    None. Task 2 turns that raise into NEEDS_ATTENTION."""
+    from bot.options import execution as execution_module
+    audit = []
+    monkeypatch.setattr(execution_module, "append_audit", audit.append)
+
+    gw = _gw()
+
+    def _status(oid):
+        dealt = 0 if oid in ("O2", "O3", "O4") else 1
+        return [_row(oid, dealt, 1)]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    async def _cancel(oid):
+        if oid == "O2":
+            raise RuntimeError("modify_order failed")
+        return None
+
+    gw.cancel_order = AsyncMock(side_effect=_cancel)
+
+    with pytest.raises(RuntimeError, match="cancel of O2 unconfirmed"):
+        _run(LegExecutor(gw, _cfg()).open_position(_legs(), 1, QUOTES))
+
+    codes = [c.args[0] for c in gw.place_order.call_args_list]
+    assert codes == [WING, SHORT]
+    assert [c.args for c in gw.cancel_order.await_args_list] == [("O2",), ("O2",)]
+    assert [e["event"] for e in audit] == ["leg_cancel_on_error_failed"]
+
+
+def test_unwind_ttl_cancel_failure_returns_false_not_none(monkeypatch):
+    """CR-04: the unwind path the reviewer asked for — False, not None. The
+    unwind's own closing order can fail to cancel too."""
+    from bot.options import execution as execution_module
+    audit = []
+    monkeypatch.setattr(execution_module, "append_audit", audit.append)
+
+    gw = _gw()
+
+    def _status(oid):
+        dealt = 0 if oid in ("O2", "O3", "O4", "O5") else 1
+        return [_row(oid, dealt, 1)]
+
+    gw.get_order_status = AsyncMock(side_effect=_status)
+
+    raised_for_o5 = set()
+
+    async def _cancel(oid):
+        if oid == "O5" and "O5" not in raised_for_o5:
+            raised_for_o5.add("O5")
+            raise RuntimeError("modify_order failed")
+        return None
+
+    gw.cancel_order = AsyncMock(side_effect=_cancel)
+
+    result = _run(LegExecutor(gw, _cfg()).open_position(_legs(), 1, QUOTES))
+
+    assert result is False
+    codes = [c.args[0] for c in gw.place_order.call_args_list]
+    assert codes == [WING, SHORT, SHORT, SHORT, WING]
+    assert [c.args[0] for c in gw.cancel_order.await_args_list] == [
+        "O2", "O3", "O4", "O5", "O5",
+    ]
     unwound_events = [e for e in audit if e["event"] == "open_position_unwound"]
     assert len(unwound_events) == 1
     assert unwound_events[0]["complete"] is False
