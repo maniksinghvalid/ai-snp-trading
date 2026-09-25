@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 10
 Plan: Not started
 Status: Phase complete — ready for verification
-Last activity: 2026-09-25 - Completed quick task 260925-ho6: equity engine no longer swallows a failed cancel_order; an unconfirmed cancel escalates (audit + Telegram + exit hold) instead of placing a second order (1147 tests, 3625cf1)
+Last activity: 2026-09-25 - Completed quick task 260925-inw: equity engine re-reads after a SUCCESSFUL TTL cancel too, so a cancel-window partial fill is booked (entry) / credited before sizing the next SELL (exit); a failed re-read escalates (1151 tests, 96a1497)
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -210,6 +210,7 @@ None yet.
 | 260824-avx | Fix intraday rescan crash: run_intraday_rescan unconditionally protects managed active codes (open positions/pending intents) from eviction/unsubscribe; gateway.unsubscribe treats "not been subscribed" as benign so cleanup never aborts the rescan or skips premarket-high seeding | 2026-08-24 | b1962ef | [260824-avx-fix-intraday-rescan-crash-protect-manage](./quick/260824-avx-fix-intraday-rescan-crash-protect-manage/) |
 | 260827-j29 | Fix opened_at NOT NULL crash in register_position (filled position left unmanaged: no stop/trail/force-close, 2026-08-27 US.CRM) + re-create the one-shot force_close job after it fires (no force-close armed 2026-08-26/27) | 2026-08-27 | 247da3d | [260827-j29-fix-opened-at-not-null-crash-on-position](./quick/260827-j29-fix-opened-at-not-null-crash-on-position/) |
 | 260925-ho6 | Fix equity ExecutionEngine cancel-swallow (CR-04 parity with options 260925-goi): a failed cancel_order at any of 4 sites is re-read; if not filled/terminal the engine audits, retries once, alerts Telegram and raises CancelUnconfirmedError instead of placing the next BUY/SELL; bot.py books known entry shares and leaves no-fill intents PENDING; exits credit a lower bound and an in-memory exit hold blocks further SELLs and re-entries for the code until restart; 13 tests | 2026-09-25 | 3625cf1 | [260925-ho6-fix-equity-engine-cancel-swallow-unconfi](./quick/260925-ho6-fix-equity-engine-cancel-swallow-unconfi/) |
+| 260925-inw | Fix equity ExecutionEngine TTL-cancel SUCCESS-path race (ho6 follow-up 1): sites 2 (entry TTL) and 4 (exit TTL) now re-read once after every TTL cancel, not only a failed one -- a partial fill landing between the last poll and a successful cancel (CANCELLED_PART) is returned as a FillEvent (no re-placed full BUY) / credited to total_filled before the next SELL is sized (no over-sell into a short); a failed or empty re-read escalates via _escalate_unconfirmed_cancel (audit + Telegram + exit hold on SELL); +1 order_list_query per TTL expiry; 4 tests | 2026-09-25 | 96a1497 | [260925-inw-fix-equity-engine-ttl-cancel-success-pat](./quick/260925-inw-fix-equity-engine-ttl-cancel-success-pat/) |
 
 ## Deferred Items
 
