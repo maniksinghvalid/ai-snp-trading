@@ -106,6 +106,7 @@ The strategy is the product. It is fully specified and authoritative:
 - [ ] Long-running scheduled service that orchestrates premarket → intraday loop → EOD unattended
 - [ ] Durable state + trade logging so the bot survives restarts and produces an auditable record
 - [x] Backtester to validate Trend Join Long on historical 5m data — Validated in Phase 06: Backtester (verified 4/4, 2026-07-07; replays 5m yfinance data through the unmodified live StrategyCore/FSM incl. Gate-7 breaker, produces per-trade CSV + summary report)
+- [x] Multi-strategy options bot — `tasty_credit_spreads` + `super_bull_call` bull call debit spread in one process from a `strategies` array; per-strategy sizing/caps, global breaker/BP/one-per-underlying — Validated in Phase 11 (UAT 5/5, 2026-09-26; 1350 tests)
 
 ### Out of Scope
 
@@ -164,6 +165,7 @@ The strategy is the product. It is fully specified and authoritative:
 | HTML performance dashboard (optional) | Offline, no-JS R-multiple histogram + open/closed trade tables for at-a-glance edge validation; complements (does not replace) Telegram summary | — Pending |
 | Options successor strategy `tasty_credit_spreads` (Phase 8, 2026-08-17) | Trend Join Long validated no-edge (2026-08-13, 226 trades, −0.019R). tastylive research (65 videos, Apify) → defined-risk iron condor / put credit spread on liquid ETFs: 45 DTE monthlies, IVR≥30 gate (fear knob 20), 20Δ shorts, ≥25% credit/width, 50% profit target, 21-DTE exit, 1% risk/trade, 25% BP cap. Self-contained `bot/options/` (own DB/kill-file/reports) reusing gateway/watchdog/alerter/kill-switch; `python -m bot --rules rules_options.json` dispatches on `strategy_name`; equity path unchanged; both bots can coexist on the shared paper account | Built (961 tests); live paper UAT pending |
 | External strategy research (Phase 10, 2026-08-18) | Two Reddit-sourced day-trading strategies (Ext#2 SMA10+MACD; Ext#1 ORB30+1H-EMA100+VWAP and its VWAP-pullback variant) critically extracted and backtested cache-only in `backtester/experimental/` against TJL, pre-registered H1-H8 protocol matching the Phase 9 discipline | REJECTED (H1, H3-H8): no external strategy or TJL regime-gate clears PF>1 in-sample; the combined-arm production bar (PF≥1.3 both windows) is never in reach. SUPPORTED (H2): `partial_be_trail` exit beats `pct_ladder` on Ext#2's own entries — but both variants still have PF<1 (a losing exit pair). This mechanically TRIGGERED plan 10-06's production-integration gate; operator selected `defer` — zero production code written, no `feature/phase10-*` branch. `rules.json`/`rules_options.json` unchanged; TJL stays parked |
+| Multi-strategy options bot (Phase 11, 2026-09-24) | Add a bull call debit spread ("Super Bull Call Spread", Options With Ravish) alongside the credit book without a second process: `strategies` array in `rules_options.json`, `strategy_name` on every position, universe = equity Trend Join Long premarket watchlist read read-only from `daily_scan`; full close at 60% of max, no stop; per-strategy caps, shared breaker/BP/underlying; `load_options_config` stays flat for backtester/probe | Built + verified (9 plans + quick 260925-goi, UAT 5/5, 67/67 threats closed); live watchlist read pending a main-repo run; no broker-holdings pre-trade guard yet |
 
 ## Evolution
 
@@ -183,4 +185,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-18 after Phase 10 (External Strategy Research) completion*
+*Last updated: 2026-09-26 after Phase 11 (Multi-strategy options bot) completion*
