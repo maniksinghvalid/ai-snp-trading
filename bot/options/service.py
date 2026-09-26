@@ -21,6 +21,7 @@ Exports: OptionsBot, main
 import asyncio
 import html
 import os
+import re
 import sys
 from datetime import date, datetime, time as _time, timedelta
 from uuid import uuid4
@@ -76,6 +77,10 @@ _CONTRACT_MULTIPLIER = 100
 
 _ACTIVE_STATUSES = ("OPENING", "OPEN", "CLOSING", "NEEDS_ATTENTION")
 _OPEN_STATUSES = ("OPEN", "OPENING")
+
+# Same shape as the gateway's _OPTION_CODE_RE, with the underlying captured;
+# the \d{6} expiry anchor is what keeps "US.TLTW..." from matching "US.TLT".
+_OPTION_UNDERLYING_RE = re.compile(r"^(US\.[A-Z]+)\d{6}[CP]\d+$")
 
 
 # ============================================================
@@ -543,6 +548,8 @@ class OptionsBot:
         """Evaluate one underlying and, if it qualifies, open the spread.
 
         Returns the inserted position dict on a filled open, else None.
+        Refuses to open (returns None) when the broker already holds any
+        option on this underlying or cannot be read (SAFE-OG-01).
         """
         cfg = self._cfg
         head = u_rows[0]
@@ -574,6 +581,39 @@ class OptionsBot:
 
         qty = size_position(sel["width"], sel["credit"], cfg, open_max_loss_total)
         if qty < 1:
+            return None
+
+        # A fresh read per candidate, not one snapshot for the whole scan: a
+        # prior _try_open in this same scan can spend minutes waiting on
+        # fills, so a scan-level snapshot would go stale.
+        try:
+            broker = await self._gateway.get_option_positions()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error(
+                "options_entry_broker_read_failed", underlying=code, exc_info=True,
+            )
+            return None
+
+        foreign = {
+            bcode: int(qty or 0)
+            for bcode, qty in (broker or {}).items()
+            if _OPTION_UNDERLYING_RE.match(bcode)
+            and _OPTION_UNDERLYING_RE.match(bcode).group(1) == code
+            and int(qty or 0) != 0
+        }
+        # ponytail: every broker holding on this underlying is foreign —
+        # _scan_and_open already skipped any underlying with an ACTIVE row in
+        # this DB (busy, from _ACTIVE_STATUSES), so none of these legs are
+        # ours. If one-position-per-underlying is ever relaxed, subtract own
+        # ACTIVE leg qty here.
+        if foreign:
+            overlap = set(foreign) & {leg["code"] for leg in sel["legs"]}
+            _logger.warning(
+                "options_entry_foreign_holding",
+                underlying=code, codes=sorted(foreign), leg_codes=sorted(overlap),
+            )
             return None
 
         position_id = uuid4().hex
