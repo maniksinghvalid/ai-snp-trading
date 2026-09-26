@@ -1,29 +1,32 @@
 ---
-status: testing
+status: complete
 phase: 11-multi-strategy-options-bot-bull-call-spread
 source: [11-VERIFICATION.md]
 started: 2026-09-24T17:10:54Z
-updated: 2026-09-24T21:45:00Z
+updated: 2026-09-26T22:00:00Z
 ---
 
 ## Current Test
 
-number: 1
-name: Live paper run with both books registered and the bull-call scan reading the real watchlist
-expected: |
-  During RTH, after the equity bot's premarket scan has persisted daily_scan rows, start
-  `PAPER_TRADING=true FUTU_TRD_ENV=SIMULATE FUTU_ACC_ID=1727266 python3 -m bot --rules rules_options.json`.
-  Startup log shows options_jobs_registered listing options_entry_scan_tasty_credit_spreads,
-  options_entry_scan_tasty_credit_spreads_2, options_entry_scan_super_bull_call, options_manage, options_eod;
-  at 10:05 ET a log line shows the watchlist read returning a non-empty code count (or a structured
-  options_watchlist_empty / options_watchlist_unavailable warning if the equity scan hasn't run).
-awaiting: user response
+[testing complete]
 
 ## Tests
 
 ### 1. Live paper run with both books registered and the bull-call scan reading the real watchlist
 expected: options_jobs_registered lists the 5 job ids (3 entry scans, options_manage, options_eod); at 10:05 ET the bull-call scan logs the watchlist read (non-empty count, or a structured options_watchlist_empty/options_watchlist_unavailable warning)
-result: [pending]
+result: pass — operator 2026-09-26
+evidence: |
+  Worktree run (PID 84687, cwd = this worktree). logs/bot.log 2026-09-26T21:28:19Z options_jobs_registered lists all 5 job ids.
+  2026-09-25T14:09:35Z (10:09 ET) super_bull_call scan logged options_watchlist_unavailable ("unable to open database file",
+  data/bot_state.db) -> options_watchlist_loaded count=0 -> options_entry_scan_skipped empty_universe (fail-closed as designed).
+note: |
+  Accepted by operator despite two caveats raised at checkpoint (not recorded as phase-11 gaps):
+  (1) the non-empty real-watchlist read was not exercised — the worktree's data/bot_state.db is not the equity bot's DB
+      (main repo DB has daily_scan rows through 2026-09-24); re-check after merge + restart from the main repo.
+  (2) the worktree run used its own fresh options_state.db on shared account 1727266; on 2026-09-25 it opened a TLT IC whose
+      short 75P netted against the main-repo DB's OPEN TLT long 75P (broker net 0) -> options_reconcile_mismatch ->
+      NEEDS_ATTENTION (fail-safe held). The entry path has no pre-trade check against broker holdings in contracts the bot
+      does not own — follow-up, not phase-11 scope.
 
 ### 2. Developer decision on CR-02 (EX-02) before extended unattended live/paper operation
 expected: A recorded decision — either a follow-up gap-closure plan (e.g. 11-08: propagate close_legs' unwind result out of open_position; a failed unwind lands NEEDS_ATTENTION + alert instead of ABORTED "legs unwound") is scheduled, or the residual risk (an entry-unwind failure can strand live legs outside BP/busy/reconcile visibility) is explicitly accepted
@@ -44,10 +47,12 @@ result: pass — operator decision 2026-09-25: fixed via quick task 260925-goi (
 ## Summary
 
 total: 5
-passed: 4
+passed: 5
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
 ## Gaps
+
+[none]

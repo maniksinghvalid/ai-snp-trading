@@ -1,7 +1,7 @@
 ---
 phase: 11-multi-strategy-options-bot-bull-call-spread
 verified: 2026-09-25T15:10:00Z
-status: human_needed
+status: passed
 score: 9/9 must-haves verified
 overrides_applied: 0
 re_verification:
@@ -155,6 +155,13 @@ No unresolved `TBD`/`FIXME`/`XXX` debt markers found in `bot/options/execution.p
 **Test:** Not a runnable check — a scope/risk-acceptance decision. Review the Escalated Finding section above (and `11-REVIEW.md`'s CR-04 section) and decide whether to accept the residual risk given the stated intent to stop the phase-11 review/fix loop after 11-09, or to schedule one more narrowly-scoped follow-up fixing the specific TTL-cancel-confirmation gap (routing an unconfirmed TTL-cancel through the now-hardened CR-03 exception path instead of silently escalating to a new order).
 **Expected:** A recorded decision — either a new follow-up plan is scheduled, or an override/acceptance is added to this or a future VERIFICATION.md.
 **Why human:** Same class of decision as CR-02's and CR-03's disposition in the prior two rounds — a pre-existing defect whose consequence is real and reproduced, but whose resolution is a scope/timing/risk-tolerance judgment, not something further static analysis can resolve unilaterally. This is presented as new information for the operator's already-stated intent to stop the loop, not as a demand to reopen it.
+
+### Human Verification Resolution (2026-09-26, /gsd-verify-work 11)
+
+Both human items above are closed — see `11-UAT.md` (5/5 passed, status complete):
+
+1. **Live paper run** — passed by operator 2026-09-26. `options_jobs_registered` (2026-09-26T21:28:19Z) lists all 5 job ids; the 2026-09-25 10:09 ET `super_bull_call` scan logged a structured `options_watchlist_unavailable` and skipped entries (fail-closed). Caveats accepted by the operator, carried as follow-ups rather than gaps: the run was from the worktree, so the non-empty real-watchlist read is still unexercised (re-check after merge + restart from the main repo), and its separate `options_state.db` on the shared account produced a TLT 75P cross-DB netting that reconcile caught (NEEDS_ATTENTION); the entry path has no pre-trade check against broker holdings in contracts the bot does not own.
+2. **CR-04 decision** — fixed via quick task 260925-goi (commits 2cb1d0f, 7689f2b): `fill_leg` raises instead of placing the next attempt when the TTL cancel is unconfirmed and the order is not fully filled; EX-03 routes an `open_position` exception to NEEDS_ATTENTION.
 
 ### Gaps Summary
 
