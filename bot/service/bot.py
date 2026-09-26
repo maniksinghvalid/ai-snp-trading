@@ -25,6 +25,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.position.state import PositionPhase, PositionState
 
+from bot.execution.engine import CancelUnconfirmedError
 from bot.position.manager import get_force_close_time_et
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
@@ -298,7 +299,17 @@ class TradingBot:
             return
 
         # Fix 1.1: capture FillEvent return; wire fill into PositionManager.
-        fill = await self._execution_engine.consume_intent(intent)
+        # CR-04 (260925-ho6): consume_intent can raise CancelUnconfirmedError
+        # when a cancel_order failure could not be confirmed dead. exc.fill
+        # carries any known-filled shares (entry-side only) so they are still
+        # booked and protected below exactly like a normal fill.
+        unconfirmed = False
+        try:
+            fill = await self._execution_engine.consume_intent(intent)
+        except CancelUnconfirmedError as exc:
+            fill = exc.fill
+            unconfirmed = True
+
         if fill is not None:
             # Build AWAITING_FILL PositionState — DB-first via register_position (POS-05/EXEC-05).
             pos = PositionState(
@@ -315,9 +326,14 @@ class TradingBot:
             self._position_manager.register_position(pos)   # DB-first (manager.py:1003)
             self._position_manager.on_fill(fill)            # FSM AWAITING_FILL → ACTIVE
             await self._position_manager.arm_stop_protection(pos)  # D-01: broker stop post-fill
-        else:
+        elif not unconfirmed:
             # Abandon path: intent was not filled; resolve it in state store.
             self._store.resolve_pending_intent(intent.intent_id, "ABANDONED")
+        # else (CR-04, unconfirmed, no fill): leave the intent PENDING. SAFE-OG-01
+        # orphan adoption (gateway._reconcile_core) only adopts a code that has a
+        # PENDING intent or an open DB position, so marking this ABANDONED would
+        # turn a late fill of the stray BUY into an unmanaged, stop-less long.
+        # PENDING also keeps the D-10 has_pending_intent re-entry gate closed.
 
         # Fix #5: decrement _pending_count on BOTH the fill and abandon paths.
         # Without this call, _pending_count only grows, permanently blocking

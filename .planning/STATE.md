@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
 Plan: 9 of 9
 Status: Complete (UAT 5/5, verification passed)
-Last activity: 2026-09-26 - /gsd-verify-work 11 passed
+Last activity: 2026-09-26 - /gsd-verify-work 11 passed; merged local develop (260925-ho6/inw, 260926-kvt) into phase 11 branch
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -229,7 +229,7 @@ None yet.
 
 ### Blockers/Concerns
 
-- ⚠️ [Phase 11] Options bot has no pre-trade check against broker holdings in contracts it does not own: a run with a separate options_state.db (worktree, 2026-09-25) sold TLT 11/20 75P against the main-repo DB's long 75P (broker net 0) — reconcile caught it (NEEDS_ATTENTION). Run the options bot only from the main repo on develop with its real DB.
+- ✓ [Phase 11] RESOLVED by 260926-kvt: options entry now refuses any underlying where the broker holds a foreign option (2026-09-25 worktree run sold TLT 11/20 75P against the main-repo DB's long 75P). Still run the options bot only from the main repo on develop with its real DB; the 2026-09-25 TLT NEEDS_ATTENTION row in the worktree DB needs manual cleanup.
 - ⚠️ [Phase 11] Non-empty equity-watchlist read for `super_bull_call` still unexercised live (worktree run had no equity DB); re-check the 10:05 ET log line after merge + restart from the main repo.
 - [Phase 11] Deferred review backlog: WR-02/03/04/08/09, IN-01..IN-13; WR-09 (no command to resolve NEEDS_ATTENTION rows) is the top follow-up.
 
@@ -247,6 +247,9 @@ None yet.
 | 260824-avx | Fix intraday rescan crash: run_intraday_rescan unconditionally protects managed active codes (open positions/pending intents) from eviction/unsubscribe; gateway.unsubscribe treats "not been subscribed" as benign so cleanup never aborts the rescan or skips premarket-high seeding | 2026-08-24 | b1962ef | [260824-avx-fix-intraday-rescan-crash-protect-manage](./quick/260824-avx-fix-intraday-rescan-crash-protect-manage/) |
 | 260827-j29 | Fix opened_at NOT NULL crash in register_position (filled position left unmanaged: no stop/trail/force-close, 2026-08-27 US.CRM) + re-create the one-shot force_close job after it fires (no force-close armed 2026-08-26/27) | 2026-08-27 | 247da3d | [260827-j29-fix-opened-at-not-null-crash-on-position](./quick/260827-j29-fix-opened-at-not-null-crash-on-position/) |
 | 260925-goi | Fix CR-04 (phase 11): options fill_leg raises instead of escalating when a TTL cancel_order fails and the order is not fully filled (no second live order, no stale partial qty); _try_open routes any open_position exception to the CR-02 NEEDS_ATTENTION + working-orders alert (EX-03 routing) | 2026-09-25 | 7689f2b | [260925-goi-fix-cr-04-fill-leg-ttl-cancel-swallow](./quick/260925-goi-fix-cr-04-fill-leg-ttl-cancel-swallow/) |
+| 260925-ho6 | Fix equity ExecutionEngine cancel-swallow (CR-04 parity with options 260925-goi): a failed cancel_order at any of 4 sites is re-read; if not filled/terminal the engine audits, retries once, alerts Telegram and raises CancelUnconfirmedError instead of placing the next BUY/SELL; bot.py books known entry shares and leaves no-fill intents PENDING; exits credit a lower bound and an in-memory exit hold blocks further SELLs and re-entries for the code until restart; 13 tests | 2026-09-25 | 3625cf1 | [260925-ho6-fix-equity-engine-cancel-swallow-unconfi](./quick/260925-ho6-fix-equity-engine-cancel-swallow-unconfi/) |
+| 260925-inw | Fix equity ExecutionEngine TTL-cancel SUCCESS-path race (ho6 follow-up 1): sites 2 (entry TTL) and 4 (exit TTL) now re-read once after every TTL cancel, not only a failed one -- a partial fill landing between the last poll and a successful cancel (CANCELLED_PART) is returned as a FillEvent (no re-placed full BUY) / credited to total_filled before the next SELL is sized (no over-sell into a short); a failed or empty re-read escalates via _escalate_unconfirmed_cancel (audit + Telegram + exit hold on SELL); +1 order_list_query per TTL expiry; 4 tests | 2026-09-25 | 96a1497 | [260925-inw-fix-equity-engine-ttl-cancel-success-pat](./quick/260925-inw-fix-equity-engine-ttl-cancel-success-pat/) |
+| 260926-kvt | Options bot entry guard (SAFE-OG-01, 2026-09-25 TLT net-zero incident): `_try_open` does one fresh `get_option_positions()` read per sized candidate before any DB row/order; skips (`options_entry_foreign_holding`, codes + overlapping leg_codes) if the broker holds ANY non-zero option qty on that underlying (own ACTIVE legs can't be there: `busy` already skipped the underlying); broker read failure fails closed (`options_entry_broker_read_failed`); 5 tests | 2026-09-26 | 6bf02b3 | [260926-kvt-options-bot-block-entry-when-broker-hold](./quick/260926-kvt-options-bot-block-entry-when-broker-hold/) |
 
 ## Deferred Items
 

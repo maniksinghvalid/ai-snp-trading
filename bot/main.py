@@ -101,9 +101,18 @@ def main(rules_path: str = "rules.json") -> None:
     gateway = MoomooGateway(get_gateway_config(), initial_stop_pct=cfg.initial_stop_pct)
     store = StateStore().open()
 
+    # Step 5b: Construct alerter (moved before the engine — CR-04 260925-ho6:
+    # ExecutionEngine needs alerter= at construction so an unconfirmed cancel
+    # can dispatch a Telegram alert, D3 step 5).
+    alerter = TelegramAlerter(
+        token=telegram_token,
+        chat_id=telegram_chat_id,
+        logger=_logger,
+    )
+
     # Step 5a: Construct strategy and execution engine
     strategy = TrendJoinLong(cfg)
-    engine = ExecutionEngine(gateway=gateway, store=store, cfg=cfg)
+    engine = ExecutionEngine(gateway=gateway, store=store, cfg=cfg, alerter=alerter)
 
     # Step 5d: Construct SignalEngine — loop-independent leaf (D-04)
     # Takes only cfg/gateway/store; the loop-dependent aggregator stays in TradingBot.run()
@@ -113,13 +122,6 @@ def main(rules_path: str = "rules.json") -> None:
     # Receives signal_engine reference so note_intent_emitted() drives the D-09 daily-cap
     # burst guard (RISK-05 / Pitfall 7). signal_engine MUST be constructed first.
     risk_engine = RiskEngine(cfg=cfg, gateway=gateway, store=store, signal_engine=signal_engine)
-
-    # Step 5b: Construct alerter
-    alerter = TelegramAlerter(
-        token=telegram_token,
-        chat_id=telegram_chat_id,
-        logger=_logger,
-    )
 
     # Step 5c: Construct PositionManager with fire-and-forget alert lambdas (ALERT-04)
     # asyncio.create_task dispatches send() without blocking the trade loop (D-14)

@@ -644,6 +644,72 @@ async def test_process_bar_resolves_intent_on_abandon():
 
 
 # ============================================================
+# CR-04 parity (quick 260925-ho6) — CancelUnconfirmedError handling
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_cr04_process_bar_unconfirmed_with_fill_books_position():
+    """CR-04 D6: consume_intent raising CancelUnconfirmedError with a known
+    fill still books and protects the position (register_position/on_fill/
+    arm_stop_protection), exactly like the normal fill path.
+    """
+    from bot.execution.engine import CancelUnconfirmedError
+    from bot.execution.events import FillEvent
+    from datetime import datetime as _dt
+
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+
+    fill = FillEvent(
+        order_id="ord-9",
+        intent_id=mock_intent.intent_id,
+        code="US.AAPL",
+        filled_qty=40,
+        avg_fill_price=182.60,
+        is_entry=True,
+        fill_time=_dt(2026, 6, 24, 10, 5, 0),
+    )
+    mock_ee.consume_intent = AsyncMock(
+        side_effect=CancelUnconfirmedError(
+            "x", code="US.AAPL", order_id="ord-9",
+            filled_qty=40, avg_price=182.60, fill=fill,
+        )
+    )
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    mock_pm.register_position.assert_called_once()
+    mock_pm.on_fill.assert_called_once_with(fill)
+    mock_pm.arm_stop_protection.assert_awaited_once()
+    bot._store.resolve_pending_intent.assert_not_called()
+    mock_se.note_intent_resolved.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cr04_process_bar_unconfirmed_without_fill_leaves_intent_pending():
+    """CR-04 D6: consume_intent raising CancelUnconfirmedError with no fill
+    must NOT resolve the intent as ABANDONED — it stays PENDING so SAFE-OG-01
+    orphan adoption can still claim a late fill of the stray BUY.
+    """
+    from bot.execution.engine import CancelUnconfirmedError
+
+    bot, mock_se, mock_pm, mock_ee, mock_intent = _make_bot_with_full_pipeline()
+
+    mock_ee.consume_intent = AsyncMock(
+        side_effect=CancelUnconfirmedError(
+            "x", code="US.AAPL", order_id="ord-10",
+            filled_qty=0, avg_price=0.0, fill=None,
+        )
+    )
+
+    await bot._process_bar(_PROCESS_BAR_DATA)
+
+    mock_pm.register_position.assert_not_called()
+    bot._store.resolve_pending_intent.assert_not_called()
+    mock_se.note_intent_resolved.assert_called_once()
+
+
+# ============================================================
 # 07-03: arm_stop_protection post-fill hook (D-01/D-03)
 # ============================================================
 
