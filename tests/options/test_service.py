@@ -546,6 +546,133 @@ def test_entry_scan_aborts_position_when_open_fails(
     assert "entry failed" in alerter.send.await_args[0][0]
 
 
+def _no_rows(store):
+    return store.get_option_positions(
+        ("OPENING", "OPEN", "ABORTED", "NEEDS_ATTENTION")
+    ) == []
+
+
+def test_entry_scan_skips_when_broker_holds_foreign_qty_in_a_leg_code(
+    make_bot, store, gateway, monkeypatch,
+):
+    """Regression for the 2026-09-25 TLT incident: a broker holding on one of
+    this scan's own selected leg codes must block the entry, not net to zero."""
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    gateway.get_option_positions = AsyncMock(
+        return_value={"US.SPY261001P600000": 6}
+    )
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+
+    _run(bot._job_entry_scan())
+
+    assert _no_rows(store)
+    bot._executor.open_position.assert_not_awaited()
+    calls = [
+        c.kwargs for c in log.warning.call_args_list
+        if c.args and c.args[0] == "options_entry_foreign_holding"
+    ]
+    assert len(calls) == 1
+    assert calls[0]["underlying"] == "US.SPY"
+    assert calls[0]["codes"] == ["US.SPY261001P600000"]
+    assert calls[0]["leg_codes"] == ["US.SPY261001P600000"]
+
+
+def test_entry_scan_skips_when_broker_holds_other_option_on_same_underlying(
+    make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    gateway.get_option_positions = AsyncMock(
+        return_value={"US.SPY261120P550000": -3}
+    )
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+
+    _run(bot._job_entry_scan())
+
+    assert _no_rows(store)
+    bot._executor.open_position.assert_not_awaited()
+    calls = [
+        c.kwargs for c in log.warning.call_args_list
+        if c.args and c.args[0] == "options_entry_foreign_holding"
+    ]
+    assert len(calls) == 1
+    assert calls[0]["codes"] == ["US.SPY261120P550000"]
+    assert calls[0]["leg_codes"] == []
+
+
+def test_entry_scan_opens_when_broker_holds_only_own_legs_elsewhere(
+    make_bot, store, gateway, monkeypatch,
+):
+    """Guards against over-blocking: the bot's own open legs on ANOTHER
+    underlying must never stop a fresh entry on this scan's underlying."""
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    store.insert_option_position(
+        _pos("OWN", underlying="US.QQQ", opened_at="2026-08-10T10:00:00-04:00")
+    )
+    store.insert_option_leg(
+        _leg("OWN-L1", "OWN", side="BUY", code="US.QQQ260320P494000", strike=494.0)
+    )
+    store.insert_option_leg(
+        _leg("OWN-L2", "OWN", side="SELL", code="US.QQQ260320P500000", strike=500.0)
+    )
+    gateway.get_option_positions = AsyncMock(return_value={
+        "US.QQQ260320P494000": 2, "US.QQQ260320P500000": -2,
+    })
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+
+    _run(bot._job_entry_scan())
+
+    spy_open = [p for p in store.get_option_positions(("OPEN",))
+                if p["underlying"] == "US.SPY"]
+    assert len(spy_open) == 1
+    assert len(store.get_option_positions(("OPEN",))) == 2
+    bot._executor.open_position.assert_awaited_once()
+    calls = [
+        c for c in log.warning.call_args_list
+        if c.args and c.args[0] == "options_entry_foreign_holding"
+    ]
+    assert calls == []
+
+
+def test_entry_scan_fails_closed_when_broker_read_fails(
+    make_bot, store, gateway, monkeypatch,
+):
+    bot = make_bot()
+    _wire_scan(bot, gateway, monkeypatch)
+    bot._executor = _fake_executor()
+    gateway.get_option_positions = AsyncMock(side_effect=Exception("OpenD down"))
+    log = MagicMock()
+    monkeypatch.setattr(service, "_logger", log)
+
+    _run(bot._job_entry_scan())
+
+    assert _no_rows(store)
+    bot._executor.open_position.assert_not_awaited()
+    calls = [
+        c.kwargs for c in log.error.call_args_list
+        if c.args and c.args[0] == "options_entry_broker_read_failed"
+    ]
+    assert len(calls) == 1
+    assert calls[0]["underlying"] == "US.SPY"
+
+
+def test_option_underlying_re_keeps_longer_tickers_apart():
+    assert service._OPTION_UNDERLYING_RE.match(
+        "US.TLTW261120P75000"
+    ).group(1) == "US.TLTW"
+    assert service._OPTION_UNDERLYING_RE.match(
+        "US.TLT261120P75000"
+    ).group(1) == "US.TLT"
+
+
 # ============================================================
 # Manage
 # ============================================================
