@@ -596,13 +596,11 @@ class OptionsBot:
             )
             return None
 
-        foreign = {
-            bcode: int(qty or 0)
-            for bcode, qty in (broker or {}).items()
-            if _OPTION_UNDERLYING_RE.match(bcode)
-            and _OPTION_UNDERLYING_RE.match(bcode).group(1) == code
-            and int(qty or 0) != 0
-        }
+        foreign = {}
+        for bcode, bqty in (broker or {}).items():
+            m = _OPTION_UNDERLYING_RE.match(bcode)
+            if m and m.group(1) == code and int(bqty or 0) != 0:
+                foreign[bcode] = int(bqty)
         # ponytail: every broker holding on this underlying is foreign —
         # _scan_and_open already skipped any underlying with an ACTIVE row in
         # this DB (busy, from _ACTIVE_STATUSES), so none of these legs are
