@@ -8,6 +8,7 @@ Verifies:
 - Log entries contain correct 'level' fields
 - configure_logging() is idempotent (safe to call twice)
 - get_logger() returns a usable structlog logger
+- bare configure_logging() in the test session stays out of ./logs/bot.log (260927-r53)
 """
 import json
 import os
@@ -66,6 +67,30 @@ def test_configure_logging_creates_directory(tmp_path):
     assert not os.path.exists(log_dir)
     configure_logging(log_dir=log_dir)
     assert os.path.isdir(log_dir)
+
+
+def test_bare_configure_logging_does_not_target_production_log():
+    """A bare configure_logging() in the test session must never write to
+    the production ./logs/bot.log, because the live equity and options bots
+    share that file (quick task 260927-r53).
+    """
+    import logging
+    from bot.safety.logger import configure_logging
+
+    configure_logging()
+
+    base_filenames = [
+        getattr(h, "baseFilename", None)
+        for h in logging.getLogger().handlers
+    ]
+    base_filenames = [f for f in base_filenames if f is not None]
+
+    assert base_filenames, "No file handler with a baseFilename was installed"
+
+    prod_log = os.path.abspath(os.path.join("logs", "bot.log"))
+    assert prod_log not in base_filenames, (
+        f"configure_logging() targeted the production log path: {base_filenames}"
+    )
 
 
 # ============================================================
