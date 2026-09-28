@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-06-23)
 Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
 Plan: 9 of 9
 Status: Complete (UAT 5/5, verification passed)
-Last activity: 2026-09-28 - Completed quick task 260927-r53: Keep test runs from writing to production logs/bot.log
+Last activity: 2026-09-28 - Completed quick task 260927-w4r: Fix after-20:00-ET wall-clock flake in trade-recording tests
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -251,6 +251,7 @@ None yet.
 | 260925-inw | Fix equity ExecutionEngine TTL-cancel SUCCESS-path race (ho6 follow-up 1): sites 2 (entry TTL) and 4 (exit TTL) now re-read once after every TTL cancel, not only a failed one -- a partial fill landing between the last poll and a successful cancel (CANCELLED_PART) is returned as a FillEvent (no re-placed full BUY) / credited to total_filled before the next SELL is sized (no over-sell into a short); a failed or empty re-read escalates via _escalate_unconfirmed_cancel (audit + Telegram + exit hold on SELL); +1 order_list_query per TTL expiry; 4 tests | 2026-09-25 | 96a1497 | [260925-inw-fix-equity-engine-ttl-cancel-success-pat](./quick/260925-inw-fix-equity-engine-ttl-cancel-success-pat/) |
 | 260926-kvt | Options bot entry guard (SAFE-OG-01, 2026-09-25 TLT net-zero incident): `_try_open` does one fresh `get_option_positions()` read per sized candidate before any DB row/order; skips (`options_entry_foreign_holding`, codes + overlapping leg_codes) if the broker holds ANY non-zero option qty on that underlying (own ACTIVE legs can't be there: `busy` already skipped the underlying); broker read failure fails closed (`options_entry_broker_read_failed`); 5 tests | 2026-09-26 | 6bf02b3 | [260926-kvt-options-bot-block-entry-when-broker-hold](./quick/260926-kvt-options-bot-block-entry-when-broker-hold/) |
 | 260927-r53 | Test runs no longer write the production `logs/bot.log` (fake `leg_order_placed` O1/O2/O3 + `options_reconcile_mismatch` P1 seen there 2026-09-26 22:24Z): session autouse `_isolate_bot_log` in tests/conftest.py patches `configure_logging.__defaults__` to a session tmp dir (`bot.main.main()` tests reached the real default `log_dir="logs"`); guard test `test_bare_configure_logging_does_not_target_production_log` (mutation-checked); no bot/ change | 2026-09-28 | 34eb7b5 | [260927-r53-keep-test-runs-from-writing-to-productio](./quick/260927-r53-keep-test-runs-from-writing-to-productio/) |
+| 260927-w4r | `TestP1BTradeRecording::test_on_quote_full_fill_closes_and_records_trade` failed when run 20:00-24:00 ET (`closed_at` ET-offset string -> SQLite `DATE()` normalises to next UTC date vs query by ET date); both `_on_quote` tests now freeze `bot.position.manager.now_et` at 2026-06-24 10:06 and query `"2026-06-24"` like siblings (partial-fill `== []` assert was vacuous after 20:00 ET). Red/green proven via scratchpad late-clock plugin; test-only, no bot/ change | 2026-09-28 | ed86bff | [260927-w4r-fix-after-20-00-et-wall-clock-flake-in-t](./quick/260927-w4r-fix-after-20-00-et-wall-clock-flake-in-t/) |
 
 ## Deferred Items
 
