@@ -45,13 +45,10 @@ def _isolate_bot_log(tmp_path_factory):
     """Keep every test run out of the production logs/bot.log that the live
     equity and options bots share (quick task 260927-r53).
 
-    Patches configure_logging's __defaults__ (not _DEFAULT_LOG_DIR or the
-    module attribute) because bot.main and bot.options.service bind
-    configure_logging by name and its default log_dir is bound at def time.
-    Patching _DEFAULT_LOG_DIR or the module attribute would miss those
-    callers, who already hold a reference to the function object itself.
-    Production code (bot/safety/logger.py, bot/main.py,
-    bot/options/service.py) is intentionally untouched.
+    Patches configure_logging's __defaults__ because bot.main and
+    bot.options.service import the function by name and log_dir's default is
+    bound at def time, so patching _DEFAULT_LOG_DIR or the module attribute
+    would miss them. Production logging code is intentionally untouched.
     """
     from bot.safety import logger
 

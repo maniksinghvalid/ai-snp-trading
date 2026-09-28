@@ -80,10 +80,9 @@ def test_bare_configure_logging_does_not_target_production_log():
     configure_logging()
 
     base_filenames = [
-        getattr(h, "baseFilename", None)
-        for h in logging.getLogger().handlers
+        h.baseFilename for h in logging.getLogger().handlers
+        if hasattr(h, "baseFilename")
     ]
-    base_filenames = [f for f in base_filenames if f is not None]
 
     assert base_filenames, "No file handler with a baseFilename was installed"
 
