@@ -3290,11 +3290,13 @@ class TestP1BTradeRecording:
         manager._positions[pos.code] = pos
         open_store.upsert_position(pos)
 
-        await manager._on_quote(pos.code, bid_price=97.5)  # <= trail_stop=98.0
+        with patch("bot.position.manager.now_et",
+                  return_value=datetime(2026, 6, 24, 10, 6, 0)):
+            await manager._on_quote(pos.code, bid_price=97.5)  # <= trail_stop=98.0
 
         assert pos.phase == PositionPhase.CLOSED
         assert pos.remaining_quantity == 0
-        rows = open_store.get_closed_trades(pos.updated_at.date().isoformat())
+        rows = open_store.get_closed_trades("2026-06-24")
         assert len(rows) == 1, f"Expected exactly one trade row, got {rows!r}"
         assert rows[0]["exit_price"] == pytest.approx(96.5)
         assert len(alert_calls) == 1
@@ -3324,11 +3326,13 @@ class TestP1BTradeRecording:
         manager._positions[pos.code] = pos
         open_store.upsert_position(pos)
 
-        await manager._on_quote(pos.code, bid_price=97.5)
+        with patch("bot.position.manager.now_et",
+                  return_value=datetime(2026, 6, 24, 10, 6, 0)):
+            await manager._on_quote(pos.code, bid_price=97.5)
 
         assert pos.phase != PositionPhase.CLOSED
         assert pos.remaining_quantity == 150
-        assert open_store.get_closed_trades(pos.updated_at.date().isoformat()) == []
+        assert open_store.get_closed_trades("2026-06-24") == []
         assert alert_calls == []
 
     def test_record_trade_if_closed_is_a_noop_once_already_recorded(
