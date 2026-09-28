@@ -3,11 +3,12 @@
 tests/conftest.py — Shared pytest fixtures for the AI S&P Trading Bot test suite.
 
 Provides:
-  tmp_state_db    — monkeypatches BOT_STATE_DB to a tmp_path-based SQLite path (D-09)
-  minimal_rules   — canonical strategy dict from PROJECT.md §"The Strategy"
-  mock_trade_ctx  — mock object whose get_acc_list() returns a pandas DataFrame
-  make_fill_event — factory returning a synthetic FillEvent (Phase 4 scaffold)
-  make_bar_event  — factory returning a synthetic BarEvent (Phase 4 scaffold)
+  tmp_state_db     — monkeypatches BOT_STATE_DB to a tmp_path-based SQLite path (D-09)
+  minimal_rules    — canonical strategy dict from PROJECT.md §"The Strategy"
+  mock_trade_ctx   — mock object whose get_acc_list() returns a pandas DataFrame
+  make_fill_event  — factory returning a synthetic FillEvent (Phase 4 scaffold)
+  make_bar_event   — factory returning a synthetic BarEvent (Phase 4 scaffold)
+  _isolate_bot_log — (session, autouse) points configure_logging()'s default log_dir at a session tmp dir
 """
 import os
 from datetime import datetime
@@ -33,6 +34,34 @@ def tmp_state_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "bot_state_test.db")
     monkeypatch.setenv("BOT_STATE_DB", db_path)
     return db_path
+
+
+# ============================================================
+# Logging isolation
+# ============================================================
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_bot_log(tmp_path_factory):
+    """Keep every test run out of the production logs/bot.log that the live
+    equity and options bots share (quick task 260927-r53).
+
+    Patches configure_logging's __defaults__ (not _DEFAULT_LOG_DIR or the
+    module attribute) because bot.main and bot.options.service bind
+    configure_logging by name and its default log_dir is bound at def time.
+    Patching _DEFAULT_LOG_DIR or the module attribute would miss those
+    callers, who already hold a reference to the function object itself.
+    Production code (bot/safety/logger.py, bot/main.py,
+    bot/options/service.py) is intentionally untouched.
+    """
+    from bot.safety import logger
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            logger.configure_logging,
+            "__defaults__",
+            (str(tmp_path_factory.mktemp("logs")), logger._DEFAULT_LEVEL),
+        )
+        yield
 
 
 # ============================================================
