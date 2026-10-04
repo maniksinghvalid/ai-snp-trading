@@ -702,6 +702,16 @@ class TradingBot:
             if self._bar_agg is not None:
                 self._bar_agg.reset_session()
 
+            # Per-session reset of the SignalEngine's frozen premarket highs. The
+            # engine lives for the whole process, and the seed below only runs for
+            # a non-empty watchlist (or can raise), so without this yesterday's
+            # highs survive an empty-watchlist/failed-seed day and
+            # fetch_and_merge_premarket_highs would skip a re-qualifying code as
+            # "already present" -> I1 against yesterday's premarket high. Empty
+            # dict == Gate 1 fails closed until today's highs are seeded.
+            if self._signal_engine is not None:
+                self._signal_engine.set_premarket_highs({})
+
             # Read active watchlist codes from the store
             loop = asyncio.get_running_loop()
 

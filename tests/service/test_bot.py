@@ -389,6 +389,103 @@ async def test_market_open_subscribe_skips_seed_when_signal_engine_none():
 
 
 # ============================================================
+# Per-session reset of SignalEngine._premarket_highs (debug session
+# premarket-scan-abort-stale, bug 2a)
+#
+# SignalEngine lives for the whole bot process. The market-open job only
+# reseeded _premarket_highs when the watchlist was non-empty, so on an
+# empty-watchlist day yesterday's frozen highs survived, and
+# fetch_and_merge_premarket_highs then skipped any code already present: a code
+# re-qualifying in today's rescan was evaluated by I1 against YESTERDAY's
+# premarket high.
+# ============================================================
+
+def _make_open_job_bot(codes, signal_engine, gateway=None):
+    """TradingBot wired just enough to run _job_market_open_subscribe."""
+    from bot.service.bot import TradingBot
+
+    mock_cfg = MagicMock()
+    mock_cfg.market_open_et = "09:30"
+    mock_gateway = gateway if gateway is not None else MagicMock()
+    mock_gateway.subscribe = AsyncMock()
+    mock_store = MagicMock()
+    mock_store.get_watchlist_codes.return_value = codes
+    return TradingBot(
+        cfg=mock_cfg,
+        gateway=mock_gateway,
+        store=mock_store,
+        scanner=MagicMock(),
+        position_manager=MagicMock(),
+        execution_engine=MagicMock(),
+        kill_switch=MagicMock(),
+        alerter=MagicMock(),
+        watchdog=None,
+        signal_engine=signal_engine,
+        risk_engine=None,
+    )
+
+
+async def _run_market_open_job(bot):
+    from datetime import date
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 10, 2)
+        await bot._job_market_open_subscribe()
+
+
+@pytest.mark.asyncio
+async def test_market_open_empty_watchlist_clears_prior_session_premarket_highs():
+    """Empty watchlist at open: yesterday's frozen premarket highs must not survive."""
+    from bot.signal.signal_engine import SignalEngine
+
+    engine = SignalEngine(MagicMock(), MagicMock(), MagicMock())
+    engine.set_premarket_highs({"US.IT": 111.0})  # frozen by yesterday's open job
+
+    await _run_market_open_job(_make_open_job_bot([], engine))
+
+    assert engine._premarket_highs == {}, (
+        "market-open job must reset _premarket_highs per session even when the "
+        f"watchlist is empty; stale highs survived: {engine._premarket_highs}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_market_open_empty_watchlist_requalifying_code_gets_todays_high():
+    """A code that re-qualifies in today's rescan is merged with TODAY's high, not yesterday's."""
+    import pandas as pd
+    from bot.signal.signal_engine import SignalEngine
+
+    gateway = MagicMock()
+    gateway.get_market_snapshot = AsyncMock(
+        return_value=(0, pd.DataFrame([{"code": "US.IT", "pre_high_price": 130.0}]))
+    )
+    engine = SignalEngine(MagicMock(), gateway, MagicMock())
+    engine.set_premarket_highs({"US.IT": 111.0})  # yesterday's
+
+    await _run_market_open_job(_make_open_job_bot([], engine, gateway=gateway))
+    merged = await engine.fetch_and_merge_premarket_highs(["US.IT"])
+
+    assert merged == {"US.IT": 130.0}
+    assert engine._premarket_highs["US.IT"] == 130.0
+
+
+@pytest.mark.asyncio
+async def test_market_open_failed_seed_leaves_no_prior_session_highs():
+    """If today's premarket-high fetch raises, Gate 1 must fail closed (empty), not run on yesterday's highs."""
+    from bot.signal.signal_engine import SignalEngine
+
+    gateway = MagicMock()
+    gateway.get_market_snapshot = AsyncMock(side_effect=RuntimeError("OpenD hiccup"))
+    engine = SignalEngine(MagicMock(), gateway, MagicMock())
+    engine.set_premarket_highs({"US.IT": 111.0})
+
+    await _run_market_open_job(_make_open_job_bot(["US.IT"], engine, gateway=gateway))
+
+    assert engine._premarket_highs == {}
+
+
+# ============================================================
 # Finding 1.1 + #5: wire FillEvent into PositionManager; resolve intent on both paths
 # ============================================================
 
