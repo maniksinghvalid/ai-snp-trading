@@ -838,6 +838,21 @@ class TestUnsubscribe:
             asyncio.run(gw.unsubscribe(["US.AAPL"]))
 
 
+class TestGetCurKline:
+    """get_cur_kline() — thin read of the latest K_5M bars (session backfill)."""
+
+    def test_reads_latest_k5m_bars_unchanged(self):
+        from moomoo import KLType
+
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.get_cur_kline.return_value = (0, "frame")
+
+        result = asyncio.run(gw.get_cur_kline("US.AAPL", 100))
+
+        assert result == (0, "frame")
+        gw._quote_ctx.get_cur_kline.assert_called_once_with("US.AAPL", 100, KLType.K_5M)
+
+
 class TestGetSubscribedK5mCodes:
     """get_subscribed_k5m_codes() — what THIS connection holds (stale-feed release)."""
 

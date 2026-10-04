@@ -558,6 +558,116 @@ async def test_market_open_subscription_query_failure_is_fail_open():
     gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
 
 
+# ============================================================
+# Rescan backfill of session HOD/LOD/volume (debug session
+# premarket-scan-abort-stale, bug 2c)
+#
+# A code the rescan subscribes at 09:55+ only sees bars from its first live push,
+# so its session HOD/LOD/cum_volume are partial. After the rescan subscribes, the
+# job backfills the 09:30 -> subscribe bars from get_cur_kline (no history quota)
+# into the BarAggregator -- BEFORE merging premarket highs, because Gate 1
+# (premarket high present) is what stops a signal from firing on partial stats.
+# ============================================================
+
+_PRE_BARS_DF_ROWS = [
+    {"time_key": "2026-10-02 09:30:00", "high": 103.0, "low": 98.0, "volume": 10_000},
+    {"time_key": "2026-10-02 09:35:00", "high": 102.0, "low": 99.0, "volume": 20_000},
+    {"time_key": "2026-10-02 09:40:00", "high": 101.5, "low": 99.2, "volume": 30_000},
+    {"time_key": "2026-10-02 09:55:00", "high": 101.0, "low": 99.5, "volume": 5_000},  # in flight
+]
+
+
+def _first_push(code="US.NEW"):
+    return {"code": code, "time_key": "2026-10-02 09:55:00", "open": 100.0,
+            "high": 101.0, "low": 99.5, "close": 100.5, "volume": 5_000}
+
+
+def _make_rescan_bot(rescan_codes):
+    """Bot (real BarAggregator, mocked scanner/gateway/engine) ready for _job_intraday_rescan."""
+    import pandas as pd
+    from bot.service.bot import TradingBot
+
+    cfg = MagicMock()
+    cfg.intraday_rescan_start_et = "09:55"
+    cfg.intraday_rescan_end_et = "12:55"
+    recorder = MagicMock()
+    recorder.get_cur_kline = AsyncMock(return_value=(0, pd.DataFrame(_PRE_BARS_DF_ROWS)))
+    recorder.fetch_and_merge_premarket_highs = AsyncMock(return_value={})
+    gateway = MagicMock()
+    gateway.get_cur_kline = recorder.get_cur_kline
+    engine = MagicMock()
+    engine.fetch_and_merge_premarket_highs = recorder.fetch_and_merge_premarket_highs
+    scanner = MagicMock()
+    scanner.run_intraday_rescan.return_value = list(rescan_codes)
+    store = MagicMock()
+    store.get_open_positions.return_value = []
+    store.get_pending_intent_codes.return_value = []
+    bot = TradingBot(
+        cfg=cfg, gateway=gateway, store=store, scanner=scanner,
+        position_manager=MagicMock(), execution_engine=MagicMock(),
+        kill_switch=MagicMock(), alerter=MagicMock(), watchdog=None,
+        signal_engine=engine, risk_engine=None,
+    )
+    return bot, recorder
+
+
+async def _run_rescan_job(bot):
+    from datetime import date, time as dtime
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 10, 2)
+        mock_now.return_value.time.return_value = dtime(10, 0)
+        await bot._job_intraday_rescan()
+
+
+@pytest.mark.asyncio
+async def test_rescan_backfills_new_code_session_stats_before_merging_premarket_highs():
+    bot, recorder = _make_rescan_bot(["US.NEW"])
+    agg = bot._bar_agg
+    agg._handle_row(_first_push())          # live stream began at 09:55
+
+    await _run_rescan_job(bot)
+
+    assert agg._hod["US.NEW"] == 103.0, f"HOD not backfilled: {agg._hod['US.NEW']}"
+    assert agg._lod["US.NEW"] == 98.0, f"LOD not backfilled: {agg._lod['US.NEW']}"
+    assert agg._session_volume["US.NEW"] == 60_000
+    order = [c[0] for c in recorder.mock_calls if c[0]]
+    assert order.index("get_cur_kline") < order.index("fetch_and_merge_premarket_highs"), (
+        f"backfill must precede the premarket-high merge (Gate 1); order was {order}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rescan_backfill_failure_is_fail_open():
+    """Non-OK read or an exception: keep today's behaviour (partial stats), job completes,
+    premarket highs are still merged, and the code is retried on the next rescan."""
+    bot, recorder = _make_rescan_bot(["US.NEW"])
+    agg = bot._bar_agg
+    agg._handle_row(_first_push())
+
+    recorder.get_cur_kline.return_value = (1, "kline not ready")
+    await _run_rescan_job(bot)
+    recorder.get_cur_kline.side_effect = RuntimeError("OpenD hiccup")
+    await _run_rescan_job(bot)
+
+    assert agg._hod["US.NEW"] == 101.0 and agg._lod["US.NEW"] == 99.5
+    assert agg.is_backfilled("US.NEW") is False
+    assert recorder.fetch_and_merge_premarket_highs.await_count == 2
+    assert recorder.get_cur_kline.await_count == 2, "unsuccessful codes must be retried"
+
+
+@pytest.mark.asyncio
+async def test_rescan_does_not_refetch_already_backfilled_codes():
+    bot, recorder = _make_rescan_bot(["US.NEW"])
+    bot._bar_agg._handle_row(_first_push())
+
+    await _run_rescan_job(bot)
+    await _run_rescan_job(bot)
+
+    assert recorder.get_cur_kline.await_count == 1
+
+
 @pytest.mark.asyncio
 async def test_market_open_failed_seed_leaves_no_prior_session_highs():
     """If today's premarket-high fetch raises, Gate 1 must fail closed (empty), not run on yesterday's highs."""

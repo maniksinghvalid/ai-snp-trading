@@ -988,6 +988,28 @@ class MoomooGateway:
         await loop.run_in_executor(None, _unsubscribe_blocking)
         _logger.info("unsubscribed_k5m", codes=codes, count=len(codes))
 
+    async def get_cur_kline(self, code: str, num: int) -> tuple:
+        """Raw read of the latest `num` K_5M bars for code (interpretation-free).
+
+        Returns the (ret, data) tuple from quote_ctx.get_cur_kline unchanged; the
+        last row is the bar currently in flight. Requires an active K_5M
+        subscription on code (subscribe() first) and costs no history-kline quota
+        -- used to backfill session HOD/LOD/volume for a code subscribed after
+        09:30 ET. Non-RET_OK is returned as-is, never raised: the caller degrades.
+
+        Args:
+            code: Moomoo-format code (e.g. "US.AAPL").
+            num:  Number of most recent bars (SDK max 1000).
+        """
+        # Deferred import — mirrors subscribe() (no top-level moomoo import).
+        from moomoo import KLType
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._quote_ctx.get_cur_kline(code, num, KLType.K_5M),
+        )
+
     async def get_subscribed_k5m_codes(self) -> set:
         """Codes this connection currently holds a K_5M subscription for.
 

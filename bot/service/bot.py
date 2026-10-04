@@ -39,6 +39,13 @@ from bot.service.report import build_daily_html as _build_daily_html, write_repo
 
 _logger = get_logger(__name__)
 
+# moomoo RET_OK — same no-SDK-import pattern as bot.signal.signal_engine.
+_RET_OK = 0
+
+# K_5M bars requested for the session backfill: a full regular session is 78 bars,
+# so 100 always spans 09:30 -> now (older rows are filtered out by the aggregator).
+_BACKFILL_NUM_BARS = 100
+
 # ============================================================
 # TradingBot
 # ============================================================
@@ -704,6 +711,39 @@ class TradingBot:
         except Exception:
             _logger.warning("stale_subscription_release_failed", exc_info=True)
 
+    async def _backfill_session_stats(self, codes) -> None:
+        """Backfill session HOD/LOD/cum-volume for codes subscribed after 09:30 ET.
+
+        For each code the BarAggregator has not backfilled yet, reads the latest
+        K_5M bars (gateway.get_cur_kline -- needs the subscription the rescan just
+        made, costs no history quota) and lets the aggregator merge the closed bars
+        that pre-date its live stream (BarAggregator.backfill_session owns the race
+        handling). Already-backfilled codes are skipped, so each code costs one read
+        per session. Fail-open per code: a non-OK read, an exception, or a code with
+        no live push yet is logged/ignored -- stats stay partial as before and the
+        code is retried on the next rescan.
+
+        codes: Moomoo-format codes just returned by the rescan.
+        """
+        agg = self._bar_agg
+        if agg is None:
+            return
+        for code in codes:
+            if agg.is_backfilled(code):
+                continue
+            try:
+                ret, data = await self._gateway.get_cur_kline(code, _BACKFILL_NUM_BARS)
+                if ret != _RET_OK:
+                    _logger.warning("session_backfill_read_failed", code=code, ret=ret)
+                    continue
+                rows = data.to_dict("records") if hasattr(data, "to_dict") else list(data)
+                if not agg.backfill_session(code, rows):
+                    _logger.warning("session_backfill_deferred", code=code, reason="no live push yet")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.warning("session_backfill_error", code=code, exc_info=True)
+
     async def _job_market_open_subscribe(self) -> None:
         """Market-open subscribe job — seeds premarket highs, THEN subscribes the watchlist (D-01 guard).
 
@@ -899,6 +939,12 @@ class TradingBot:
                 ) or []
 
             await loop.run_in_executor(None, _intraday_rescan_worker)
+
+            # Backfill 09:30 -> subscribe session HOD/LOD/volume for codes the rescan
+            # just subscribed. BEFORE the premarket-high merge below: Gate 1 (premarket
+            # high present) is what stops a signal on a code, so completing the stats
+            # first means no bar can pass Gate 1 while they are still partial.
+            await self._backfill_session_stats(rescan_watchlist)
 
             # Seed premarket highs for rescan-discovered codes (D-01 merge guard).
             # fetch_and_merge_premarket_highs skips codes already in _premarket_highs

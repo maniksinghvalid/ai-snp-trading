@@ -12,8 +12,10 @@ A session-level _seen_time_keys set prevents double-firing on reconnect re-push.
 """
 
 import asyncio
+import math
+import threading
 from collections import deque
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Dict, Iterable, Optional, Set
 
 # moomoo SDK imported directly (D-02 wrap-not-import; mirrors gateway.py pattern).
 # try/except guard so the import error message is clear; tests stub the base class.
@@ -31,6 +33,11 @@ _logger = get_logger(__name__)
 # Maximum closed bars to keep per code in the rolling buffer.
 # ~4 hours of 5m bars + headroom; consumed by SignalEngine for passes_intraday_filters.
 _BAR_BUFFER_MAX = 50
+
+# Regular-session open as the "HH:MM:SS" part of a K-line time_key (US codes are
+# ET by default). A market constant, like fetcher.RTH_OPEN -- not a strategy
+# parameter. Only used to keep any pre-open bar out of the backfilled session stats.
+_RTH_OPEN_HMS = "09:30:00"
 
 
 def _log_future_exception(fut) -> None:
@@ -95,6 +102,13 @@ class BarAggregator(CurKlineHandlerBase):
       _lod: running min of all pushed bar lows per code from first bar (Pitfall 3)
       _cur_bar: in-progress bar's latest OHLCV per code (open/high/low/close/volume)
       _bar_buffer: rolling deque of closed-bar dicts per code (maxlen=50)
+      _backfilled: codes whose pre-subscribe session bars were already merged
+
+    backfill_session() is the one off-thread writer (asyncio loop thread, after
+    a mid-session subscribe): it read-modify-writes _hod/_lod/_session_volume,
+    so it and _handle_row (SDK thread) serialize on self._lock. The lock is
+    held only for in-memory dict updates -- on_bar_closed is bridged with the
+    non-blocking run_coroutine_threadsafe -- so the SDK thread is never stalled.
     """
 
     def __init__(
@@ -123,6 +137,8 @@ class BarAggregator(CurKlineHandlerBase):
         self._cur_bar: Dict[str, dict] = {}  # in-progress bar snapshot (SIG-02 no-repaint)
         self._bar_buffer: Dict[str, deque] = {}
         self._session_volume: Dict[str, int] = {}  # cumulative session volume per code (Phase 7 RVOL-TOD)
+        self._backfilled: Set[str] = set()
+        self._lock = threading.Lock()
 
     def reset_session(self) -> None:
         """Clear all per-session state at market open (called once at start of day).
@@ -131,14 +147,97 @@ class BarAggregator(CurKlineHandlerBase):
         reconnects to prevent double-firing an already-processed bar (Pitfall 1).
         Only reset when starting a genuinely new trading session.
         """
-        self._last_time_key.clear()
-        self._seen_time_keys.clear()
-        self._hod.clear()
-        self._lod.clear()
-        self._cur_bar.clear()
-        self._bar_buffer.clear()
-        self._session_volume.clear()  # Phase 7: reset cumulative volume for new session (Pitfall 1)
+        with self._lock:
+            self._last_time_key.clear()
+            self._seen_time_keys.clear()
+            self._hod.clear()
+            self._lod.clear()
+            self._cur_bar.clear()
+            self._bar_buffer.clear()
+            self._session_volume.clear()  # Phase 7: reset cumulative volume for new session (Pitfall 1)
+            self._backfilled.clear()
         _logger.info("bar_aggregator_session_reset")
+
+    def is_backfilled(self, code: str) -> bool:
+        """True once backfill_session has been applied for code this session."""
+        return code in self._backfilled
+
+    def backfill_session(self, code: str, bars: Iterable[dict]) -> bool:
+        """Merge the CLOSED session bars that pre-date this code's live stream.
+
+        A code subscribed after 09:30 ET (intraday rescan) only sees bars from its
+        first push, so its session HOD/LOD and cumulative volume start partial: I2
+        compares against a partial HOD, the LOD-1% initial stop is anchored on a
+        partial LOD, and the RVOL-TOD numerator omits 09:30 -> subscribe volume.
+        The caller reads the latest K_5M bars (gateway.get_cur_kline) and passes
+        them here as dict rows with time_key/high/low/volume.
+
+        Race-safety with live pushes (all under self._lock):
+          * Cutoff = the earliest time_key of the session day the aggregator has
+            itself accounted for (closed in _seen_time_keys, or in flight in
+            _last_time_key). Only bars strictly BEFORE it are merged, so the bar
+            in flight at subscribe time and every bar tracked live are never
+            counted twice -- whether backfill runs before or after bars close.
+            Bars before the cutoff were already closed when the stream began, so
+            their values are final.
+          * Merge is max/min on HOD/LOD (never regresses) and additive on volume.
+          * Idempotent per session (_backfilled; cleared by reset_session), which
+            matters because every rescan re-subscribes the same codes.
+          * The session day is the latest date in `bars`; if the live stream has
+            not produced a bar of that day yet (no push, or a stale cached
+            prior-day first push) nothing anchors the cutoff, so nothing is applied.
+
+        Malformed rows (missing/NaN/non-positive fields) are skipped -- a bad low
+        must never become the session LOD.
+
+        Returns True if applied (or already applied), False if it could not be
+        anchored yet (caller may retry on a later call).
+        """
+        rows = []
+        for b in bars:
+            try:
+                tk = str(b["time_key"])
+                high, low = float(b["high"]), float(b["low"])
+                vol = int(float(b["volume"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (math.isfinite(high) and math.isfinite(low)) or high <= 0 or low <= 0:
+                continue
+            rows.append((tk, high, low, vol))
+
+        with self._lock:
+            if code in self._backfilled:
+                return True
+            last_tk = self._last_time_key.get(code)
+            if last_tk is None or not rows:
+                return False
+            session_day = max(tk[:10] for tk, _, _, _ in rows)
+            if last_tk[:10] != session_day:
+                return False
+            tracked = self._seen_time_keys.get(code, set()) | {last_tk}
+            cutoff = min(tk for tk in tracked if tk[:10] == session_day)
+            missing = [
+                r for r in rows
+                if r[0][:10] == session_day and r[0][11:19] >= _RTH_OPEN_HMS and r[0] < cutoff
+            ]
+            if missing:
+                hod = max(r[1] for r in missing)
+                lod = min(r[2] for r in missing)
+                volume = sum(r[3] for r in missing)
+                self._hod[code] = max(self._hod.get(code, 0.0), hod)
+                self._lod[code] = min(self._lod.get(code, lod), lod)
+                self._session_volume[code] = self._session_volume.get(code, 0) + volume
+            self._backfilled.add(code)
+
+        _logger.info(
+            "session_backfilled",
+            code=code,
+            bars=len(missing),
+            hod=self._hod.get(code),
+            lod=self._lod.get(code),
+            cum_volume=self._session_volume.get(code, 0),
+        )
+        return True
 
     def on_recv_rsp(self, rsp_pb):
         """Handle a K_5M push tick from the moomoo SDK push thread.
@@ -162,7 +261,8 @@ class BarAggregator(CurKlineHandlerBase):
         row = data.iloc[0] if hasattr(data, "iloc") else data[0]
 
         try:
-            self._handle_row(row)
+            with self._lock:
+                self._handle_row(row)
         except Exception:
             # T-03-01: Malformed/corrupt push rows are swallowed so one bad push
             # never crashes the SDK thread or blocks subsequent pushes.
