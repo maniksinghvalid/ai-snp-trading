@@ -838,6 +838,38 @@ class TestUnsubscribe:
             asyncio.run(gw.unsubscribe(["US.AAPL"]))
 
 
+class TestGetSubscribedK5mCodes:
+    """get_subscribed_k5m_codes() — what THIS connection holds (stale-feed release)."""
+
+    def test_returns_own_connection_k5m_codes_only(self):
+        """Only the K_5M list of the current connection: is_all_conn=False keeps the
+        options bot's (separate process) subscriptions out of the answer, and other
+        subtypes (QUOTE for fallback stop ticks) are not K_5M feeds."""
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.query_subscription.return_value = (
+            0,
+            {"sub_list": {"K_5M": ["US.AAPL", "US.MSFT"], "QUOTE": ["US.TSLA"]}},
+        )
+
+        codes = asyncio.run(gw.get_subscribed_k5m_codes())
+
+        assert codes == {"US.AAPL", "US.MSFT"}
+        gw._quote_ctx.query_subscription.assert_called_once_with(is_all_conn=False)
+
+    def test_no_k5m_subscription_is_empty_set(self):
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.query_subscription.return_value = (0, {"sub_list": {}})
+
+        assert asyncio.run(gw.get_subscribed_k5m_codes()) == set()
+
+    def test_raises_on_non_ret_ok(self):
+        gw = _make_gateway_with_mocks()
+        gw._quote_ctx.query_subscription.return_value = (1, "query failed")
+
+        with pytest.raises(GatewayError):
+            asyncio.run(gw.get_subscribed_k5m_codes())
+
+
 # ============================================================
 # MoomooGateway.get_equity() — live equity read (RISK-01, D-04/D-05)
 # Implemented in 03-03

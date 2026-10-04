@@ -470,6 +470,94 @@ async def test_market_open_empty_watchlist_requalifying_code_gets_todays_high():
     assert engine._premarket_highs["US.IT"] == 130.0
 
 
+# ============================================================
+# Market-open release of stale K_5M subscriptions (debug session
+# premarket-scan-abort-stale, bug 2b)
+#
+# Yesterday's rescan-added subscriptions were never released, so off-watchlist
+# leftovers kept pushing and were evaluated on every bar all day (blocked only
+# incidentally by the per-date TOD baseline key). At open the job must release
+# K_5M feeds that are neither on today's watchlist nor managed (open position /
+# pending intent) -- never a managed code -- and must fail open.
+# ============================================================
+
+_OPEN_POS = {"code": "US.HELD", "remaining_quantity": 50, "phase": "ACTIVE"}
+_CLOSED_POS = {"code": "US.CLOSED", "remaining_quantity": 0, "phase": "CLOSED"}
+_PENDING = {"intent_id": "i-1", "code": "US.PEND"}
+
+
+def _make_release_bot(codes, subscribed):
+    """Open-job bot whose gateway reports `subscribed` K_5M codes and records unsubscribe."""
+    gateway = MagicMock()
+    gateway.get_subscribed_k5m_codes = AsyncMock(return_value=set(subscribed))
+    gateway.unsubscribe = AsyncMock()
+    bot = _make_open_job_bot(codes, None, gateway=gateway)
+    bot._store.get_open_positions.return_value = [_OPEN_POS, _CLOSED_POS]
+    bot._store.get_pending_intent_codes.return_value = [_PENDING]
+    return bot, gateway
+
+
+@pytest.mark.asyncio
+async def test_market_open_releases_only_stale_unmanaged_subscriptions():
+    """Stale = subscribed - today's watchlist - managed. Watchlist, open-position and
+    pending-intent codes are never unsubscribed; a CLOSED position's code is stale."""
+    bot, gateway = _make_release_bot(
+        ["US.TODAY"],
+        ["US.OLD1", "US.OLD2", "US.TODAY", "US.HELD", "US.PEND", "US.CLOSED"],
+    )
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_awaited_once_with(["US.CLOSED", "US.OLD1", "US.OLD2"])
+    gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
+
+
+@pytest.mark.asyncio
+async def test_market_open_empty_watchlist_still_releases_stale_subscriptions():
+    """The motivating case: empty watchlist (premarket scan aborted) yet yesterday's feeds linger."""
+    bot, gateway = _make_release_bot([], ["US.OLD1", "US.HELD"])
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_awaited_once_with(["US.OLD1"])
+
+
+@pytest.mark.asyncio
+async def test_market_open_nothing_stale_does_not_unsubscribe():
+    bot, gateway = _make_release_bot(["US.TODAY"], ["US.TODAY", "US.HELD"])
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_market_open_release_failure_is_fail_open():
+    """moomoo rejects unsubscribe within 60s of subscribe (GatewayError): log and carry on
+    -- today's watchlist must still be subscribed."""
+    from bot.gateway.gateway import GatewayError
+
+    bot, gateway = _make_release_bot(["US.TODAY"], ["US.OLD1"])
+    gateway.unsubscribe = AsyncMock(side_effect=GatewayError("unsubscribe failed: too soon"))
+
+    await _run_market_open_job(bot)
+
+    gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
+
+
+@pytest.mark.asyncio
+async def test_market_open_subscription_query_failure_is_fail_open():
+    from bot.gateway.gateway import GatewayError
+
+    bot, gateway = _make_release_bot(["US.TODAY"], [])
+    gateway.get_subscribed_k5m_codes = AsyncMock(side_effect=GatewayError("query failed"))
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_not_awaited()
+    gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
+
+
 @pytest.mark.asyncio
 async def test_market_open_failed_seed_leaves_no_prior_session_highs():
     """If today's premarket-high fetch raises, Gate 1 must fail closed (empty), not run on yesterday's highs."""

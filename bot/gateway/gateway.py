@@ -988,6 +988,31 @@ class MoomooGateway:
         await loop.run_in_executor(None, _unsubscribe_blocking)
         _logger.info("unsubscribed_k5m", codes=codes, count=len(codes))
 
+    async def get_subscribed_k5m_codes(self) -> set:
+        """Codes this connection currently holds a K_5M subscription for.
+
+        Authoritative OpenD answer (query_subscription), so it also sees feeds a
+        previous session left behind -- the SDK re-subscribes its own record on a
+        socket reconnect, and nothing in the bot tracks subscriptions itself.
+        is_all_conn=False keeps other connections (e.g. the separate options-bot
+        process) out of the answer: the caller releases the result, and must never
+        release a feed it does not own. Other subtypes (QUOTE) are ignored.
+
+        Returns:
+            set of Moomoo-format codes (possibly empty).
+
+        Raises:
+            GatewayError: if query_subscription() returns non-RET_OK.
+        """
+        loop = asyncio.get_running_loop()
+
+        def _query_blocking():
+            ret, data = self._quote_ctx.query_subscription(is_all_conn=False)
+            _check_ret(ret, data, "query_subscription")
+            return set((data.get("sub_list") or {}).get("K_5M", []))
+
+        return await loop.run_in_executor(None, _query_blocking)
+
     async def get_global_state(self) -> dict:
         """Return a health-check dict from the OpenD global state (SVC-02).
 

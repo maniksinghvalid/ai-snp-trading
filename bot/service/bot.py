@@ -664,6 +664,46 @@ class TradingBot:
         except Exception:
             _logger.error("force_close_reschedule_error", exc_info=True)
 
+    def _managed_codes(self) -> set:
+        """Codes the bot is actively managing: open position (qty > 0, not CLOSED) or
+        a PENDING intent. Their K_5M feed must never be evicted or released.
+
+        Blocking (store reads) -- call from an executor thread.
+        """
+        codes: set = set()
+        for row in self._store.get_open_positions():
+            if (row.get("remaining_quantity") or 0) > 0 and row.get("phase") != "CLOSED":
+                codes.add(row.get("code"))
+        for row in self._store.get_pending_intent_codes():
+            codes.add(row.get("code"))
+        codes.discard(None)
+        return codes
+
+    async def _release_stale_subscriptions(self, watchlist_codes) -> None:
+        """Unsubscribe K_5M feeds left over from earlier sessions (market open).
+
+        Stale = subscribed on this connection but neither on today's watchlist nor
+        managed (_managed_codes). Without this, yesterday's rescan-added codes keep
+        pushing and are evaluated on every bar all day, and they hold quota slots.
+        Fail-open: any error (including moomoo's rejection of an unsubscribe less
+        than 60s after the subscribe) is logged and the open job carries on --
+        the worst case is today's old behaviour (the feed lingers).
+
+        watchlist_codes: today's watchlist (Moomoo-format codes).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            managed = await loop.run_in_executor(None, self._managed_codes)
+            subscribed = await self._gateway.get_subscribed_k5m_codes()
+            stale = sorted(subscribed - set(watchlist_codes) - managed)
+            if stale:
+                await self._gateway.unsubscribe(stale)
+                _logger.info("stale_subscriptions_released", codes=stale, count=len(stale))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.warning("stale_subscription_release_failed", exc_info=True)
+
     async def _job_market_open_subscribe(self) -> None:
         """Market-open subscribe job — seeds premarket highs, THEN subscribes the watchlist (D-01 guard).
 
@@ -720,6 +760,13 @@ class TradingBot:
                 return self._store.get_watchlist_codes(today)
 
             codes = await loop.run_in_executor(None, _get_watchlist_worker)
+
+            # Release K_5M feeds left over from earlier sessions (neither on today's
+            # watchlist nor managed) so they are not evaluated all day. Runs even
+            # for an empty watchlist -- the day the premarket scan aborted is the
+            # day leftovers matter most. Fail-open (logs, never raises).
+            await self._release_stale_subscriptions(codes)
+
             if codes:
                 # D-01/D-03: Seed premarket highs via one batched snapshot call BEFORE
                 # subscribing. fetch_premarket_highs() calls set_premarket_highs()
@@ -839,13 +886,7 @@ class TradingBot:
                 # Finding 2.2: real active codes (open positions + in-flight intents)
                 # so the scanner never evicts/unsubscribes a symbol that is currently
                 # managed or awaiting a fill.
-                active_codes: set = set()
-                for row in self._store.get_open_positions():
-                    if (row.get("remaining_quantity") or 0) > 0 and row.get("phase") != "CLOSED":
-                        active_codes.add(row.get("code"))
-                for row in self._store.get_pending_intent_codes():
-                    active_codes.add(row.get("code"))
-                active_codes.discard(None)
+                active_codes = self._managed_codes()
 
                 rescan_watchlist = self._scanner.run_intraday_rescan(
                     self._store,
