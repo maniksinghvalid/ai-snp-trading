@@ -360,15 +360,15 @@ class StateStore:
         into the SQL, T-06-11-01), then commit immediately (T-06-11-05).
 
         This is the write BacktestHarness._capture_closed_trades calls for every newly
-        CLOSED position (T-06-11-03) -- get_daily_trade_stats' DATE(closed_at) filter is
+        CLOSED position (T-06-11-03) -- get_daily_trade_stats' session-date filter is
         the sole reader SignalEngine's -2R circuit breaker (Gate 7) depends on. Purely
         additive: no existing call site changes, so live behaviour is unaffected.
 
-        closed_at is normalised to an ISO-8601 string: a datetime (the harness passes
-        pos.updated_at, a tz-aware ET value) is converted via .isoformat(); anything else
-        is coerced with str(). An ET afternoon closed_at converts to the SAME UTC calendar
-        date for RTH close times, so DATE(closed_at) correctly matches the replay clock's
-        now_et().date() session key (D-09 convention).
+        closed_at is normalised to an ISO-8601 string: a tz-aware datetime is converted
+        to ET first, then .isoformat(); a naive datetime is stored as-is (ET wall clock);
+        anything else is coerced with str(). Its first 10 chars are therefore the ET
+        session date the readers key on (D-09 convention) -- never SQLite DATE(), which
+        normalises the offset to UTC and files a 20:00+ EDT close under the next day.
 
         Args:
             position_id:  The originating position_id UUID string.
@@ -384,7 +384,10 @@ class StateStore:
                           None (mirrors record_position's PK-generation-free pattern --
                           trades has no natural caller-supplied PK equivalent).
         """
+        from bot.safety.et_helpers import ET
         trade_id = trade_id or str(uuid4())
+        if getattr(closed_at, "tzinfo", None) is not None:
+            closed_at = closed_at.astimezone(ET)
         closed_at_str = (
             closed_at.isoformat() if hasattr(closed_at, "isoformat") else str(closed_at)
         )
@@ -411,8 +414,9 @@ class StateStore:
     def get_closed_trades(self, session_date) -> list:
         """Return last-20 closed trade rows for a given session date.
 
-        Queries the trades table for rows WHERE DATE(closed_at) = session_date,
-        ordered by closed_at DESC, limited to 20 rows (RESEARCH Open Q1).
+        Queries the trades table for rows whose ET session date (closed_at's leading
+        YYYY-MM-DD, see record_trade) = session_date, ordered by closed_at DESC,
+        limited to 20 rows (RESEARCH Open Q1).
 
         Uses the row_factory → fetchall → reset pattern (same as get_open_positions).
         NULL r_multiple values are preserved as-is; callers guard with `or 0.0`.
@@ -426,7 +430,7 @@ class StateStore:
             # cannot observe or clobber the factory setting (T-06.1-08-02).
             self._conn.row_factory = sqlite3.Row
             rows = self._conn.execute(
-                "SELECT * FROM trades WHERE DATE(closed_at) = ? ORDER BY closed_at DESC LIMIT 20",
+                "SELECT * FROM trades WHERE substr(closed_at, 1, 10) = ? ORDER BY closed_at DESC LIMIT 20",
                 (str(session_date),),
             ).fetchall()
             self._conn.row_factory = None
@@ -462,7 +466,7 @@ class StateStore:
                     COUNT(CASE WHEN r_multiple > 0 THEN 1 END)               AS wins,
                     COALESCE(SUM((exit_price - entry_price) * quantity), 0.0) AS realized_pnl
                 FROM trades
-                WHERE DATE(closed_at) = ?
+                WHERE substr(closed_at, 1, 10) = ?
                 """,
                 (str(session_date),),
             ).fetchone()
