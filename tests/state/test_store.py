@@ -13,9 +13,11 @@ Verifies:
 
 import os
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
+from bot.safety.et_helpers import ET
 from bot.state.migrations import CURRENT_VERSION
 from bot.state.store import (
     DEFAULT_DB_PATH,
@@ -376,6 +378,26 @@ class TestGetDailyTradeStats:
         assert stats["trade_count"] == 1
         assert stats["wins"] == 0, "NULL r_multiple must NOT be counted as a win"
         assert stats["losses"] == 1, "NULL r_multiple must be counted as a loss"
+
+    @pytest.mark.parametrize("closed_at", [
+        datetime(2026, 10, 3, 20, 30, tzinfo=ET),           # how live writes it
+        datetime(2026, 10, 4, 0, 30, tzinfo=timezone.utc),  # same instant, UTC-aware
+    ])
+    def test_evening_close_keys_by_et_session_date(self, tmp_state_db, closed_at):
+        """A close at 20:30 EDT is 00:30 UTC the next day. Trades must key by
+        the ET session date callers pass (now_et().date()), not SQLite DATE()'s
+        UTC date -- else evening closes vanish from the report, the daily
+        summary and the Gate 7 -2R breaker (debug trades-keyed-by-utc-date)."""
+        with StateStore() as store:
+            store.record_trade("pos-1", "US.AAPL", 100.0, 98.0, 10,
+                               "trail_stop", -0.4, closed_at)
+            rows = store.get_closed_trades("2026-10-03")
+            stats = store.get_daily_trade_stats("2026-10-03")
+            next_day = store.get_daily_trade_stats("2026-10-04")
+
+        assert len(rows) == 1, f"Expected exactly one trade row, got {rows!r}"
+        assert stats["trade_count"] == 1
+        assert next_day["trade_count"] == 0
 
 
 # ============================================================
