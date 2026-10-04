@@ -23,6 +23,7 @@ from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 from bot.scanner.calendar import is_trading_day
 from bot.scanner.fetcher import (
+    RTH_OPEN,
     download_daily_bars,
     download_intraday_1m,
     download_intraday_5m,
@@ -439,20 +440,35 @@ def _compute_candidates(
     # The result is shared across all per-symbol resolve calls (not per-symbol download).
     # WR-04: the fetcher (download_intraday_1m) is the single source of the
     # intraday_partial_data event — do NOT re-log degradation here.
-    intraday, _intraday_failed = download_intraday_1m(yf_symbols)
+    #
+    # Premarket (< 09:30 ET) a thin S&P name with no prints yet comes back from
+    # yfinance all-NaN, which is indistinguishable from a failed download (1.4.1
+    # leaves shared._ERRORS empty). Since 2026-09-08 that is 14-32% of the
+    # universe at 08:30 ET, so the 10% D-06 gate aborted the premarket scan on
+    # 17/19 days. Premarket the gate therefore fires only on a whole-universe
+    # failure (rate >= 1.0 -> loud abort + durable audit entry); the all-NaN
+    # names are skipped below (symbol_skipped_no_intraday_price). From 09:30 ET
+    # (rescans) every name trades, so the default 10% gate still applies.
+    premarket = now_et_value.time() < RTH_OPEN
+    if premarket:
+        intraday, _intraday_failed = download_intraday_1m(
+            yf_symbols, degradation_threshold=1.0
+        )
+    else:
+        intraday, _intraday_failed = download_intraday_1m(yf_symbols)
 
     # T-02-18: whole-universe 1m outage backstop (WR-01).
     #
-    # This is a DEFENSIVE backstop, not the primary degradation gate. With the
-    # default 10% threshold, download_intraday_1m itself raises
-    # ScanDegradationError long before a 100%-failure universe reaches here, so
-    # this branch does not fire on the normal production path — the fetcher's
-    # gate owns that decision. The check is retained intentionally so the scanner
+    # This is a DEFENSIVE backstop, not the primary degradation gate: with a
+    # threshold <= 1.0 (10% regular session, 100% premarket) download_intraday_1m
+    # itself raises ScanDegradationError for a 100%-failure universe, so this
+    # branch does not fire on the normal production path — the fetcher's gate
+    # owns that decision. The check is retained intentionally so the scanner
     # still fails loudly (rather than silently emptying the watchlist) if a future
-    # caller passes a high/disabled degradation_threshold to download_intraday_1m,
-    # making the scanner the owner of the whole-universe decision. It triggers
-    # only when EVERY universe symbol is in the failed set. A partial 1m failure
-    # is NOT raised here — those symbols are simply skipped
+    # caller passes a disabled degradation_threshold (> 1.0) to
+    # download_intraday_1m, making the scanner the owner of the whole-universe
+    # decision. It triggers only when EVERY universe symbol is in the failed set.
+    # A partial 1m failure is NOT raised here — those symbols are simply skipped
     # (symbol_skipped_no_intraday_price).
     if yf_symbols and len(_intraday_failed) == len(yf_symbols):
         raise ScanDegradationError(

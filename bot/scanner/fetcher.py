@@ -30,6 +30,11 @@ from bot.safety.logger import get_logger
 
 _logger = get_logger(__name__)
 
+# US Eastern regular-session open — a MARKET CONSTANT, not a strategy parameter
+# (never read from rules.json / StrategyConfig). Shared by resolve_today_price's
+# phase selection and the scanner's premarket-aware 1m degradation gate.
+RTH_OPEN = datetime.time(9, 30)
+
 
 # ============================================================
 # Structs
@@ -390,8 +395,8 @@ def resolve_today_price(
       current phase (e.g. now_et >= 09:30 but the frame has no >=09:30 bars yet).
 
     Spec decision (2026-06-26-scanner-live-today-price-design.md §Decisions #2):
-      The 09:30 ET regular-session start is a MARKET CONSTANT defined inline as
-      datetime.time(9, 30). It is NOT read from rules.json or StrategyConfig —
+      The 09:30 ET regular-session start is the MARKET CONSTANT RTH_OPEN
+      (datetime.time(9, 30)). It is NOT read from rules.json or StrategyConfig —
       rules.json is the single source of STRATEGY parameters only; the RTH open
       time is a fixed market fact that never varies by strategy.
 
@@ -415,11 +420,8 @@ def resolve_today_price(
     if not isinstance(frame_1m, pd.DataFrame) or frame_1m.empty:
         return None
 
-    # Market constant: regular-session open time (NOT from rules.json — see docstring).
-    _RTH_OPEN = datetime.time(9, 30)  # US Eastern regular-session open — market constant
-
     # Determine phase from injected clock only (no internal now()/datetime.now() call).
-    is_rth = now_et.time() >= _RTH_OPEN
+    is_rth = now_et.time() >= RTH_OPEN
 
     # Convert each 1m bar's index timestamp to ET for bar-clock comparison.
     # yfinance intraday frames USUALLY carry tz info, but some yfinance/pandas
@@ -469,7 +471,7 @@ def resolve_today_price(
 
     if is_rth:
         # Regular-session phase: select today's bars with ET bar-time >= 09:30
-        rth_mask = [ts.time() >= _RTH_OPEN for ts in today_idx_et]
+        rth_mask = [ts.time() >= RTH_OPEN for ts in today_idx_et]
         rth_bars = today_frame.loc[rth_mask]
         if rth_bars.empty:
             # No >=09:30 bar yet — fail-closed (e.g. data lag on open)
