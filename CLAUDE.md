@@ -37,6 +37,14 @@ If everything else is stripped away, a correct and safe automated trade loop is 
 - Research provenance: `docs/research/2026-08-17-tastylive-options-research.md`; design: `~/.claude/plans/scrape-highly-rated-options-velvety-naur.md`; phase summary: `.planning/phases/08-options-premium-selling/08-SUMMARY.md`.
 - Invariants: LIMIT orders only; long wings before shorts on open, shorts first on close; the options bot never touches broker option codes not in its own `option_legs`; separate DB/kill-file/report-dir from the equity bot.
 
+## Phase 12 — IBS bot (ibs_etf_mean_reversion)
+
+- Run: `PAPER_TRADING=true FUTU_TRD_ENV=SIMULATE FUTU_ACC_ID=1727266 python3 -m bot --rules rules_ibs.json`. ONE IBS instance at a time; runs alongside the options bot; Trend Join Long is stopped at cutover (`deploy/IBS-RUNBOOK.md`).
+- Config: `rules_ibs.json` (single source of truth; schema in `bot/ibs/schema.py`). Code: `bot/ibs/{strategy,store,execution,service}.py`.
+- Live UAT probe: `python3 scripts/uat_ibs_probe.py` (read-only; run during RTH) and `--live-1lot --confirm` (operator-run, buys then sells one paper share).
+- Research provenance: `docs/research/2026-10-04-ibs-etf-strategy-search.md`; search code `backtester/experimental/ibs_search/`.
+- Invariants: LIMIT orders only; decision at close - 10 min, hard cancel at close - 1 min; overnight holds, no force-close; only rows in its own `ibs_positions` are ever traded; own DB `data/ibs_state.db`, kill file `.bot_kill_ibs`, reports `reports/ibs/`, log `logs/ibs.log`.
+
 <!-- GSD:stack-start source:codebase/STACK.md -->
 
 ## Technology Stack
