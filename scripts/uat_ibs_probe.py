@@ -79,21 +79,28 @@ def _spread(row):
 
 
 def _active_rows(state_db):
-    """Active ibs_positions rows read with sqlite mode=ro, or None if there is no DB.
+    """Active ibs_positions rows read with sqlite mode=ro, or None (with a printed
+    note naming the absolute path) when there is no DB or it is unreadable.
 
     Never creates the DB, never runs migrations, never takes a write lock (WR-06).
     """
-    if not os.path.exists(state_db):
+    path = Path(state_db).resolve()
+    if not path.exists():
+        _p(f"no IBS DB at {path}; DB guard not applied (run from the repo root)")
         return None
-    con = sqlite3.connect(Path(state_db).resolve().as_uri() + "?mode=ro", uri=True)
     try:
-        con.row_factory = sqlite3.Row
-        marks = ", ".join("?" * len(ACTIVE_STATUSES))
-        return [dict(r) for r in con.execute(
-            f"SELECT * FROM ibs_positions WHERE status IN ({marks}) ORDER BY rowid",
-            ACTIVE_STATUSES)]
-    finally:
-        con.close()
+        con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            con.row_factory = sqlite3.Row
+            marks = ", ".join("?" * len(ACTIVE_STATUSES))
+            return [dict(r) for r in con.execute(
+                f"SELECT * FROM ibs_positions WHERE status IN ({marks}) ORDER BY rowid",
+                ACTIVE_STATUSES)]
+        finally:
+            con.close()
+    except sqlite3.OperationalError as exc:  # IN-09: unmigrated / locked file
+        _p(f"IBS DB at {path} unreadable ({exc}); DB guard not applied")
+        return None
 
 
 async def _refusal(cfg, gateway, symbol, now):
@@ -114,7 +121,10 @@ async def _refusal(cfg, gateway, symbol, now):
     if any(str(r.get("code")) == symbol and int(float(r.get("qty") or 0)) != 0
            for r in _rows(pos)):
         return f"{symbol} is held at the broker"
-    if any(r["code"] == symbol for r in (_active_rows(cfg.state_db) or [])):
+    rows = _active_rows(cfg.state_db)
+    if rows is None and os.path.exists(cfg.state_db):
+        return "IBS DB unreadable"  # IN-09: an existing DB we cannot check fails closed
+    if any(r["code"] == symbol for r in rows or []):
         return f"{symbol} has an active IBS DB row"
     return None
 
@@ -160,7 +170,6 @@ async def probe(cfg, gateway, now):
             _p("  (no active rows)")
     else:
         active = []
-        _p(f"no IBS DB yet ({cfg.state_db})")
     active_codes = {r["code"] for r in active}
     for code, (qty, cost) in broker.items():
         tag = "external" if code in cfg.universe and code not in active_codes else (

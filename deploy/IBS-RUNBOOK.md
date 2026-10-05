@@ -1,6 +1,9 @@
 # IBS bot runbook (Phase 12) — cutover and operations
 
 Every step here is **operator-run**. Agents never execute these commands.
+Run every command from the repo root (the main checkout): `rules_ibs.json` and its
+`data/`, `logs/`, `reports/` paths are relative. The probe prints the absolute DB path
+it checked; "DB guard not applied" means it found no readable IBS DB there.
 
 The IBS bot (`ibs_etf_mean_reversion`) replaces Trend Join Long on the shared paper account 1727266.
 The options bot keeps running. Sentinels are separate: `.bot_kill` (equity), `.bot_kill_options`, `.bot_kill_ibs`.
