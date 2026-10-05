@@ -324,6 +324,30 @@ def test_sweep_cancel_failure_marks_and_alerts(env):
     assert any(a["event"] == "ibs_order_cancel_failed" for a in env.audits)
 
 
+def test_sweep_reads_status_first_and_skips_dead_orders(env):
+    """WR-03: an order fill_leg already cancelled (or that filled) is marked from the
+    broker status with no cancel call and no false "cancel FAILED" alert."""
+    for oid in ("DEAD", "FILLED", "LIVE"):
+        _order(env.store, oid)
+    status = {"DEAD": "CANCELLED_ALL", "FILLED": "FILLED_ALL", "LIVE": "SUBMITTED"}
+
+    async def order_status(oid):
+        return [{"order_id": oid, "order_status": status[oid], "dealt_qty": 0,
+                 "dealt_avg_price": 0.0}]
+
+    async def cancel(oid):
+        if oid != "LIVE":
+            raise RuntimeError("order already closed")
+    env.gw.get_order_status.side_effect = order_status
+    env.gw.cancel_order.side_effect = cancel
+    _run(env.bot._sweep_orders("hard_cancel"))
+    assert [c.args[0] for c in env.gw.cancel_order.await_args_list] == ["LIVE"]
+    assert _status(env.store, "DEAD") == "CANCELLED"
+    assert _status(env.store, "FILLED") == "DONE"
+    assert _status(env.store, "LIVE") == "CANCELLED"
+    assert _alerts(env.bot) == []
+
+
 def test_hard_cancel_non_trading_day(env, set_now):
     _order(env.store, "O1")
     set_now(datetime(2026, 10, 4, 15, 59, tzinfo=ET))
