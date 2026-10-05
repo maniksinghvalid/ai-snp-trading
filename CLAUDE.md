@@ -36,6 +36,18 @@ If everything else is stripped away, a correct and safe automated trade loop is 
 - Live UAT probe: `python3 scripts/uat_options_probe.py` (read-only; run during RTH) and `--live-1lot --confirm` (operator-run, places one paper spread).
 - Research provenance: `docs/research/2026-08-17-tastylive-options-research.md`; design: `~/.claude/plans/scrape-highly-rated-options-velvety-naur.md`; phase summary: `.planning/phases/08-options-premium-selling/08-SUMMARY.md`.
 - Invariants: LIMIT orders only; long wings before shorts on open, shorts first on close; the options bot never touches broker option codes not in its own `option_legs`; separate DB/kill-file/report-dir from the equity bot.
+- Config edits need a restart (read once at startup). Validate first: `python3 -c "from bot.options.config import load_options_config as l; print(l('rules_options.json'))"`. Clean stop: `touch .bot_kill_options`, wait for exit, `rm` it, relaunch.
+
+## Phase 9 — Options backtester
+
+- Run: `python3 -m backtester.options_run --symbols US.SPY --start YYYY-MM-DD --end YYYY-MM-DD --iv-warmup-days 67 --strike-band-pct 10 --label <name>`; `--set entry.ivr_min=20` overrides any config leaf without touching the file. Output: `backtester/results/options/<run-id>/{trades.csv,summary.json,config.json}`.
+- Data: Massive option bars, key in `.env` as `MASSIVE_API_KEY`. Free tier is a hard 5 req/min cap, so keep `--workers 1`; first pass over SPY takes ~25h and populates `backtester/cache/massive/`. Re-running the identical command resumes (cache hits cost nothing).
+- `--iv-warmup-days` must be >= 67 or the IV-rank gate fails closed and every run reports zero trades.
+- Full pre-registered hypothesis commands: `docs/research/2026-08-17-options-backtest-results.md` ("Operator commands").
+
+## Shell gotchas
+
+- Shell is zsh: never start an `echo` argument with `=` (zsh expands `=word` as a path lookup and fails with `== not found`). Use `printf '### label\n'` for separators in compound commands.
 
 <!-- GSD:stack-start source:codebase/STACK.md -->
 
