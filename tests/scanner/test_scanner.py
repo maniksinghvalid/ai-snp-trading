@@ -1645,6 +1645,81 @@ class TestComputeCandidates1mBatch:
         )
 
 
+class TestPremarket1mDegradationGate:
+    """Premarket 1m all-NaN frames are "no prints yet", not download failures.
+
+    Regression (debug session premarket-scan-abort-stale): since 2026-09-08
+    yfinance returns thin-premarket S&P names (AIZ, FRT, GPC, MTB, ...) all-NaN
+    at 08:30 ET, _detect_failed counted them as failures, and 14-32% of the
+    universe tripped the 10% D-06 gate -> ScanDegradationError on 17/19 days ->
+    no premarket watchlist. These tests drive the REAL download_intraday_1m
+    (only yf.download is faked) so the gate itself is under test.
+    """
+
+    @staticmethod
+    def _frame_1m(valid: bool) -> pd.DataFrame:
+        idx = pd.date_range("2026-06-23 08:00", periods=3, freq="1min", tz=_ET)
+        vals = [100.0, 101.0, 102.0] if valid else [float("nan")] * 3
+        return pd.DataFrame(
+            {"Open": vals, "High": vals, "Low": vals, "Close": vals, "Volume": vals},
+            index=idx,
+        )
+
+    def _run(self, monkeypatch, now_et_value, n_total, n_nan):
+        """Run _compute_candidates with n_nan of n_total 1m frames all-NaN.
+
+        Returns (candidates, evaluate_mock). _evaluate_symbol is mocked so the
+        test only observes which symbols reached it with / without a price.
+        """
+        from bot.scanner.fetcher import TodayPrice
+        from bot.scanner.scanner import _compute_candidates
+
+        monkeypatch.setattr("bot.scanner.fetcher._RETRY_BACKOFF_S", 0.0)
+        symbols = [f"SYM{i:03d}" for i in range(n_total)]
+        raw = {
+            sym: self._frame_1m(valid=(i >= n_nan)) for i, sym in enumerate(symbols)
+        }
+
+        def _resolve(frame_1m, _now):
+            return None if frame_1m is None else TodayPrice(100.0, 100.0, 100.0)
+
+        with patch("bot.scanner.scanner.fetch_sp500_symbols", return_value=symbols), \
+             patch("bot.scanner.scanner.download_daily_bars", return_value=({}, set())), \
+             patch("yfinance.download", return_value=raw), \
+             patch("bot.scanner.fetcher.append_audit"), \
+             patch("bot.scanner.scanner.resolve_today_price", side_effect=_resolve), \
+             patch("bot.scanner.scanner._evaluate_symbol", return_value=None) as ev:
+            out = _compute_candidates(
+                _make_cfg(), date(2026, 6, 23), now_et_value=now_et_value
+            )
+        return out, ev
+
+    def test_premarket_partial_all_nan_is_skipped_not_aborted(self, monkeypatch):
+        """25% all-NaN at 08:30 ET must NOT abort; those names reach
+        _evaluate_symbol with today_price=None (symbol_skipped_no_intraday_price)."""
+        out, ev = self._run(monkeypatch, _PREMARKET_ET, n_total=100, n_nan=25)
+
+        assert out == []
+        no_price = [c for c in ev.call_args_list if c.args[4] is None]
+        assert len(ev.call_args_list) == 100
+        assert len(no_price) == 25
+
+    def test_premarket_whole_universe_outage_still_raises(self, monkeypatch):
+        """Every symbol all-NaN at 08:30 ET is a genuine outage: fail loudly."""
+        from bot.scanner.fetcher import ScanDegradationError
+
+        with pytest.raises(ScanDegradationError):
+            self._run(monkeypatch, _PREMARKET_ET, n_total=100, n_nan=100)
+
+    def test_regular_session_partial_failure_still_aborts_at_10pct(self, monkeypatch):
+        """At/after 09:30 ET (rescans) the D-06 10% gate is unchanged."""
+        from bot.scanner.fetcher import ScanDegradationError
+
+        rth_et = _dt.datetime(2026, 6, 23, 9, 55, tzinfo=_ET)
+        with pytest.raises(ScanDegradationError):
+            self._run(monkeypatch, rth_et, n_total=100, n_nan=25)
+
+
 # ============================================================
 # Task 3 (02-05): Premarket non-empty-watchlist regression test
 # Regression lock for the live UAT bug: premarket scan + gap-up 1m data

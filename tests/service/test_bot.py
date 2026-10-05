@@ -389,6 +389,301 @@ async def test_market_open_subscribe_skips_seed_when_signal_engine_none():
 
 
 # ============================================================
+# Per-session reset of SignalEngine._premarket_highs (debug session
+# premarket-scan-abort-stale, bug 2a)
+#
+# SignalEngine lives for the whole bot process. The market-open job only
+# reseeded _premarket_highs when the watchlist was non-empty, so on an
+# empty-watchlist day yesterday's frozen highs survived, and
+# fetch_and_merge_premarket_highs then skipped any code already present: a code
+# re-qualifying in today's rescan was evaluated by I1 against YESTERDAY's
+# premarket high.
+# ============================================================
+
+def _make_open_job_bot(codes, signal_engine, gateway=None):
+    """TradingBot wired just enough to run _job_market_open_subscribe."""
+    from bot.service.bot import TradingBot
+
+    mock_cfg = MagicMock()
+    mock_cfg.market_open_et = "09:30"
+    mock_gateway = gateway if gateway is not None else MagicMock()
+    mock_gateway.subscribe = AsyncMock()
+    mock_store = MagicMock()
+    mock_store.get_watchlist_codes.return_value = codes
+    return TradingBot(
+        cfg=mock_cfg,
+        gateway=mock_gateway,
+        store=mock_store,
+        scanner=MagicMock(),
+        position_manager=MagicMock(),
+        execution_engine=MagicMock(),
+        kill_switch=MagicMock(),
+        alerter=MagicMock(),
+        watchdog=None,
+        signal_engine=signal_engine,
+        risk_engine=None,
+    )
+
+
+async def _run_market_open_job(bot):
+    from datetime import date
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 10, 2)
+        await bot._job_market_open_subscribe()
+
+
+@pytest.mark.asyncio
+async def test_market_open_empty_watchlist_clears_prior_session_premarket_highs():
+    """Empty watchlist at open: yesterday's frozen premarket highs must not survive."""
+    from bot.signal.signal_engine import SignalEngine
+
+    engine = SignalEngine(MagicMock(), MagicMock(), MagicMock())
+    engine.set_premarket_highs({"US.IT": 111.0})  # frozen by yesterday's open job
+
+    await _run_market_open_job(_make_open_job_bot([], engine))
+
+    assert engine._premarket_highs == {}, (
+        "market-open job must reset _premarket_highs per session even when the "
+        f"watchlist is empty; stale highs survived: {engine._premarket_highs}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_market_open_empty_watchlist_requalifying_code_gets_todays_high():
+    """A code that re-qualifies in today's rescan is merged with TODAY's high, not yesterday's."""
+    import pandas as pd
+    from bot.signal.signal_engine import SignalEngine
+
+    gateway = MagicMock()
+    gateway.get_market_snapshot = AsyncMock(
+        return_value=(0, pd.DataFrame([{"code": "US.IT", "pre_high_price": 130.0}]))
+    )
+    engine = SignalEngine(MagicMock(), gateway, MagicMock())
+    engine.set_premarket_highs({"US.IT": 111.0})  # yesterday's
+
+    await _run_market_open_job(_make_open_job_bot([], engine, gateway=gateway))
+    merged = await engine.fetch_and_merge_premarket_highs(["US.IT"])
+
+    assert merged == {"US.IT": 130.0}
+    assert engine._premarket_highs["US.IT"] == 130.0
+
+
+# ============================================================
+# Market-open release of stale K_5M subscriptions (debug session
+# premarket-scan-abort-stale, bug 2b)
+#
+# Yesterday's rescan-added subscriptions were never released, so off-watchlist
+# leftovers kept pushing and were evaluated on every bar all day (blocked only
+# incidentally by the per-date TOD baseline key). At open the job must release
+# K_5M feeds that are neither on today's watchlist nor managed (open position /
+# pending intent) -- never a managed code -- and must fail open.
+# ============================================================
+
+_OPEN_POS = {"code": "US.HELD", "remaining_quantity": 50, "phase": "ACTIVE"}
+_CLOSED_POS = {"code": "US.CLOSED", "remaining_quantity": 0, "phase": "CLOSED"}
+_PENDING = {"intent_id": "i-1", "code": "US.PEND"}
+
+
+def _make_release_bot(codes, subscribed):
+    """Open-job bot whose gateway reports `subscribed` K_5M codes and records unsubscribe."""
+    gateway = MagicMock()
+    gateway.get_subscribed_k5m_codes = AsyncMock(return_value=set(subscribed))
+    gateway.unsubscribe = AsyncMock()
+    bot = _make_open_job_bot(codes, None, gateway=gateway)
+    bot._store.get_open_positions.return_value = [_OPEN_POS, _CLOSED_POS]
+    bot._store.get_pending_intent_codes.return_value = [_PENDING]
+    return bot, gateway
+
+
+@pytest.mark.asyncio
+async def test_market_open_releases_only_stale_unmanaged_subscriptions():
+    """Stale = subscribed - today's watchlist - managed. Watchlist, open-position and
+    pending-intent codes are never unsubscribed; a CLOSED position's code is stale."""
+    bot, gateway = _make_release_bot(
+        ["US.TODAY"],
+        ["US.OLD1", "US.OLD2", "US.TODAY", "US.HELD", "US.PEND", "US.CLOSED"],
+    )
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_awaited_once_with(["US.CLOSED", "US.OLD1", "US.OLD2"])
+    gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
+
+
+@pytest.mark.asyncio
+async def test_market_open_empty_watchlist_still_releases_stale_subscriptions():
+    """The motivating case: empty watchlist (premarket scan aborted) yet yesterday's feeds linger."""
+    bot, gateway = _make_release_bot([], ["US.OLD1", "US.HELD"])
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_awaited_once_with(["US.OLD1"])
+
+
+@pytest.mark.asyncio
+async def test_market_open_nothing_stale_does_not_unsubscribe():
+    bot, gateway = _make_release_bot(["US.TODAY"], ["US.TODAY", "US.HELD"])
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_market_open_release_failure_is_fail_open():
+    """moomoo rejects unsubscribe within 60s of subscribe (GatewayError): log and carry on
+    -- today's watchlist must still be subscribed."""
+    from bot.gateway.gateway import GatewayError
+
+    bot, gateway = _make_release_bot(["US.TODAY"], ["US.OLD1"])
+    gateway.unsubscribe = AsyncMock(side_effect=GatewayError("unsubscribe failed: too soon"))
+
+    await _run_market_open_job(bot)
+
+    gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
+
+
+@pytest.mark.asyncio
+async def test_market_open_subscription_query_failure_is_fail_open():
+    from bot.gateway.gateway import GatewayError
+
+    bot, gateway = _make_release_bot(["US.TODAY"], [])
+    gateway.get_subscribed_k5m_codes = AsyncMock(side_effect=GatewayError("query failed"))
+
+    await _run_market_open_job(bot)
+
+    gateway.unsubscribe.assert_not_awaited()
+    gateway.subscribe.assert_awaited_once_with(["US.TODAY"])
+
+
+# ============================================================
+# Rescan backfill of session HOD/LOD/volume (debug session
+# premarket-scan-abort-stale, bug 2c)
+#
+# A code the rescan subscribes at 09:55+ only sees bars from its first live push,
+# so its session HOD/LOD/cum_volume are partial. After the rescan subscribes, the
+# job backfills the 09:30 -> subscribe bars from get_cur_kline (no history quota)
+# into the BarAggregator -- BEFORE merging premarket highs, because Gate 1
+# (premarket high present) is what stops a signal from firing on partial stats.
+# ============================================================
+
+_PRE_BARS_DF_ROWS = [
+    {"time_key": "2026-10-02 09:30:00", "high": 103.0, "low": 98.0, "volume": 10_000},
+    {"time_key": "2026-10-02 09:35:00", "high": 102.0, "low": 99.0, "volume": 20_000},
+    {"time_key": "2026-10-02 09:40:00", "high": 101.5, "low": 99.2, "volume": 30_000},
+    {"time_key": "2026-10-02 09:55:00", "high": 101.0, "low": 99.5, "volume": 5_000},  # in flight
+]
+
+
+def _first_push(code="US.NEW"):
+    return {"code": code, "time_key": "2026-10-02 09:55:00", "open": 100.0,
+            "high": 101.0, "low": 99.5, "close": 100.5, "volume": 5_000}
+
+
+def _make_rescan_bot(rescan_codes):
+    """Bot (real BarAggregator, mocked scanner/gateway/engine) ready for _job_intraday_rescan."""
+    import pandas as pd
+    from bot.service.bot import TradingBot
+
+    cfg = MagicMock()
+    cfg.intraday_rescan_start_et = "09:55"
+    cfg.intraday_rescan_end_et = "12:55"
+    recorder = MagicMock()
+    recorder.get_cur_kline = AsyncMock(return_value=(0, pd.DataFrame(_PRE_BARS_DF_ROWS)))
+    recorder.fetch_and_merge_premarket_highs = AsyncMock(return_value={})
+    gateway = MagicMock()
+    gateway.get_cur_kline = recorder.get_cur_kline
+    engine = MagicMock()
+    engine.fetch_and_merge_premarket_highs = recorder.fetch_and_merge_premarket_highs
+    scanner = MagicMock()
+    scanner.run_intraday_rescan.return_value = list(rescan_codes)
+    store = MagicMock()
+    store.get_open_positions.return_value = []
+    store.get_pending_intent_codes.return_value = []
+    bot = TradingBot(
+        cfg=cfg, gateway=gateway, store=store, scanner=scanner,
+        position_manager=MagicMock(), execution_engine=MagicMock(),
+        kill_switch=MagicMock(), alerter=MagicMock(), watchdog=None,
+        signal_engine=engine, risk_engine=None,
+    )
+    return bot, recorder
+
+
+async def _run_rescan_job(bot):
+    from datetime import date, time as dtime
+
+    with patch("bot.service.bot.is_trading_day", return_value=True), \
+         patch("bot.service.bot.now_et") as mock_now:
+        mock_now.return_value.date.return_value = date(2026, 10, 2)
+        mock_now.return_value.time.return_value = dtime(10, 0)
+        await bot._job_intraday_rescan()
+
+
+@pytest.mark.asyncio
+async def test_rescan_backfills_new_code_session_stats_before_merging_premarket_highs():
+    bot, recorder = _make_rescan_bot(["US.NEW"])
+    agg = bot._bar_agg
+    agg._handle_row(_first_push())          # live stream began at 09:55
+
+    await _run_rescan_job(bot)
+
+    assert agg._hod["US.NEW"] == 103.0, f"HOD not backfilled: {agg._hod['US.NEW']}"
+    assert agg._lod["US.NEW"] == 98.0, f"LOD not backfilled: {agg._lod['US.NEW']}"
+    assert agg._session_volume["US.NEW"] == 60_000
+    order = [c[0] for c in recorder.mock_calls if c[0]]
+    assert order.index("get_cur_kline") < order.index("fetch_and_merge_premarket_highs"), (
+        f"backfill must precede the premarket-high merge (Gate 1); order was {order}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rescan_backfill_failure_is_fail_open():
+    """Non-OK read or an exception: keep today's behaviour (partial stats), job completes,
+    premarket highs are still merged, and the code is retried on the next rescan."""
+    bot, recorder = _make_rescan_bot(["US.NEW"])
+    agg = bot._bar_agg
+    agg._handle_row(_first_push())
+
+    recorder.get_cur_kline.return_value = (1, "kline not ready")
+    await _run_rescan_job(bot)
+    recorder.get_cur_kline.side_effect = RuntimeError("OpenD hiccup")
+    await _run_rescan_job(bot)
+
+    assert agg._hod["US.NEW"] == 101.0 and agg._lod["US.NEW"] == 99.5
+    assert agg.is_backfilled("US.NEW") is False
+    assert recorder.fetch_and_merge_premarket_highs.await_count == 2
+    assert recorder.get_cur_kline.await_count == 2, "unsuccessful codes must be retried"
+
+
+@pytest.mark.asyncio
+async def test_rescan_does_not_refetch_already_backfilled_codes():
+    bot, recorder = _make_rescan_bot(["US.NEW"])
+    bot._bar_agg._handle_row(_first_push())
+
+    await _run_rescan_job(bot)
+    await _run_rescan_job(bot)
+
+    assert recorder.get_cur_kline.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_open_failed_seed_leaves_no_prior_session_highs():
+    """If today's premarket-high fetch raises, Gate 1 must fail closed (empty), not run on yesterday's highs."""
+    from bot.signal.signal_engine import SignalEngine
+
+    gateway = MagicMock()
+    gateway.get_market_snapshot = AsyncMock(side_effect=RuntimeError("OpenD hiccup"))
+    engine = SignalEngine(MagicMock(), gateway, MagicMock())
+    engine.set_premarket_highs({"US.IT": 111.0})
+
+    await _run_market_open_job(_make_open_job_bot(["US.IT"], engine, gateway=gateway))
+
+    assert engine._premarket_highs == {}
+
+
+# ============================================================
 # Finding 1.1 + #5: wire FillEvent into PositionManager; resolve intent on both paths
 # ============================================================
 

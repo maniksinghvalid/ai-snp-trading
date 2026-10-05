@@ -7,9 +7,9 @@ All returned times are in US Eastern. The module-level _nyse singleton mirrors
 the ET = ZoneInfo(...) pattern in bot.safety.et_helpers — created once at
 import time to avoid repeated calendar construction overhead.
 
-Exports: is_trading_day, get_market_close_et, get_prior_n_trading_days
+Exports: is_trading_day, get_market_close_et, get_prior_n_trading_days, trading_days_between
 """
-from datetime import date
+from datetime import date, timedelta
 from typing import List
 
 import pandas as pd
@@ -77,3 +77,19 @@ def get_prior_n_trading_days(ref_date: date, n: int) -> List:
     # Exclude ref_date itself (completed days only)
     prior = [d for d in valid if d.date() < ref_date]
     return prior[-n:]
+
+
+def trading_days_between(start_exclusive: date, end_inclusive: date) -> List[date]:
+    """Return the NYSE sessions in (start_exclusive, end_inclusive] as date objects.
+
+    Backs trading_days_held (D-04): sessions strictly after the entry date up to
+    and including today. Holidays are excluded, half-days included.
+
+    Returns [] when end_inclusive <= start_exclusive.
+    """
+    if end_inclusive <= start_exclusive:
+        return []
+    valid = _nyse.valid_days(
+        start_date=start_exclusive + timedelta(days=1), end_date=end_inclusive
+    )
+    return [d.date() for d in valid]

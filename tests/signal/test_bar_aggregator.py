@@ -643,3 +643,182 @@ class TestCumulativeSessionVolume:
             f"After reset_session, bar5 cum_volume must be 666_000, "
             f"got {calls[3]['cum_volume']}"
         )
+
+
+# ============================================================
+# Session backfill for codes subscribed after 09:30 ET
+# (debug session premarket-scan-abort-stale, bug 2c)
+#
+# BarAggregator seeds _hod/_lod from the first post-subscribe push and
+# _session_volume from 0, so a rescan-added code (09:55+) ran I2 against a
+# partial HOD, sized its LOD-1% stop off a partial LOD, and undercounted the
+# RVOL-TOD numerator. backfill_session() merges the CLOSED bars that pre-date
+# the live stream into those three stats.
+# ============================================================
+
+_DAY = "2026-10-02"
+
+
+def _bf(hhmm, high, low, volume, day=_DAY):
+    """One get_cur_kline-style row (dict) for the backfill."""
+    return {"time_key": f"{day} {hhmm}:00", "high": high, "low": low, "volume": volume}
+
+
+def _push(agg, hhmm, high=101.0, low=99.5, volume=5_000, day=_DAY):
+    agg.on_recv_rsp(_make_row(time_key=f"{day} {hhmm}:00", high=high, low=low, volume=volume))
+
+
+# 09:30-09:50 closed bars + the in-flight 09:55 bar the live stream already has
+_PRE_BARS = [
+    _bf("09:30", 103.0, 98.0, 10_000),
+    _bf("09:35", 102.0, 99.0, 20_000),
+    _bf("09:40", 101.5, 99.2, 30_000),
+]
+
+
+class TestSessionBackfill:
+    """backfill_session(): pre-subscribe bars -> HOD/LOD/cum_volume, race-safe + idempotent."""
+
+    def test_backfill_merges_pre_subscribe_bars_into_session_stats(self, event_loop_and_counter):
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55", high=101.0, low=99.5, volume=5_000)  # first live push
+
+        rows = _PRE_BARS + [
+            _bf("09:55", 101.0, 99.5, 5_000),                    # in-flight: live stream owns it
+            _bf("15:55", 200.0, 1.0, 999_999, day="2026-10-01"),  # prior session: ignored
+        ]
+        assert agg.backfill_session("US.AAPL", rows) is True
+
+        _push(agg, "10:00", high=101.2, low=99.8, volume=100)    # closes 09:55
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+
+        ev = calls[0]
+        assert ev["time_key"] == f"{_DAY} 09:55:00"
+        assert ev["hod"] == 103.0, f"HOD must include 09:30-09:40 bars, got {ev['hod']}"
+        assert ev["lod"] == 98.0, f"LOD must include 09:30-09:40 bars, got {ev['lod']}"
+        assert ev["cum_volume"] == 10_000 + 20_000 + 30_000 + 5_000, ev["cum_volume"]
+
+    def test_backfill_is_idempotent(self, event_loop_and_counter):
+        """Every rescan re-subscribes (and would re-backfill) the same codes."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55")
+
+        assert agg.is_backfilled("US.AAPL") is False
+        assert agg.backfill_session("US.AAPL", _PRE_BARS + [_bf("09:55", 101.0, 99.5, 5_000)])
+        assert agg.is_backfilled("US.AAPL") is True
+        assert agg.backfill_session("US.AAPL", _PRE_BARS + [_bf("09:55", 101.0, 99.5, 5_000)])
+
+        _push(agg, "10:00")
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+        assert calls[0]["cum_volume"] == 10_000 + 20_000 + 30_000 + 5_000, "counted twice"
+
+    def test_bars_already_tracked_live_are_not_double_counted(self, event_loop_and_counter):
+        """Backfill arrives AFTER bars closed live: the cutoff is the first bar the
+        aggregator itself accounted for, so 09:55/10:00 rows are never re-added."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55", volume=5_000)
+        _push(agg, "10:00", volume=7_000)   # closes 09:55 -> seen={09:55}, in flight=10:00
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+
+        rows = _PRE_BARS + [_bf("09:55", 101.0, 99.5, 5_000), _bf("10:00", 101.2, 99.8, 7_000)]
+        assert agg.backfill_session("US.AAPL", rows) is True
+
+        _push(agg, "10:05", volume=1)       # closes 10:00
+        _drain(loop, calls, expected_count=2, timeout=0.5)
+        assert calls[1]["time_key"] == f"{_DAY} 10:00:00"
+        assert calls[1]["cum_volume"] == 60_000 + 5_000 + 7_000, calls[1]["cum_volume"]
+
+    def test_backfill_never_regresses_hod_lod(self, event_loop_and_counter):
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55", high=110.0, low=95.0)  # live already beyond the backfilled range
+
+        agg.backfill_session("US.AAPL", _PRE_BARS)
+
+        _push(agg, "10:00")
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+        assert calls[0]["hod"] == 110.0 and calls[0]["lod"] == 95.0
+
+    def test_backfill_before_first_live_push_is_deferred(self, event_loop_and_counter):
+        """No live push yet -> nothing anchors the cutoff; do not apply, allow a retry."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+
+        assert agg.backfill_session("US.AAPL", _PRE_BARS) is False
+        assert agg.is_backfilled("US.AAPL") is False
+
+        _push(agg, "09:55")
+        assert agg.backfill_session("US.AAPL", _PRE_BARS) is True
+
+    def test_stale_previous_day_live_state_is_not_backfilled(self, event_loop_and_counter):
+        """A cached prior-day first push must not anchor a session-day backfill."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "15:55", day="2026-10-01")  # stale cache, live stream not on today yet
+
+        assert agg.backfill_session("US.AAPL", _PRE_BARS) is False
+
+    def test_reset_session_clears_backfill_marker(self, event_loop_and_counter):
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55")
+        agg.backfill_session("US.AAPL", _PRE_BARS)
+
+        agg.reset_session()
+
+        assert agg.is_backfilled("US.AAPL") is False
+
+    def test_backfill_ignores_malformed_rows(self, event_loop_and_counter):
+        """A NaN/zero low must never become the session LOD (fail-open: skip the row)."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55", high=101.0, low=99.5)
+
+        rows = [_bf("09:30", 103.0, 98.0, 10_000), _bf("09:35", 150.0, 0.0, 99_999),
+                _bf("09:40", float("nan"), float("nan"), 99_999)]
+        assert agg.backfill_session("US.AAPL", rows) is True
+
+        _push(agg, "10:00")
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+        assert (calls[0]["hod"], calls[0]["lod"]) == (103.0, 98.0)
+        assert calls[0]["cum_volume"] == 10_000 + 5_000
+
+    def test_backfill_ignores_bars_before_the_regular_session_open(self, event_loop_and_counter):
+        """A premarket bar that leaks into the read must not set the session HOD."""
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55", high=101.0, low=99.5)
+
+        agg.backfill_session("US.AAPL", [_bf("09:25", 150.0, 50.0, 777_777)] + _PRE_BARS)
+
+        _push(agg, "10:00")
+        _drain(loop, calls, expected_count=1, timeout=0.5)
+        assert (calls[0]["hod"], calls[0]["lod"]) == (103.0, 98.0)
+        assert calls[0]["cum_volume"] == 60_000 + 5_000
+
+    def test_push_and_backfill_serialize_on_one_lock(self, event_loop_and_counter):
+        """Pushes (SDK thread) and backfill (loop thread) both read-modify-write
+        _hod/_lod/_session_volume: each must hold the aggregator lock, or a
+        concurrent push can overwrite the backfilled max/min (lost update)."""
+        import threading
+
+        loop, on_bar_closed, calls = event_loop_and_counter
+        agg = _make_agg(loop, on_bar_closed)
+        _push(agg, "09:55")
+
+        def _blocked(fn):
+            t = threading.Thread(target=fn, daemon=True)
+            with agg._lock:
+                t.start()
+                t.join(timeout=0.2)
+                still_blocked = t.is_alive()
+            t.join(timeout=2)
+            return still_blocked
+
+        assert _blocked(lambda: _push(agg, "09:55")), "on_recv_rsp must take the lock"
+        assert _blocked(lambda: agg.backfill_session("US.AAPL", _PRE_BARS)), (
+            "backfill_session must take the lock"
+        )

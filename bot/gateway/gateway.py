@@ -988,6 +988,53 @@ class MoomooGateway:
         await loop.run_in_executor(None, _unsubscribe_blocking)
         _logger.info("unsubscribed_k5m", codes=codes, count=len(codes))
 
+    async def get_cur_kline(self, code: str, num: int) -> tuple:
+        """Raw read of the latest `num` K_5M bars for code (interpretation-free).
+
+        Returns the (ret, data) tuple from quote_ctx.get_cur_kline unchanged; the
+        last row is the bar currently in flight. Requires an active K_5M
+        subscription on code (subscribe() first) and costs no history-kline quota
+        -- used to backfill session HOD/LOD/volume for a code subscribed after
+        09:30 ET. Non-RET_OK is returned as-is, never raised: the caller degrades.
+
+        Args:
+            code: Moomoo-format code (e.g. "US.AAPL").
+            num:  Number of most recent bars (SDK max 1000).
+        """
+        # Deferred import — mirrors subscribe() (no top-level moomoo import).
+        from moomoo import KLType
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._quote_ctx.get_cur_kline(code, num, KLType.K_5M),
+        )
+
+    async def get_subscribed_k5m_codes(self) -> set:
+        """Codes this connection currently holds a K_5M subscription for.
+
+        Authoritative OpenD answer (query_subscription), so it also sees feeds a
+        previous session left behind -- the SDK re-subscribes its own record on a
+        socket reconnect, and nothing in the bot tracks subscriptions itself.
+        is_all_conn=False keeps other connections (e.g. the separate options-bot
+        process) out of the answer: the caller releases the result, and must never
+        release a feed it does not own. Other subtypes (QUOTE) are ignored.
+
+        Returns:
+            set of Moomoo-format codes (possibly empty).
+
+        Raises:
+            GatewayError: if query_subscription() returns non-RET_OK.
+        """
+        loop = asyncio.get_running_loop()
+
+        def _query_blocking():
+            ret, data = self._quote_ctx.query_subscription(is_all_conn=False)
+            _check_ret(ret, data, "query_subscription")
+            return set((data.get("sub_list") or {}).get("K_5M", []))
+
+        return await loop.run_in_executor(None, _query_blocking)
+
     async def get_global_state(self) -> dict:
         """Return a health-check dict from the OpenD global state (SVC-02).
 

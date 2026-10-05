@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: "Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop"
-last_updated: "2026-09-26T22:00:01.975Z"
-last_activity: 2026-09-26
+status: verifying
+stopped_at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
+last_updated: "2026-10-05T02:50:12.976Z"
+last_activity: 2026-10-05 -- Phase 12 execution started
 progress:
-  total_phases: 13
-  completed_phases: 12
-  total_plans: 63
-  completed_plans: 64
-  percent: 92
+  total_phases: 14
+  completed_phases: 13
+  total_plans: 72
+  completed_plans: 73
+  percent: 93
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 11 complete — merge to develop, then milestone close
+**Current focus:** Phase 12 — IBS ETF mean-reversion bot (ibs_etf_mean_reversion)
 
 ## Current Position
 
-Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
+Phase: 12 (IBS ETF mean-reversion bot (ibs_etf_mean_reversion)) — EXECUTING
 Plan: 9 of 9
-Status: Complete (UAT 5/5, verification passed)
-Last activity: 2026-09-28 - Completed quick task 260927-w4r: Fix after-20:00-ET wall-clock flake in trade-recording tests
+Status: Phase complete — ready for verification
+Last activity: 2026-10-05 -- Phase 12 execution started
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -91,11 +91,20 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11 P07 | 20min | 3 tasks | 4 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P08 | 25min | 3 tasks | 5 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P09 | 15min | 3 tasks | 4 files |
+| Phase 12 P01 | 25min | 2 tasks | 18 files |
+| Phase 12 P02 | 15min | 2 tasks | 7 files |
+| Phase 12 P03 | 12min | 2 tasks | 8 files |
+| Phase 12 P04 | 15min | 2 tasks | 3 files |
+| Phase 12 P06 | 20min | 2 tasks | 3 files |
+| Phase 12 P07 | 15min | 2 tasks | 5 files |
+| Phase 12 P08 | 25min | 2 tasks | 3 files |
+| Phase 12 P09 | 35min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
+- Phase 12 added (2026-10-04): IBS ETF mean-reversion bot (`ibs_etf_mean_reversion`) — successor to Trend Join Long (validated no-edge 2026-08-13; screen study 2026-10-03). Operator decisions: unlevered IBS-17, separate bot process, near-close fills, Trend Join Long stopped at cutover. Context in `.planning/phases/12-*/12-CONTEXT.md`.
 - Phase 06.2 inserted after Phase 6 (2026-07-02): Code review remediation — fix 16 confirmed findings from 2026-07-02 review (3 tiers: blockers, correctness, hygiene) (URGENT)
 - Phase 07.1 inserted after Phase 07 (2026-07-06): Close gap: RISK-TICK-STOP — wire gateway into PositionManager (found by /gsd-audit-milestone v1.0: bot/main.py never passes gateway= to PositionManager, so arm_stop_protection() no-ops in production) (URGENT)
 - Phase 9 added (2026-08-17): Options backtester — replay bot/options/strategy.py pure functions over Massive option daily aggregates (contracts reference + O:… daily bars, Black-Scholes IV/delta, own ATM-IV series for IVR); pre-registered hypotheses (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) before any rules_options.json change
@@ -215,6 +224,14 @@ Recent decisions affecting current work:
 - [Phase 11-09]: IN-08: self._quote_miss_streak now stores (ET session date, count) so a day-before-expiry streak can no longer make the first expiry-day miss escalate
 - [Phase 11-09]: WR-11: self._snapshot_outage_cycles is a process-level counter (reuses _QUOTE_MISS_ESCALATE_CYCLES, no new knob) that alerts once per episode and re-arms on any clean cycle -- corrects 11-08's T-11-46 rationale (OpenDWatchdog only polls get_global_state, cannot see a quote-rights/whole-batch snapshot failure while connected)
 - [Phase 11-09]: Phase 11 gap-closure loop CLOSED per operator scope (2026-09-25): CR-03 + WR-10 + WR-11 + IN-08 were the last four findings from 11-REVIEW.md @06b6787; residual T-11-56 (shutdown-order cancel failure) and T-11-57 (late-restart inside the last manage interval) accepted, not fixed
+- [Phase 12]: Phase 12-01: HERE/ROOT defined below prelude data marker so exec()'d prelude works without __file__
+- [Phase 12]: Phase 12-02: rules_ibs.json sole source of IBS strategy numbers; loader fails closed (unlevered, D-13 path collision, deadline window)
+- [Phase 12-03]: ibs_* table names keep equity startup_reconcile blind to IBS DB; active-code partial unique index enforces D-05
+- [Phase 12-04]: Parity scenarios use exact-binary prices/IBS so ties are exact; ruling 3 (no same-day re-entry) pinned by a dedicated test
+- [Phase 12]: 12-06: reconcile returns broker map; _decide returns (quotes, exited) for Plan 08 reuse
+- [Phase 12]: [12-07] Probe opens IBS DB only if it exists; plist KeepAlive SuccessfulExit=false so kill-file exit is not restarted
+- [Phase 12-08]: IBS free slots from post-exit active rows; unfilled entry ABORTED (no carry-over); hard-cancel sweeps WORKING orders of any session
+- [Phase 12]: 12-09: no force-close job (D-06); jobs ibs_arm/ibs_decide/ibs_hard_cancel/ibs_eod; shutdown order cancel decision, sweep, close, alert, scheduler
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -263,6 +280,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-26T22:00:00Z
+Last session: 2026-10-05T02:50:06.772Z
 Stopped at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
 Resume file: None

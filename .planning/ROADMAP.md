@@ -40,6 +40,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 8: Options Premium Selling (tasty_credit_spreads)** - Successor strategy after Trend Join Long was validated as no-edge (2026-08-13): tastylive-derived defined-risk iron condors / put credit spreads on liquid ETFs (45 DTE, IVR≥30 gate, 20Δ shorts, 50% profit target, 21-DTE exit), self-contained `bot/options/` package + `python -m bot --rules rules_options.json` dispatch (built 2026-08-17 via quick tasks 260817-0ph/155/1ie + UAT batch ad41cd5; 961 tests; live paper UAT `--live-1lot` pending operator run)
 - [x] **Phase 10: External Strategy Research** - Two Reddit-sourced day-trading strategies critically extracted and compared against Trend Join Long; backtest-only research package (`backtester/experimental/`) implementing their automatable cores, pre-registered hypotheses, cache-only cost-realistic backtests across 5 windows/9 regime slices, and a 14-section report — production code changed only on a separate branch if a hypothesis is SUPPORTED (started 2026-08-18) (completed 2026-08-18)
 - [x] **Phase 11: Multi-strategy options bot (bull_call_spread)** - `strategies` array in `rules_options.json`; one options process runs `tasty_credit_spreads` (unchanged) + new `super_bull_call` bull call debit spread on the equity premarket watchlist; per-strategy sizing, global breaker/BP cap; loader keeps the flat `load_options_config` contract for the backtester/probe (planned 2026-09-24) (completed 2026-09-26)
+- [x] **Phase 12: IBS ETF mean-reversion bot (ibs_etf_mean_reversion)** - Successor strategy after Trend Join Long was validated no-edge: separate `bot/ibs/` process trading the IBS < 0.20 / > 0.80 mean-reversion rule on 17 liquid ETFs near the close, overnight holds up to 10 trading days, unlevered, LIMIT-only, own DB/kill file/reports; selected by a two-round pre-registered search 2026-10-04 (OOS CAGR 16.4%, Sharpe 1.30, maxDD −11%) (added 2026-10-04) (completed 2026-10-05)
 
 ## Phase Details
 
@@ -469,3 +470,34 @@ Plans:
 **Gap closure 3** *(11-REVIEW.md third review CR-03 + WR-10 + WR-11 + IN-08 — operator decision 2026-09-25)*
 
 - [x] 11-09-PLAN.md — fill_leg cancels its working order on any exception/cancellation then re-raises, hand-off alerts warn to cancel working orders (CR-03); one-time expiry-day warning on the first unmanageable cycle (WR-10); process-level snapshot-outage alert once per episode (WR-11); miss streak scoped to the ET session (IN-08) (MSO-05/07/08) [Wave 1, gap_closure]
+
+### Phase 12: IBS ETF mean-reversion bot (ibs_etf_mean_reversion)
+
+**Goal:** A new, separate paper-trading bot process (`python3 -m bot --rules rules_ibs.json`, self-contained `bot/ibs/` mirroring `bot/options/`) that trades the IBS mean-reversion rule on 17 liquid US ETFs — buy when IBS = (last−low)/(high−low) < 0.20 at 10 minutes before the close, sell when IBS > 0.80 or after 10 trading days, 10 equal-weight slots of 10% of $100k paper equity, LIMIT orders only, positions held overnight by design — with the full safety stack (paper guard, readiness gate, own-DB-only reconcile, kill switch, watchdog, Telegram, EOD report) and operator cutover tooling (read-only UAT probe, `--live-1lot`, launchd plist, runbook to stop Trend Join Long). Selected 2026-10-04 by a two-round pre-registered search (16 hypotheses): OOS 2019–2026 net CAGR 16.4% (close fill) / 12.7% (next-open), Sharpe 1.30 / 1.07, maxDD −11% / −22% vs SPY 17.3% / 0.93 / −34%. Operator decisions (final): unlevered, separate bot, near-close fills, Trend Join Long stopped at cutover. Context: `12-CONTEXT.md`.
+**Requirements**: IBS-01..IBS-10 (defined in `12-CONTEXT.md`)
+**Depends on:** Phase 11
+**Plans:** 9/9 plans complete
+Plans:
+**Wave 1**
+
+- [x] 12-01-PLAN.md — Wave 1: research provenance — six scripts to backtester/experimental/ibs_search/ (path constants only) + results doc (IBS-10)
+- [x] 12-02-PLAN.md — Wave 1: rules_ibs.json + IBS_SCHEMA + fail-closed IbsConfig loader + tests/ibs scaffolding (IBS-01)
+- [x] 12-03-PLAN.md — Wave 1: additive shared helpers — configure_logging log_name/force, trading_days_between, migration 0008 ibs_* tables, audit-log test isolation (IBS-06, IBS-08)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 12-04-PLAN.md — Wave 2: pure strategy core + research parity test with documented same-day re-entry divergence (IBS-03)
+- [x] 12-05-PLAN.md — Wave 2: IbsStore + IbsExecutor (LegExecutor reuse, deadline-bounded) (IBS-05, IBS-06)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 12-06-PLAN.md — Wave 3: IbsBot readiness gate, own-rows reconcile, guarded decision job, exit batch with persisted retry (IBS-04, IBS-05, IBS-07)
+- [x] 12-07-PLAN.md — Wave 3: operator tooling — uat_ibs_probe.py (read-only + --live-1lot --confirm), launchd plist, IBS-RUNBOOK.md, CLAUDE.md section (IBS-09)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 12-08-PLAN.md — Wave 4: entry batch (external-holding guard, same-session exclusion, slots, sizing) + close − 1 min hard-cancel sweep (IBS-04, IBS-05, IBS-07)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 12-09-PLAN.md — Wave 5: calendar-aware job arming, EOD report, shutdown order, main(), bot/main.py dispatch, static hygiene, phase gate + VALIDATION sign-off (IBS-02, IBS-04, IBS-05, IBS-08)

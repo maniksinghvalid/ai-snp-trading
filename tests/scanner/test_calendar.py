@@ -58,3 +58,27 @@ class TestPriorTradingDays:
             assert d.date() < ref, f"{d} is not strictly before ref_date {ref}"
             # Each date must be a NYSE trading day
             assert is_trading_day(d.date()), f"{d} is not a trading day"
+
+
+class TestTradingDaysBetween:
+    """IBS-06: sessions in (start, end] backing trading_days_held."""
+
+    def test_weekend_skipped(self):
+        from bot.scanner.calendar import trading_days_between
+        assert trading_days_between(date(2026, 10, 2), date(2026, 10, 5)) == [date(2026, 10, 5)]
+
+    def test_holiday_excluded_half_day_included(self):
+        from bot.scanner.calendar import trading_days_between
+        assert trading_days_between(date(2026, 11, 24), date(2026, 11, 30)) == [
+            date(2026, 11, 25), date(2026, 11, 27), date(2026, 11, 30)]
+
+    def test_empty_when_end_not_after_start(self):
+        from bot.scanner.calendar import trading_days_between
+        assert trading_days_between(date(2026, 10, 5), date(2026, 10, 5)) == []
+        assert trading_days_between(date(2026, 10, 6), date(2026, 10, 5)) == []
+
+    def test_elements_are_dates(self):
+        from datetime import datetime
+        from bot.scanner.calendar import trading_days_between
+        out = trading_days_between(date(2026, 10, 1), date(2026, 10, 8))
+        assert out and all(type(d) is date and not isinstance(d, datetime) for d in out)

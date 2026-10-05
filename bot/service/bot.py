@@ -39,6 +39,13 @@ from bot.service.report import build_daily_html as _build_daily_html, write_repo
 
 _logger = get_logger(__name__)
 
+# moomoo RET_OK — same no-SDK-import pattern as bot.signal.signal_engine.
+_RET_OK = 0
+
+# K_5M bars requested for the session backfill: a full regular session is 78 bars,
+# so 100 always spans 09:30 -> now (older rows are filtered out by the aggregator).
+_BACKFILL_NUM_BARS = 100
+
 # ============================================================
 # TradingBot
 # ============================================================
@@ -664,6 +671,79 @@ class TradingBot:
         except Exception:
             _logger.error("force_close_reschedule_error", exc_info=True)
 
+    def _managed_codes(self) -> set:
+        """Codes the bot is actively managing: open position (qty > 0, not CLOSED) or
+        a PENDING intent. Their K_5M feed must never be evicted or released.
+
+        Blocking (store reads) -- call from an executor thread.
+        """
+        codes: set = set()
+        for row in self._store.get_open_positions():
+            if (row.get("remaining_quantity") or 0) > 0 and row.get("phase") != "CLOSED":
+                codes.add(row.get("code"))
+        for row in self._store.get_pending_intent_codes():
+            codes.add(row.get("code"))
+        codes.discard(None)
+        return codes
+
+    async def _release_stale_subscriptions(self, watchlist_codes) -> None:
+        """Unsubscribe K_5M feeds left over from earlier sessions (market open).
+
+        Stale = subscribed on this connection but neither on today's watchlist nor
+        managed (_managed_codes). Without this, yesterday's rescan-added codes keep
+        pushing and are evaluated on every bar all day, and they hold quota slots.
+        Fail-open: any error (including moomoo's rejection of an unsubscribe less
+        than 60s after the subscribe) is logged and the open job carries on --
+        the worst case is today's old behaviour (the feed lingers).
+
+        watchlist_codes: today's watchlist (Moomoo-format codes).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            managed = await loop.run_in_executor(None, self._managed_codes)
+            subscribed = await self._gateway.get_subscribed_k5m_codes()
+            stale = sorted(subscribed - set(watchlist_codes) - managed)
+            if stale:
+                await self._gateway.unsubscribe(stale)
+                _logger.info("stale_subscriptions_released", codes=stale, count=len(stale))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.warning("stale_subscription_release_failed", exc_info=True)
+
+    async def _backfill_session_stats(self, codes) -> None:
+        """Backfill session HOD/LOD/cum-volume for codes subscribed after 09:30 ET.
+
+        For each code the BarAggregator has not backfilled yet, reads the latest
+        K_5M bars (gateway.get_cur_kline -- needs the subscription the rescan just
+        made, costs no history quota) and lets the aggregator merge the closed bars
+        that pre-date its live stream (BarAggregator.backfill_session owns the race
+        handling). Already-backfilled codes are skipped, so each code costs one read
+        per session. Fail-open per code: a non-OK read, an exception, or a code with
+        no live push yet is logged/ignored -- stats stay partial as before and the
+        code is retried on the next rescan.
+
+        codes: Moomoo-format codes just returned by the rescan.
+        """
+        agg = self._bar_agg
+        if agg is None:
+            return
+        for code in codes:
+            if agg.is_backfilled(code):
+                continue
+            try:
+                ret, data = await self._gateway.get_cur_kline(code, _BACKFILL_NUM_BARS)
+                if ret != _RET_OK:
+                    _logger.warning("session_backfill_read_failed", code=code, ret=ret)
+                    continue
+                rows = data.to_dict("records") if hasattr(data, "to_dict") else list(data)
+                if not agg.backfill_session(code, rows):
+                    _logger.warning("session_backfill_deferred", code=code, reason="no live push yet")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.warning("session_backfill_error", code=code, exc_info=True)
+
     async def _job_market_open_subscribe(self) -> None:
         """Market-open subscribe job — seeds premarket highs, THEN subscribes the watchlist (D-01 guard).
 
@@ -702,6 +782,16 @@ class TradingBot:
             if self._bar_agg is not None:
                 self._bar_agg.reset_session()
 
+            # Per-session reset of the SignalEngine's frozen premarket highs. The
+            # engine lives for the whole process, and the seed below only runs for
+            # a non-empty watchlist (or can raise), so without this yesterday's
+            # highs survive an empty-watchlist/failed-seed day and
+            # fetch_and_merge_premarket_highs would skip a re-qualifying code as
+            # "already present" -> I1 against yesterday's premarket high. Empty
+            # dict == Gate 1 fails closed until today's highs are seeded.
+            if self._signal_engine is not None:
+                self._signal_engine.set_premarket_highs({})
+
             # Read active watchlist codes from the store
             loop = asyncio.get_running_loop()
 
@@ -710,6 +800,13 @@ class TradingBot:
                 return self._store.get_watchlist_codes(today)
 
             codes = await loop.run_in_executor(None, _get_watchlist_worker)
+
+            # Release K_5M feeds left over from earlier sessions (neither on today's
+            # watchlist nor managed) so they are not evaluated all day. Runs even
+            # for an empty watchlist -- the day the premarket scan aborted is the
+            # day leftovers matter most. Fail-open (logs, never raises).
+            await self._release_stale_subscriptions(codes)
+
             if codes:
                 # D-01/D-03: Seed premarket highs via one batched snapshot call BEFORE
                 # subscribing. fetch_premarket_highs() calls set_premarket_highs()
@@ -829,13 +926,7 @@ class TradingBot:
                 # Finding 2.2: real active codes (open positions + in-flight intents)
                 # so the scanner never evicts/unsubscribes a symbol that is currently
                 # managed or awaiting a fill.
-                active_codes: set = set()
-                for row in self._store.get_open_positions():
-                    if (row.get("remaining_quantity") or 0) > 0 and row.get("phase") != "CLOSED":
-                        active_codes.add(row.get("code"))
-                for row in self._store.get_pending_intent_codes():
-                    active_codes.add(row.get("code"))
-                active_codes.discard(None)
+                active_codes = self._managed_codes()
 
                 rescan_watchlist = self._scanner.run_intraday_rescan(
                     self._store,
@@ -848,6 +939,12 @@ class TradingBot:
                 ) or []
 
             await loop.run_in_executor(None, _intraday_rescan_worker)
+
+            # Backfill 09:30 -> subscribe session HOD/LOD/volume for codes the rescan
+            # just subscribed. BEFORE the premarket-high merge below: Gate 1 (premarket
+            # high present) is what stops a signal on a code, so completing the stats
+            # first means no bar can pass Gate 1 while they are still partial.
+            await self._backfill_session_stats(rescan_watchlist)
 
             # Seed premarket highs for rescan-discovered codes (D-01 merge guard).
             # fetch_and_merge_premarket_highs skips codes already in _premarket_highs

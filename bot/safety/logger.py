@@ -61,7 +61,8 @@ def _add_severity_prefix(logger, method, event_dict):  # noqa: ARG001
 _configured = False
 
 
-def configure_logging(log_dir: str = _DEFAULT_LOG_DIR, level: str = _DEFAULT_LEVEL) -> None:
+def configure_logging(log_dir: str = _DEFAULT_LOG_DIR, level: str = _DEFAULT_LEVEL,
+                      *, log_name: str = "bot.log", force: bool = False) -> None:
     """Configure structlog with a rotating JSON file + readable stderr output.
 
     Sets up two output channels:
@@ -71,27 +72,35 @@ def configure_logging(log_dir: str = _DEFAULT_LOG_DIR, level: str = _DEFAULT_LEV
     Uses contextvars integration so structured context (bound key-values)
     propagates across asyncio boundaries. Call once at bot startup.
 
-    log_dir: str — directory to create bot.log and its rotations (created
+    log_dir: str — directory to create the log file and its rotations (created
         if it does not exist).
     level: str — minimum log level string ("DEBUG", "INFO", "WARNING",
         "ERROR"). Default "INFO".
+    log_name: str — keyword-only log file name under log_dir (default
+        "bot.log"; the IBS bot uses "ibs.log", D-13).
+    force: bool — keyword-only; reconfigure even if already configured.
+        bot/main.py configures logging before the strategy dispatch, so a
+        bot with its own log file re-targets with force=True.
     """
     global _configured
-    if _configured:
+    if _configured and not force:
         return
 
     numeric_level = _LEVEL_MAP.get(level.upper(), logging.INFO)
 
     # ---- ensure log directory exists ----
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "bot.log")
+    log_file = os.path.join(log_dir, log_name)
 
     # ---- stdlib root logger ----
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
 
-    # Remove default handlers to avoid duplicates
-    root_logger.handlers.clear()
+    # Remove default handlers to avoid duplicates; close them so a force=True
+    # re-target does not leak the previous log file's descriptor (IN-02).
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        handler.close()
 
     # ---- rotating file handler (JSON output) ----
     file_handler = logging.handlers.RotatingFileHandler(

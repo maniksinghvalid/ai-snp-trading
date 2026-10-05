@@ -1,0 +1,56 @@
+
+### S2 RSI2-ETF
+                       trades   win%  avg_trade%    PF  CAGR%  Sharpe  maxDD% pos_years  SPY_maxDD%  SPY_Sharpe
+window      fill                                                                                               
+IS 2010-18  close        1151  72.37        0.22  1.41   2.71    0.43  -14.98       7/9      -19.35        0.80
+            next_open    1149  68.23        0.26  1.51   3.05    0.47  -14.36       7/9      -19.35        0.80
+OOS 2019-26 close         994  70.42        0.37  1.71   4.78    0.85   -9.56       6/8      -33.72        0.93
+            next_open     991  67.51        0.35  1.62   4.34    0.77   -8.61       7/8      -33.72        0.93
+VERDICT S2 RSI2-ETF: PASS  PF>=1.2=y, trades>=100=y, pos_years>=5/8=y, Sharpe>=0.5=y, DD<SPY=y, IS_positive=y, next_open_positive=y
+
+### S3 IBS-ETF
+                       trades   win%  avg_trade%    PF  CAGR%  Sharpe  maxDD% pos_years  SPY_maxDD%  SPY_Sharpe
+window      fill                                                                                               
+IS 2010-18  close        3464  65.62        0.24  1.42   9.13    0.91  -15.35       8/9      -19.35        0.80
+            next_open    3412  62.87        0.19  1.33   6.30    0.67  -16.05       8/9      -19.35        0.80
+OOS 2019-26 close        3162  64.14        0.39  1.62  16.45    1.30  -11.18       7/8      -33.72        0.93
+            next_open    3106  63.14        0.31  1.47  12.72    1.08  -21.69       7/8      -33.72        0.93
+VERDICT S3 IBS-ETF: PASS  PF>=1.2=y, trades>=100=y, pos_years>=5/8=y, Sharpe>=0.5=y, DD<SPY=y, IS_positive=y, next_open_positive=y
+
+### S4 Overnight-SPY
+                       trades   win%  avg_trade%    PF  CAGR%  Sharpe  maxDD% pos_years  SPY_maxDD%  SPY_Sharpe
+window      fill                                                                                               
+IS 2010-18  close        2264  49.91       -0.01  0.95  -2.68   -0.26  -28.20       4/9      -19.35        0.80
+            next_open    2264  49.91       -0.01  0.95  -2.68   -0.26  -28.20       4/9      -19.35        0.80
+OOS 2019-26 close        1948  53.44        0.00  1.01  -0.12    0.05  -30.14       5/8      -33.72        0.93
+            next_open    1948  53.44        0.00  1.01  -0.12    0.05  -30.14       5/8      -33.72        0.93
+VERDICT S4 Overnight-SPY: FAIL  PF>=1.2=N, trades>=50=y, pos_years>=5/8=y, Sharpe>=0.5=N, DD<SPY=y, IS_positive=N, next_open_positive=N
+
+### S4 Overnight-QQQ
+                       trades   win%  avg_trade%    PF  CAGR%  Sharpe  maxDD% pos_years  SPY_maxDD%  SPY_Sharpe
+window      fill                                                                                               
+IS 2010-18  close        2264  52.92        0.01  1.04   1.70    0.22  -18.62       6/9      -19.35        0.80
+            next_open    2264  52.92        0.01  1.04   1.70    0.22  -18.62       6/9      -19.35        0.80
+OOS 2019-26 close        1948  54.00        0.01  1.05   2.83    0.26  -35.31       6/8      -33.72        0.93
+            next_open    1948  54.00        0.01  1.05   2.83    0.26  -35.31       6/8      -33.72        0.93
+VERDICT S4 Overnight-QQQ: FAIL  PF>=1.2=N, trades>=50=y, pos_years>=5/8=y, Sharpe>=0.5=N, DD<SPY=N, IS_positive=y, next_open_positive=y
+
+### S5 TOM-SPY
+                       trades   win%  avg_trade%    PF  CAGR%  Sharpe  maxDD% pos_years  SPY_maxDD%  SPY_Sharpe
+window      fill                                                                                               
+IS 2010-18  close         108  63.89        0.45  1.82   5.70    0.74  -12.23       7/9      -19.35        0.80
+            next_open     108  63.89        0.45  1.82   5.70    0.74  -12.23       7/9      -19.35        0.80
+OOS 2019-26 close          92  60.87        0.50  1.75   6.41    0.69  -15.26       6/8      -33.72        0.93
+            next_open      92  60.87        0.50  1.75   6.41    0.69  -15.26       6/8      -33.72        0.93
+VERDICT S5 TOM-SPY: PASS  PF>=1.2=y, trades>=50=y, pos_years>=5/8=y, Sharpe>=0.5=y, DD<SPY=y, IS_positive=y, next_open_positive=y
+
+### S1 RSI2-stocks (SURVIVORSHIP-BIASED)
+                       trades   win%  avg_trade%    PF  CAGR%  Sharpe  maxDD% pos_years  SPY_maxDD%  SPY_Sharpe
+window      fill                                                                                               
+IS 2010-18  close        4940  65.26        0.22  1.24  11.75    0.81  -20.68       8/9      -19.35        0.80
+            next_open    4563  62.09        0.16  1.17   6.02    0.51  -19.39       7/9      -19.35        0.80
+OOS 2019-26 close        4316  66.43        0.27  1.23  14.38    0.79  -35.99       7/8      -33.72        0.93
+            next_open    3958  63.67        0.22  1.18   8.34    0.55  -31.70       7/8      -33.72        0.93
+VERDICT S1 RSI2-stocks: FAIL  PF>=1.2=y, trades>=100=y, pos_years>=5/8=y, Sharpe>=0.5=y, DD<SPY=N, IS_positive=y, next_open_positive=y
+
+SUMMARY: {'S2 RSI2-ETF': True, 'S3 IBS-ETF': True, 'S4 Overnight-SPY': False, 'S4 Overnight-QQQ': False, 'S5 TOM-SPY': True, 'S1 RSI2-stocks': False}

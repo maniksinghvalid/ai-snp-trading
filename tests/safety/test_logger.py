@@ -26,14 +26,27 @@ import structlog
 
 @pytest.fixture(autouse=True)
 def reset_logger_state():
-    """Reset the module-level _configured flag before each test."""
+    """Reset the module-level _configured flag before each test.
+
+    Also restores the root logger's handlers (IN-05): without it, later test
+    modules keep logging into this test's tmp_path.
+    """
+    import logging
     import bot.safety.logger as logger_mod
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
     original = logger_mod._configured
     logger_mod._configured = False
     # Also clear structlog's internal cache
     structlog.reset_defaults()
     yield
     # Restore after test
+    for h in root.handlers[:]:
+        if h not in saved_handlers:
+            root.removeHandler(h)
+            h.close()
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_level)
     logger_mod._configured = original
     structlog.reset_defaults()
 
@@ -90,6 +103,51 @@ def test_bare_configure_logging_does_not_target_production_log():
     assert prod_log not in base_filenames, (
         f"configure_logging() targeted the production log path: {base_filenames}"
     )
+
+
+def test_configure_logging_log_name_and_force(tmp_path):
+    """log_name + force=True re-targets logging to <log_dir>/<log_name> (D-13)."""
+    import logging
+    from bot.safety.logger import configure_logging, get_logger
+    log_dir = str(tmp_path / "logs")
+    configure_logging(log_dir=log_dir)
+    configure_logging(log_dir=log_dir, log_name="ibs.log", force=True)
+    get_logger("ibs_test").info("ibs_probe_event")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    ibs_log = os.path.join(log_dir, "ibs.log")
+    assert os.path.isfile(ibs_log)
+    with open(ibs_log, encoding="utf-8") as f:
+        events = [json.loads(l)["event"] for l in f if l.strip()]
+    assert "ibs_probe_event" in events
+
+
+def test_force_reconfigure_closes_replaced_handlers(tmp_path):
+    """IN-02: force=True must close the handlers it drops (no leaked log fd)."""
+    import logging
+    from bot.safety.logger import configure_logging
+    log_dir = str(tmp_path / "logs")
+    configure_logging(log_dir=log_dir)
+    old = [h for h in logging.getLogger().handlers if hasattr(h, "baseFilename")]
+    configure_logging(log_dir=log_dir, log_name="ibs.log", force=True)
+    assert old and all(h.stream is None for h in old)
+    assert not any(h in logging.getLogger().handlers for h in old)
+
+
+def test_configure_logging_force_false_still_idempotent(tmp_path):
+    """Without force, a second call with a different log_name is a no-op."""
+    from bot.safety.logger import configure_logging
+    log_dir = str(tmp_path / "logs")
+    configure_logging(log_dir=log_dir)
+    configure_logging(log_dir=log_dir, log_name="other.log")
+    assert not os.path.exists(os.path.join(log_dir, "other.log"))
+
+
+def test_kwonly_defaults_survive_conftest_patch():
+    """conftest patches __defaults__; kw-only defaults live in __kwdefaults__."""
+    from bot.safety.logger import configure_logging
+    assert configure_logging.__kwdefaults__ == {"log_name": "bot.log", "force": False}
+    assert len(configure_logging.__defaults__) == 2
 
 
 # ============================================================
