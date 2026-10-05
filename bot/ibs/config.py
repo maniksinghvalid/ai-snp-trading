@@ -51,6 +51,8 @@ class IbsConfig:
     hard_cancel_before_close_min: int
     eod_report_after_close_min: int
     misfire_grace_s: int
+    decision_read_retries: int
+    decision_read_retry_s: float
     watchdog_poll_interval_s: float
     watchdog_reconnect_initial_s: float
     watchdog_reconnect_cap_s: float
@@ -116,6 +118,11 @@ def _check(cfg: IbsConfig) -> None:
             f"execution: worst-case order time {cfg.worst_case_order_s}s does not fit the "
             f"decision window {window_s}s less executor_margin_s "
             f"(order_ttl_seconds/poll_interval_seconds/max_reprices)")
+    retry_s = cfg.decision_read_retries * cfg.decision_read_retry_s
+    if cfg.worst_case_order_s + retry_s >= window_s - cfg.executor_margin_s:
+        raise ConfigError(
+            f"service: decision_read_retries x decision_read_retry_s ({retry_s}s) leaves no "
+            f"room for one worst-case order in the decision window {window_s}s")
     hh, mm = int(cfg.arm_time_et[:2]), int(cfg.arm_time_et[3:])
     if hh > 23 or mm > 59:
         raise ConfigError(f"service: arm_time_et {cfg.arm_time_et!r} is not a valid HH:MM")
@@ -164,6 +171,8 @@ def load_ibs_config(path: str = "rules_ibs.json") -> IbsConfig:
         hard_cancel_before_close_min=int(v["hard_cancel_before_close_min"]),
         eod_report_after_close_min=int(v["eod_report_after_close_min"]),
         misfire_grace_s=int(v["misfire_grace_s"]),
+        decision_read_retries=int(v["decision_read_retries"]),
+        decision_read_retry_s=float(v["decision_read_retry_s"]),
         watchdog_poll_interval_s=float(v["watchdog_poll_interval_s"]),
         watchdog_reconnect_initial_s=float(v["watchdog_reconnect_initial_s"]),
         watchdog_reconnect_cap_s=float(v["watchdog_reconnect_cap_s"]),

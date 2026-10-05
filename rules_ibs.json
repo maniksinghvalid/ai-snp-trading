@@ -45,6 +45,8 @@
         "hard_cancel_before_close_min": 1,
         "eod_report_after_close_min": 5,
         "misfire_grace_s": 120,
+        "decision_read_retries": 2,
+        "decision_read_retry_s": 10,
         "watchdog_poll_interval_s": 60,
         "watchdog_reconnect_initial_s": 5,
         "watchdog_reconnect_cap_s": 300,

@@ -332,7 +332,8 @@ class IbsBot:
             _logger.info("ibs_decision_skipped", reason=reason, date=today.isoformat())
             return
 
-        # D-07: the meta key is written BEFORE any broker call.
+        # D-07: the meta key is written BEFORE any broker call (cleared again if the
+        # read-only front half fails before any order, WR-01).
         self._store.set_meta(_DECISION_META_KEY, today.isoformat())
         self._decision_task = asyncio.create_task(self._decide(today, self._deadline(today)))
         try:
@@ -349,12 +350,35 @@ class IbsBot:
         finally:
             self._decision_task = None
 
+    async def _read_front(self, deadline):
+        """WR-01: reconcile + ONE batched snapshot, retried on a transient failure.
+
+        Read-only, so a retry is safe; bounded by decision_read_retries and by the
+        deadline. Returns the snapshot data; the last failure propagates.
+        """
+        cfg = self._cfg
+        for attempt in range(cfg.decision_read_retries + 1):
+            try:
+                await self.reconcile()
+                ret, data = await self._gateway.get_market_snapshot(list(cfg.universe))
+                if ret != _RET_OK:
+                    raise RuntimeError("ibs snapshot failed")
+                return data
+            except Exception:
+                if (attempt >= cfg.decision_read_retries
+                        or (deadline - now_et()).total_seconds() <= cfg.decision_read_retry_s):
+                    raise
+                _logger.warning("ibs_decision_read_retry", attempt=attempt + 1, exc_info=True)
+                await asyncio.sleep(cfg.decision_read_retry_s)
+
     async def _decide(self, today, deadline):
         """reconcile -> ONE batched snapshot -> exits -> entries (D-04: entries strictly after exits)."""
-        await self.reconcile()
-        ret, data = await self._gateway.get_market_snapshot(list(self._cfg.universe))
-        if ret != _RET_OK:
-            raise RuntimeError("ibs snapshot failed")
+        try:
+            data = await self._read_front(deadline)
+        except Exception:
+            # WR-01: no order was attempted, so the failure does not consume the day.
+            self._store.set_meta(_DECISION_META_KEY, "")
+            raise
         quotes, skipped = parse_snapshot(_rows(data), now_et(), self._cfg.max_snapshot_age_s)
         for code, why in skipped.items():
             _logger.info("ibs_snapshot_skipped", code=code, reason=why)

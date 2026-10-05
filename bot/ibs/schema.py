@@ -67,6 +67,9 @@ IBS_SCHEMA = {
             "hard_cancel_before_close_min": _int(0),
             "eod_report_after_close_min": _int(),
             "misfire_grace_s": _int(),
+            # WR-01: retries of the read-only reconcile + snapshot front half
+            "decision_read_retries": _int(0),
+            "decision_read_retry_s": _pos(),
             "watchdog_poll_interval_s": _pos(),
             "watchdog_reconnect_initial_s": _pos(),
             "watchdog_reconnect_cap_s": _pos(),
