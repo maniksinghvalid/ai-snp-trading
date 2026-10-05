@@ -527,6 +527,28 @@ def test_hard_cancel_mid_exit_flags_row_and_alerts(decide_env):
     assert any("IBS NEEDS ATTENTION" in a for a in _alerts(decide_env.bot))
 
 
+@pytest.mark.parametrize("side", ["SELL", "BUY"])
+def test_non_cancellation_base_exception_is_not_handled(decide_env, side):
+    """IN-07: only Exception / CancelledError are handled mid-order. SystemExit and
+    friends (GeneratorExit, KeyboardInterrupt) propagate with no await in a handler;
+    startup reconcile flags the row left OPENING/CLOSING."""
+    bot = decide_env.bot
+    day = MON_1550.date()
+    quotes = {"US.SPY": {"ibs": 0.9, "last": 109.0}, "US.XLU": {"ibs": 0.05, "last": 100.5}}
+    bot._executor.work.side_effect = _placed_then(SystemExit(3))
+    if side == "SELL":
+        decide_env.setup([_row()], {})
+        coro = bot._run_exits(day, bot._deadline(day), quotes)
+    else:
+        decide_env.setup([], {})
+        coro = bot._run_entries(day, bot._deadline(day), quotes, set())
+    with pytest.raises(SystemExit):
+        _run(coro)
+    bot._alerter.send.assert_not_awaited()
+    statuses = {p["status"] for p in decide_env.store.get_active_positions()}
+    assert statuses == {"CLOSING" if side == "SELL" else "OPENING"}
+
+
 def test_exit_deferred_without_quote(decide_env):
     decide_env.setup([_row("US.QQQ", "P2", entry_date="2026-09-21")], {})
     _run(decide_env.bot._job_decide())
