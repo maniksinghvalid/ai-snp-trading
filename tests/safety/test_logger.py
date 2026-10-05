@@ -26,14 +26,27 @@ import structlog
 
 @pytest.fixture(autouse=True)
 def reset_logger_state():
-    """Reset the module-level _configured flag before each test."""
+    """Reset the module-level _configured flag before each test.
+
+    Also restores the root logger's handlers (IN-05): without it, later test
+    modules keep logging into this test's tmp_path.
+    """
+    import logging
     import bot.safety.logger as logger_mod
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
     original = logger_mod._configured
     logger_mod._configured = False
     # Also clear structlog's internal cache
     structlog.reset_defaults()
     yield
     # Restore after test
+    for h in root.handlers[:]:
+        if h not in saved_handlers:
+            root.removeHandler(h)
+            h.close()
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_level)
     logger_mod._configured = original
     structlog.reset_defaults()
 
@@ -107,6 +120,18 @@ def test_configure_logging_log_name_and_force(tmp_path):
     with open(ibs_log, encoding="utf-8") as f:
         events = [json.loads(l)["event"] for l in f if l.strip()]
     assert "ibs_probe_event" in events
+
+
+def test_force_reconfigure_closes_replaced_handlers(tmp_path):
+    """IN-02: force=True must close the handlers it drops (no leaked log fd)."""
+    import logging
+    from bot.safety.logger import configure_logging
+    log_dir = str(tmp_path / "logs")
+    configure_logging(log_dir=log_dir)
+    old = [h for h in logging.getLogger().handlers if hasattr(h, "baseFilename")]
+    configure_logging(log_dir=log_dir, log_name="ibs.log", force=True)
+    assert old and all(h.stream is None for h in old)
+    assert not any(h in logging.getLogger().handlers for h in old)
 
 
 def test_configure_logging_force_false_still_idempotent(tmp_path):
