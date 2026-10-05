@@ -19,7 +19,8 @@ _LEAVES = {
                   "poll_interval_seconds", "escalation_step_usd", "max_reprices",
                   "executor_margin_s"],
     "service": ["arm_time_et", "decision_before_close_min", "hard_cancel_before_close_min",
-                "eod_report_after_close_min", "misfire_grace_s", "watchdog_poll_interval_s",
+                "eod_report_after_close_min", "misfire_grace_s", "decision_read_retries",
+                "decision_read_retry_s", "watchdog_poll_interval_s",
                 "watchdog_reconnect_initial_s", "watchdog_reconnect_cap_s", "state_db",
                 "kill_file", "report_dir", "log_file"],
 }
@@ -59,6 +60,8 @@ def test_loads_expected_values(ibs_cfg, ibs_rules):
         "data/ibs_state.db", ".bot_kill_ibs", "reports/ibs", "ibs.log")
     assert c.worst_case_order_s == 100.0
     assert c.executor_margin_s == 30.0
+    assert (c.decision_read_retries, c.decision_read_retry_s) == (2, 10.0)
+    assert isinstance(c.decision_read_retries, int)
 
 
 def test_frozen(ibs_cfg):
@@ -113,6 +116,10 @@ def test_missing_leaf_key(ibs_rules, tmp_path, block, key):
     ("execution", "executor_margin_s", 0),
     ("execution", "executor_margin_s", 540),   # >= decide -> hard-cancel window
     ("execution", "executor_margin_s", 450),   # leaves < one worst-case order
+    ("service", "decision_read_retries", -1),
+    ("service", "decision_read_retries", 1.5),
+    ("service", "decision_read_retry_s", 0),
+    ("service", "decision_read_retry_s", 300),  # retries would eat the order window
     ("service", "arm_time_et", "25:00"),
     ("service", "arm_time_et", "9:00"),
     ("service", "arm_time_et", "12:55"),

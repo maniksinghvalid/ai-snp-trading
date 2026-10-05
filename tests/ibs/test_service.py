@@ -173,14 +173,16 @@ MON_1550 = datetime(2026, 10, 5, 15, 50, tzinfo=ET)
 
 
 @pytest.fixture
-def decide_env(make_ibs_bot, ibs_store, ibs_gateway, make_positions_df,
+def decide_env(make_ibs_bot, ibs_cfg, ibs_store, ibs_gateway, make_positions_df,
                make_snapshot_row, set_now, audits):
     """Build a bot at Mon 2026-10-05 15:50 with an enabled gate and recording executor."""
     class Env:
         pass
     env = Env()
     env.store, env.gw, env.audits = ibs_store, ibs_gateway, audits
-    env.bot = make_ibs_bot()
+    import dataclasses
+    # the real 10 s retry sleep is replaced by a tiny one (WR-01 tests)
+    env.bot = make_ibs_bot(dataclasses.replace(ibs_cfg, decision_read_retry_s=0.01))
     env.bot._entries_enabled = True
     env.bot._executor.work = AsyncMock(return_value=None)
     env.set_now = set_now
@@ -275,6 +277,39 @@ def test_snapshot_failure_alerts_without_exception_text(decide_env):
     assert "snapshot failed" not in alerts[0] and "secret" not in alerts[0]
     assert [a["event"] for a in decide_env.audits] == ["ibs_decision_error"]
     assert decide_env.bot._decision_task is None
+
+
+def test_transient_read_failure_is_retried(decide_env):
+    """WR-01: one snapshot blip no longer consumes the day's exits."""
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    good = decide_env.gw.get_market_snapshot.return_value
+    decide_env.gw.get_market_snapshot.side_effect = [(-1, "blip"), good]
+    _run(decide_env.bot._job_decide())
+    assert [c.args[:2] for c in decide_env.bot._executor.work.await_args_list] == [
+        ("SELL", "US.SPY")]
+    assert not any("decision error" in a for a in _alerts(decide_env.bot))
+    assert decide_env.store.get_meta("ibs_decision_date") == "2026-10-05"
+
+
+def test_persistent_read_failure_gives_up_and_frees_the_day(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.gw.get_positions.return_value = (-1, None)
+    _run(decide_env.bot._job_decide())
+    assert decide_env.gw.get_positions.await_count == 1 + decide_env.bot._cfg.decision_read_retries
+    decide_env.bot._executor.work.assert_not_awaited()
+    assert [a for a in _alerts(decide_env.bot) if "decision error" in a]
+    # no order was attempted, so the day is not consumed
+    assert decide_env.store.get_meta("ibs_decision_date") != "2026-10-05"
+
+
+def test_read_retry_is_bounded_by_the_deadline(decide_env):
+    from datetime import timedelta
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    deadline = decide_env.bot._deadline(MON_1550.date())
+    decide_env.set_now(deadline - timedelta(milliseconds=5))
+    decide_env.gw.get_positions.return_value = (-1, None)
+    _run(decide_env.bot._job_decide())
+    assert decide_env.gw.get_positions.await_count == 1
 
 
 def test_exit_decisions(decide_env):
