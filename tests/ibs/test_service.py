@@ -482,6 +482,25 @@ def test_exit_timeout_cleanly_cancelled_is_retried(decide_env):
     assert "unfilled" in alerts[-1] and not any("NEEDS ATTENTION" in a for a in alerts)
 
 
+def test_settle_after_timeout_with_reprice_logs_error(decide_env, monkeypatch):
+    """IN-11: a deadline timeout after a re-price may leave an order the bot never
+    recorded (place_order thread in flight), so the settle is logged at error level."""
+    errors = []
+    monkeypatch.setattr("bot.ibs.service._logger.error",
+                        lambda ev, **kw: errors.append(ev))
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+
+    async def work(side, code, qty, last, deadline, on_placed=None):
+        await on_placed("O8")
+        await on_placed("O9")
+        raise asyncio.TimeoutError()
+
+    decide_env.bot._executor.work.side_effect = work
+    decide_env.gw.get_order_status = _broker_order("CANCELLED_ALL")
+    _run(decide_env.bot._job_decide())
+    assert "ibs_order_settled_after_error" in errors
+
+
 def test_exit_timeout_partial_fill_is_recorded(decide_env):
     decide_env.setup([_row()], {"US.SPY": 0.9})
     decide_env.bot._executor.work.side_effect = _placed_then(asyncio.TimeoutError())
