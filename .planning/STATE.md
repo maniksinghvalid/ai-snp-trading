@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 status: verifying
 stopped_at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
-last_updated: "2026-10-05T02:50:06.779Z"
+last_updated: "2026-10-05T02:50:12.976Z"
 last_activity: 2026-10-05 -- Phase 12 execution started
 progress:
   total_phases: 14
@@ -98,6 +98,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 12 P06 | 20min | 2 tasks | 3 files |
 | Phase 12 P07 | 15min | 2 tasks | 5 files |
 | Phase 12 P08 | 25min | 2 tasks | 3 files |
+| Phase 12 P09 | 35min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -230,6 +231,7 @@ Recent decisions affecting current work:
 - [Phase 12]: 12-06: reconcile returns broker map; _decide returns (quotes, exited) for Plan 08 reuse
 - [Phase 12]: [12-07] Probe opens IBS DB only if it exists; plist KeepAlive SuccessfulExit=false so kill-file exit is not restarted
 - [Phase 12-08]: IBS free slots from post-exit active rows; unfilled entry ABORTED (no carry-over); hard-cancel sweeps WORKING orders of any session
+- [Phase 12]: 12-09: no force-close job (D-06); jobs ibs_arm/ibs_decide/ibs_hard_cancel/ibs_eod; shutdown order cancel decision, sweep, close, alert, scheduler
 
 ### Research Flags (must resolve before planning those phases)
 
