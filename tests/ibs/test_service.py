@@ -241,7 +241,8 @@ def test_decide_writes_meta_first_and_is_idempotent(decide_env):
 
     decide_env.gw.get_positions = gp
     _run(decide_env.bot._job_decide())
-    assert seen == ["2026-10-05"]
+    # reconcile read + the post-exit entry-guard read (Plan 08), both after the meta write
+    assert seen == ["2026-10-05", "2026-10-05"]
     decide_env.gw.get_market_snapshot.assert_awaited_once_with(
         list(decide_env.bot._cfg.universe))
     _run(decide_env.bot._job_decide())
@@ -262,7 +263,7 @@ def test_reconcile_precedes_snapshot(decide_env):
 
     decide_env.gw.get_positions, decide_env.gw.get_market_snapshot = gp, snap
     _run(decide_env.bot._job_decide())
-    assert order == ["positions", "snapshot"]
+    assert order[:2] == ["positions", "snapshot"]  # entry-guard read follows (Plan 08)
 
 
 def test_snapshot_failure_alerts_without_exception_text(decide_env):

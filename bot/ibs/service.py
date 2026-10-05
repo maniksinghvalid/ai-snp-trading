@@ -20,6 +20,7 @@ Exports: IbsBot
 """
 import asyncio
 import html
+import sqlite3
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -28,7 +29,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.ibs.execution import IbsExecutor
 from bot.ibs.store import ACTIVE_STATUSES
-from bot.ibs.strategy import decide_exits, parse_snapshot, trading_days_held
+from bot.ibs.strategy import (
+    decide_entries, decide_exits, parse_snapshot, size_position, trading_days_held,
+)
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
@@ -238,7 +241,7 @@ class IbsBot:
             self._decision_task = None
 
     async def _decide(self, today, deadline):
-        """reconcile -> ONE batched snapshot -> exits. Plan 08 appends the entry batch."""
+        """reconcile -> ONE batched snapshot -> exits -> entries (D-04: entries strictly after exits)."""
         await self.reconcile()
         ret, data = await self._gateway.get_market_snapshot(list(self._cfg.universe))
         if ret != _RET_OK:
@@ -248,6 +251,11 @@ class IbsBot:
             _logger.info("ibs_snapshot_skipped", code=code, reason=why)
         _logger.info("ibs_snapshot_parsed", valid=len(quotes), skipped=len(skipped))
         exited = await self._run_exits(today, deadline, quotes)
+        if self._kill_switch.triggered or not self._entries_enabled:
+            _logger.info("ibs_entry_skipped",
+                         reason="kill_switch" if self._kill_switch.triggered else "entries_disabled")
+        else:
+            await self._run_entries(today, deadline, quotes, exited)
         return quotes, exited
 
     async def _work(self, side, row, qty, last, deadline):
@@ -338,3 +346,82 @@ class IbsBot:
                     f"<b>IBS exit</b> {_esc(code)} SELL {_esc(filled)} @ {_esc(avg)} "
                     f"({_esc(shown)}) P&amp;L ${_esc(_signed(pnl))}")
         return {code for code, _ in exits}
+
+
+    async def _run_entries(self, today, deadline, quotes, exited) -> None:
+        """D-03/D-04/D-05/D-09/D-12: enter the lowest-IBS eligible codes into free slots.
+
+        Runs after the exit batch with a FRESH broker read (260926-kvt analog): a
+        universe code the broker holds with no active row of ours is external and is
+        never entered; an unreadable broker skips ALL entries (fail closed). Orders are
+        worked sequentially (Pitfall 7).
+        """
+        try:
+            broker = await self._broker_shares()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("ibs_entries_broker_unreadable", exc_info=True)
+            await self._alerter.send(
+                f"<b>IBS entries skipped</b> {_esc(today)} — broker positions unreadable.")
+            return
+
+        active = self._store.get_active_positions()
+        active_codes = {r["code"] for r in active}
+        external = {c for c in self._cfg.universe
+                    if broker.get(c, 0) != 0 and c not in active_codes}
+        _logger.info("ibs_external_holdings", count=len(external), codes=sorted(external))
+        working = {o["code"] for o in self._store.get_orders(("WORKING",))}
+
+        # Ruling 3: a code exited this session is excluded; D-04: slots from post-exit rows.
+        excluded = active_codes | set(exited) | external | working
+        free = self._cfg.max_concurrent_positions - len(active)
+        ibs = {c: q["ibs"] for c, q in quotes.items()}
+        entries = decide_entries(ibs, excluded, free, self._cfg, self._cfg.universe)
+
+        for code in entries:
+            if self._kill_switch.triggered or not self._entries_enabled:
+                _logger.info("ibs_entry_skipped", code=code, reason="halted")
+                break
+            last = quotes[code]["last"]
+            limit = round(last + self._cfg.entry_limit_buffer_usd, 2)
+            qty = size_position(limit, self._cfg)
+            if qty < 1:
+                _logger.info("ibs_entry_skipped", code=code, reason="qty_lt_1")
+                continue
+            if (deadline - now_et()).total_seconds() < self._cfg.worst_case_order_s:
+                _logger.info("ibs_entry_skipped", code=code, reason="no_time")
+                break
+            row = {"position_id": uuid4().hex, "code": code, "qty": qty,
+                   "entry_date": today.isoformat(), "status": "OPENING",
+                   "opened_at": now_et().isoformat()}
+            try:
+                self._store.insert_position(row)  # before the BUY (D-05)
+            except sqlite3.IntegrityError:
+                _logger.info("ibs_entry_skipped", code=code, reason="already_active")
+                continue
+            pid = row["position_id"]
+            try:
+                result = await self._work("BUY", row, qty, last, deadline)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.error("ibs_entry_unknown", code=code, exc_info=True)
+                self._store.set_position_status(pid, "NEEDS_ATTENTION")
+                append_audit({"event": "ibs_entry_unknown", "position_id": pid, "code": code})
+                await self._alerter.send(
+                    f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — entry order outcome "
+                    f"unknown; check moomoo.")
+                continue
+            if result is None:  # D-09: unfilled entry is skipped today, no carry-over
+                self._store.set_position_status(
+                    pid, "ABORTED", closed_at=now_et().isoformat(), close_reason="entry_unfilled")
+                _logger.info("ibs_entry_skipped", code=code, reason="unfilled")
+                continue
+            oid, avg, filled = result
+            self._store.mark_opened(pid, int(filled), float(avg), str(oid))
+            msg = (f"<b>IBS entry</b> {_esc(code)} BUY {_esc(filled)} @ {_esc(avg)} "
+                   f"(IBS {_esc(f'{ibs[code]:.2f}')})")
+            if int(filled) < qty:
+                msg += f" — partial {_esc(filled)}/{_esc(qty)}"
+            await self._alerter.send(msg)
