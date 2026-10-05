@@ -137,3 +137,18 @@ def test_window_rejected(ibs_rules, tmp_path):
     r = _mut(ibs_rules, "execution", "order_ttl_seconds", 200)
     with pytest.raises(ConfigError, match="window"):
         _load(r, tmp_path)
+
+
+def test_shipped_rules_ibs_matches_fixture(ibs_rules):
+    shipped = json.loads((REPO_ROOT / "rules_ibs.json").read_text(encoding="utf-8"))
+    assert shipped == ibs_rules
+
+
+def test_shipped_rules_ibs_loads(ibs_rules):
+    c = load_ibs_config(str(REPO_ROOT / "rules_ibs.json"))
+    assert c.universe == tuple(ibs_rules["universe"])
+
+
+def test_default_path_is_rules_ibs_json(monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    assert load_ibs_config().strategy_name == "ibs_etf_mean_reversion"
