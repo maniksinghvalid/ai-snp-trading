@@ -82,6 +82,28 @@ def test_probe_is_read_only_and_prints_plan(ibs_cfg, tmp_path, capsys,
     assert "WOULD ENTER" in out and "US.SPY" in out and "qty 98" in out
     assert "WOULD ENTER US.XLU" not in out
     assert not os.path.exists(cfg.state_db)
+    # IN-09: a wrong cwd must be visible, not a silent pass
+    from pathlib import Path
+    assert str(Path(cfg.state_db).resolve()) in out and "DB guard not applied" in out
+
+
+def test_probe_survives_unmigrated_db_and_live_1lot_refuses(
+        ibs_cfg, tmp_path, capsys, monkeypatch, make_snapshot_row, make_positions_df):
+    """IN-09: a DB file without ibs_positions does not abort the read-only probe;
+    --live-1lot refuses because the DB guard cannot be applied to an existing file."""
+    import sqlite3
+    db = tmp_path / "ibs_state.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE other (a)")
+    con.commit()
+    con.close()
+    mod, cfg, gw, calls = _live_env(ibs_cfg, tmp_path, monkeypatch,
+                                    make_snapshot_row, make_positions_df)
+    cfg = dataclasses.replace(cfg, state_db=str(db))
+    asyncio.run(mod.probe(cfg, gw, MON_10))
+    assert "DB guard not applied" in capsys.readouterr().out
+    reason = asyncio.run(mod._refusal(cfg, gw, "US.XLU", MON_10))
+    assert reason is not None and "unreadable" in reason
 
 
 def test_probe_reads_db_read_only_without_migrations(ibs_cfg, tmp_path, capsys, monkeypatch,
@@ -217,7 +239,7 @@ def test_ibs_runbook_covers_cutover():
     text = _read("deploy", "IBS-RUNBOOK.md")
     for needle in (".bot_kill_ibs", "touch .bot_kill", ".bot_kill_options", "rules_ibs.json",
                    "launchctl", "pgrep", "--live-1lot --confirm", "NEEDS_ATTENTION",
-                   "reports/ibs/latest.html", "logs/ibs.log", "chmod 600"):
+                   "reports/ibs/latest.html", "logs/ibs.log", "chmod 600", "repo root"):
         assert needle in text, needle
 
 
