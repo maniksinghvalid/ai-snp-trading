@@ -291,7 +291,9 @@ def test_shutdown_survives_step_failures(make_ibs_bot, ibs_gateway, ibs_alerter,
     ibs_gateway.cancel_order = AsyncMock(side_effect=RuntimeError("cancel boom"))
     _working_order(ibs_store)
     _run(bot._shutdown())
-    assert calls == ["alert:<b>IBS bot stopped</b>", "scheduler_shutdown"]
+    # cancel + close failed; the stopped alert and scheduler shutdown still ran
+    assert calls[-2:] == ["alert:<b>IBS bot stopped</b>", "scheduler_shutdown"]
+    assert any("cancel FAILED" in c for c in calls)
 
 
 def test_shutdown_never_started_scheduler(make_ibs_bot, audits):

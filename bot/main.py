@@ -70,6 +70,7 @@ def main(rules_path: str = "rules.json") -> None:
     # Step 1b: Dispatch on the top-level shape (D5, T-11-03): the legacy
     # strategy_name marker OR the Phase 11 multi-strategy "strategies" array
     # (which has no top-level strategy_name key) both route to the options bot.
+    # strategy_name "ibs_etf_mean_reversion" routes to the separate IBS bot (Phase 12).
     try:
         with open(rules_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -82,6 +83,12 @@ def main(rules_path: str = "rules.json") -> None:
         # no import cycle back into bot.main is possible.
         from bot.options.service import main as _options_main
         _options_main(rules_path)
+        return
+
+    if data.get("strategy_name", "") == "ibs_etf_mean_reversion":
+        # Separate IBS process (OD-2); the equity path never imports bot.ibs.
+        from bot.ibs.service import main as _ibs_main
+        _ibs_main(rules_path)
         return
 
     # Step 2: Load strategy config — ConfigError → stderr + sys.exit(1)

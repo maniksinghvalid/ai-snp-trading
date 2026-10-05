@@ -16,13 +16,14 @@ D-06: positions are held overnight by design. There is NO force-close and no
 flattening anywhere in this bot — only rule-decided exits sell. D-08: LIMIT
 orders only, through IbsExecutor. Nothing here places an order directly.
 
-Exports: IbsBot
+Exports: IbsBot, main
 """
 import asyncio
 import html
 import math
 import os
 import sqlite3
+import sys
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -31,16 +32,22 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+from bot.config.loader import ConfigError
+from bot.gateway.gateway import MoomooGateway, get_gateway_config
+from bot.ibs.config import load_ibs_config
 from bot.ibs.execution import IbsExecutor
-from bot.ibs.store import ACTIVE_STATUSES
+from bot.ibs.store import ACTIVE_STATUSES, IbsStore
 from bot.ibs.strategy import (
     decide_entries, decide_exits, parse_snapshot, size_position, trading_days_held,
 )
 from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
-from bot.safety.logger import get_logger
+from bot.safety.kill_switch import KillSwitch
+from bot.safety.logger import configure_logging, get_logger
 from bot.scanner.calendar import get_market_close_et, is_trading_day, trading_days_between
+from bot.service.alerter import TelegramAlerter
 from bot.service.report import write_reports
+from bot.service.watchdog import OpenDWatchdog
 
 _logger = get_logger(__name__)
 
@@ -683,3 +690,129 @@ class IbsBot:
             raise
         except Exception:
             _logger.error("ibs_eod_error", exc_info=True)
+
+    # --------------------------------------------------------
+    # Shutdown + run loop (D-14, ruling 8)
+    # --------------------------------------------------------
+
+    async def _shutdown(self) -> None:
+        """Kill-switch shutdown, ruling-8 order; each step isolated from the next.
+
+        cancel in-flight decision -> sweep WORKING orders -> gateway.close() ->
+        "stopped" alert -> scheduler shutdown. Positions are left held (D-06,
+        D-14); every store write already committed synchronously.
+        """
+        _logger.info("ibs_shutdown_start")
+        try:
+            append_audit({"event": "ibs_bot_shutdown", "reason": "kill_switch"})
+        except Exception:
+            pass  # audit write must never block shutdown
+
+        # (1) Cancel the decision first so LegExecutor's shielded cancel runs while
+        # the gateway is still open.
+        task = self._decision_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        try:
+            await self._sweep_orders("shutdown")  # (2)
+        except Exception:
+            _logger.error("ibs_shutdown_sweep_error", exc_info=True)
+        try:
+            result = self._gateway.close()  # (3)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            _logger.warning("ibs_gateway_close_error", exc_info=True)
+        try:
+            await self._alerter.send("<b>IBS bot stopped</b>")  # (4)
+        except Exception:
+            pass
+        try:
+            self._scheduler.shutdown(wait=False)  # (5) never-started scheduler raises
+        except Exception:
+            pass
+        _logger.info("ibs_shutdown_complete")
+
+    async def run(self) -> None:
+        """Run the IBS lifecycle until the kill switch trips."""
+        try:
+            await self._readiness_gate()
+            if not self._alerter._enabled:
+                _logger.warning(
+                    "alerter_disabled_at_startup",
+                    reason="TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured")
+            self._register_jobs()
+            self._scheduler.start()
+            self.arm_today()  # after start (ruling 8): pending jobs are not deduplicated
+            _logger.info("ibs_bot_started")
+
+            if self._watchdog is not None:
+                self._watchdog_task = asyncio.create_task(self._watchdog.run())
+
+            while not self._kill_switch.triggered:
+                if self._kill_switch.check_file():
+                    self._kill_switch.trigger("sentinel_file")
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("ibs_bot_run_error", exc_info=True)
+            raise
+        finally:
+            if self._watchdog_task is not None:
+                self._watchdog_task.cancel()
+                try:
+                    await self._watchdog_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await self._shutdown()
+
+
+# ============================================================
+# Process entry point
+# ============================================================
+
+def main(rules_path: str) -> None:
+    """Compose the IBS bot and run it under asyncio.run.
+
+    Construction order:
+      1. load_ibs_config(rules_path) — ConfigError -> stderr + sys.exit(1)
+      2. configure_logging(log_name=cfg.log_file, force=True) — bot.main already
+         configured bot.log before the dispatch peek (D-13)
+      3. MoomooGateway(get_gateway_config())
+      4. IbsStore(cfg.state_db).open() — its OWN db file
+      5. TelegramAlerter from env (never log the token)
+      6. KillSwitch on cfg.kill_file — the IBS bot's OWN sentinel
+      7. IbsBot, then OpenDWatchdog (needs the bot ref) injected after
+      8. asyncio.run(bot.run())
+    """
+    try:
+        cfg = load_ibs_config(rules_path)
+    except ConfigError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    configure_logging(log_name=cfg.log_file, force=True)
+    _log = get_logger(__name__)
+
+    gateway = MoomooGateway(get_gateway_config())
+
+    os.makedirs(os.path.dirname(cfg.state_db) or ".", exist_ok=True)
+    store = IbsStore(cfg.state_db).open()
+
+    alerter = TelegramAlerter(
+        token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
+        logger=_log,
+    )
+    kill_switch = KillSwitch(sentinel_path=cfg.kill_file)
+
+    bot = IbsBot(cfg=cfg, gateway=gateway, store=store, kill_switch=kill_switch,
+                 alerter=alerter, watchdog=None)
+    bot._watchdog = OpenDWatchdog(gateway=gateway, bot=bot, alerter=alerter, cfg=cfg)
+
+    asyncio.run(bot.run())
