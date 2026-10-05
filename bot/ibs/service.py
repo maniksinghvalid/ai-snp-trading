@@ -478,10 +478,12 @@ class IbsBot:
             _logger.error("ibs_order_status_unreadable", order_id=order_id, exc_info=True)
             return None
         for r in rows or []:
-            if (str(r.get("order_id")) == str(order_id)
-                    and str(r.get("order_status")) in _TERMINAL_ORDER_STATUSES):
-                return (order_id, float(r.get("dealt_avg_price") or 0.0),
-                        int(float(r.get("dealt_qty") or 0)))
+            status = str(r.get("order_status"))
+            if str(r.get("order_id")) == str(order_id) and status in _TERMINAL_ORDER_STATUSES:
+                dealt = int(float(r.get("dealt_qty") or 0))
+                if dealt == 0 and status == "FILLED_ALL":
+                    dealt = int(float(r.get("qty") or 0))  # IN-10: dealt_qty can lag
+                return (order_id, float(r.get("dealt_avg_price") or 0.0), dealt)
         return None
 
     async def _flag_unknown(self, pid, code, what) -> None:
