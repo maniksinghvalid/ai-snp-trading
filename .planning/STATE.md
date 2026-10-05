@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
-last_updated: "2026-10-05T02:18:22.232Z"
+last_updated: "2026-10-05T02:18:25.529Z"
 last_activity: 2026-10-05 -- Phase 12 execution started
 progress:
   total_phases: 14
@@ -93,6 +93,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11-multi-strategy-options-bot-bull-call-spread P09 | 15min | 3 tasks | 4 files |
 | Phase 12 P01 | 25min | 2 tasks | 18 files |
 | Phase 12 P02 | 15min | 2 tasks | 7 files |
+| Phase 12 P03 | 12min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -220,6 +221,7 @@ Recent decisions affecting current work:
 - [Phase 11-09]: Phase 11 gap-closure loop CLOSED per operator scope (2026-09-25): CR-03 + WR-10 + WR-11 + IN-08 were the last four findings from 11-REVIEW.md @06b6787; residual T-11-56 (shutdown-order cancel failure) and T-11-57 (late-restart inside the last manage interval) accepted, not fixed
 - [Phase 12]: Phase 12-01: HERE/ROOT defined below prelude data marker so exec()'d prelude works without __file__
 - [Phase 12]: Phase 12-02: rules_ibs.json sole source of IBS strategy numbers; loader fails closed (unlevered, D-13 path collision, deadline window)
+- [Phase 12-03]: ibs_* table names keep equity startup_reconcile blind to IBS DB; active-code partial unique index enforces D-05
 
 ### Research Flags (must resolve before planning those phases)
 
