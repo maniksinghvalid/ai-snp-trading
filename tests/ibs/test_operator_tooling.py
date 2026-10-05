@@ -106,3 +106,47 @@ def test_live_1lot_buys_then_sells_one_share(ibs_cfg, monkeypatch, capsys, make_
     asyncio.run(mod.live_1lot(ibs_cfg, gw, "US.XLU", now))
     assert calls == [("BUY", "US.XLU", 1), ("SELL", "US.XLU", 1)]
     assert "round-trip friction" in capsys.readouterr().out
+
+
+# ============================================================
+# Deploy artefacts
+# ============================================================
+
+def _read(*parts):
+    with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_ibs_plist_template():
+    path = os.path.join(ROOT, "deploy", "com.bot.ibs.plist")
+    with open(path, "rb") as f:
+        pl = plistlib.load(f)
+    assert pl["Label"] == "com.bot.ibs"
+    assert pl["ProgramArguments"][1:] == ["-m", "bot", "--rules", "rules_ibs.json"]
+    assert pl["KeepAlive"] == {"SuccessfulExit": False}
+    assert pl["RunAtLoad"] is True
+    assert pl["ThrottleInterval"] == 30
+    env = pl["EnvironmentVariables"]
+    assert env["PAPER_TRADING"] == "true"
+    assert env["FUTU_TRD_ENV"] == "SIMULATE"
+    assert env["FUTU_ACC_ID"] == "1727266"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["TELEGRAM_BOT_TOKEN"] == "YOUR_TOKEN_HERE"
+    assert pl["StandardOutPath"].endswith("logs/ibs.stdout.log")
+    assert pl["StandardErrorPath"].endswith("logs/ibs.stderr.log")
+    assert "<string>REAL</string>" not in _read("deploy", "com.bot.ibs.plist")
+
+
+def test_ibs_runbook_covers_cutover():
+    text = _read("deploy", "IBS-RUNBOOK.md")
+    for needle in (".bot_kill_ibs", "touch .bot_kill", ".bot_kill_options", "rules_ibs.json",
+                   "launchctl", "pgrep", "--live-1lot --confirm", "NEEDS_ATTENTION",
+                   "reports/ibs/latest.html", "logs/ibs.log", "chmod 600"):
+        assert needle in text, needle
+
+
+def test_claude_md_has_phase12_section():
+    text = _read("CLAUDE.md")
+    head = "## Phase 12 — IBS bot (ibs_etf_mean_reversion)"
+    assert text.count(head) == 1
+    assert text.index("## Phase 8 — Options bot") < text.index(head) < text.index("<!-- GSD:stack-start")
