@@ -399,6 +399,38 @@ def test_run_order_and_clean_stop(make_ibs_bot, ibs_gateway, ibs_alerter, ibs_st
     assert ibs_gateway.place_order.await_count == 0  # positions left held, nothing sold
 
 
+def test_sigterm_triggers_graceful_shutdown(make_ibs_bot, ibs_gateway, set_now, audits):
+    """WR-05: launchctl unload sends SIGTERM; it must run the kill-file shutdown path."""
+    import os
+    import signal
+    bot = make_ibs_bot()
+    calls = []
+
+    class _Kill(_FakeKill):
+        def check_file(self):
+            self._polls += 1
+            return self._polls > 3  # safety net: a missing handler cannot hang the test
+
+    bot._kill_switch = _Kill(calls)
+    set_now(_at(2026, 10, 4))
+    ibs_gateway.close = MagicMock(side_effect=lambda: calls.append("close"))
+
+    class _Dog:
+        async def run(self):
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(3600)
+
+    bot._watchdog = _Dog()
+    # stand-in handler so a regression is recorded instead of killing pytest
+    prev = signal.signal(signal.SIGTERM, lambda *a: calls.append("unhandled_sigterm"))
+    try:
+        _run(bot.run())
+    finally:
+        signal.signal(signal.SIGTERM, prev)
+    assert "trigger:SIGTERM" in calls and "unhandled_sigterm" not in calls
+    assert calls[-1] == "close"
+
+
 def test_run_connect_failure_never_starts_scheduler(make_ibs_bot, ibs_gateway, audits):
     bot = make_ibs_bot()
     ibs_gateway.connect = MagicMock(side_effect=RuntimeError("paper guard"))
