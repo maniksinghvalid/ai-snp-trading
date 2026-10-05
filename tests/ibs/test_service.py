@@ -322,15 +322,45 @@ def test_exit_unfilled(decide_env):
     assert "unfilled" in _alerts(decide_env.bot)[-1]
 
 
-def test_exit_exception_needs_attention(decide_env):
+def test_exit_exception_after_order_placed_needs_attention(decide_env):
+    """CR-01: only an exception AFTER an order reached the broker is "state unknown"."""
     decide_env.setup([_row()], {"US.SPY": 0.9})
-    decide_env.bot._executor.work.side_effect = RuntimeError("boom broker text")
+
+    async def placed_then_boom(side, code, qty, last, deadline, on_placed=None):
+        await on_placed("O9")
+        raise RuntimeError("boom broker text")
+
+    decide_env.bot._executor.work.side_effect = placed_then_boom
     _run(decide_env.bot._job_decide())
     pos = decide_env.store.get_active_positions()[0]
     assert pos["status"] == "NEEDS_ATTENTION"
     alert = _alerts(decide_env.bot)[-1]
     assert "IBS NEEDS ATTENTION" in alert and "boom" not in alert
     assert "ibs_exit_unknown" in [a["event"] for a in decide_env.audits]
+
+
+def test_exit_place_failure_stays_open_and_retries(decide_env):
+    """CR-01: place_order raising (rate limit, buying power) exposes nothing ->
+    back to OPEN with exit_pending kept, one alert, retried next session."""
+    from bot.ibs.execution import IbsExecutor
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor = IbsExecutor(decide_env.gw, decide_env.bot._cfg)
+    decide_env.gw.place_order.side_effect = RuntimeError("rate limited secret")
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_active_positions()[0]
+    assert (pos["status"], pos["exit_pending"]) == ("OPEN", 1)
+    assert decide_env.store.get_orders(("WORKING", "DONE", "CANCELLED")) == []
+    alerts = _alerts(decide_env.bot)
+    assert len(alerts) == 1 and "retried next session" in alerts[0]
+    assert "NEEDS ATTENTION" not in alerts[0] and "secret" not in alerts[0]
+    assert "ibs_exit_not_placed" in [a["event"] for a in decide_env.audits]
+    # retried next session: the OPEN row is selected and sold again
+    decide_env.gw.place_order.side_effect = None
+    decide_env.store.set_meta("ibs_decision_date", "")
+    decide_env.bot._executor.work = AsyncMock(return_value=None)
+    _run(decide_env.bot._job_decide())
+    assert [c.args[:2] for c in decide_env.bot._executor.work.await_args_list] == [
+        ("SELL", "US.SPY")]
 
 
 def test_exit_deferred_without_quote(decide_env):

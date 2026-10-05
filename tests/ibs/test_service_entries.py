@@ -41,6 +41,13 @@ def _row(code="US.SPY", pid="P1", qty=12, status="OPEN", entry_date="2026-10-01"
     return row
 
 
+class _AfterPlace:
+    """executor result: record an order via on_placed, THEN raise `exc` (state unknown)."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+
 @pytest.fixture
 def env(make_ibs_bot, ibs_cfg, ibs_store, ibs_gateway, ibs_kill_switch,
         make_positions_df, make_snapshot_row, set_now, audits):
@@ -62,6 +69,9 @@ def env(make_ibs_bot, ibs_cfg, ibs_store, ibs_gateway, ibs_kill_switch,
         if hook:
             hook()
         res = e.results.get((side, code), (f"{side[0]}-{code}", last, qty))
+        if isinstance(res, _AfterPlace):
+            await on_placed(f"{side[0]}-{code}")
+            raise res.exc
         if isinstance(res, Exception):
             raise res
         return res
@@ -210,9 +220,22 @@ def test_unfilled_entry_aborted_silently(env):
     assert _alerts(env.bot) == []
 
 
+def test_entry_place_failure_aborts_and_continues(env):
+    """CR-01: a BUY that never reached the broker is ABORTED, not NEEDS_ATTENTION."""
+    env.setup(snap={"US.XLU": 0.05, "US.XLP": 0.10})
+    env.results[("BUY", "US.XLU")] = RuntimeError("buying power secret")
+    env.decide()
+    rows = {r["code"]: r["status"] for r in env.store.get_active_positions()}
+    assert rows == {"US.XLP": "OPEN"}
+    ab = env.store.get_positions(("ABORTED",))
+    assert [(r["code"], r["close_reason"]) for r in ab] == [("US.XLU", "entry_place_failed")]
+    assert not any("NEEDS ATTENTION" in a or "secret" in a for a in _alerts(env.bot))
+    assert any(a["event"] == "ibs_entry_not_placed" for a in env.audits)
+
+
 def test_entry_exception_needs_attention_and_continues(env):
     env.setup(snap={"US.XLU": 0.05, "US.XLP": 0.10})
-    env.results[("BUY", "US.XLU")] = RuntimeError("boom broker text")
+    env.results[("BUY", "US.XLU")] = _AfterPlace(RuntimeError("boom broker text"))
     env.decide()
     rows = {r["code"]: r["status"] for r in env.store.get_active_positions()}
     assert rows == {"US.XLU": "NEEDS_ATTENTION", "US.XLP": "OPEN"}
