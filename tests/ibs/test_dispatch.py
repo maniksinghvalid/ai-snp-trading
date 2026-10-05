@@ -13,6 +13,8 @@ import bot.ibs.service
 import bot.main
 import bot.options.service
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _write_rules(tmp_path, payload) -> str:
     path = tmp_path / "rules_under_test.json"
@@ -67,7 +69,7 @@ def test_options_route_unchanged(tmp_path, monkeypatch):
 
 
 def test_equity_route_never_imports_ibs_main(tmp_path, monkeypatch):
-    rules = _write_rules(tmp_path, json.loads(Path("rules.json").read_text(encoding="utf-8")))
+    rules = _write_rules(tmp_path, json.loads((REPO_ROOT / "rules.json").read_text(encoding="utf-8")))
     _patch_equity_seams(monkeypatch)
     seen = []
     monkeypatch.setattr(bot.ibs.service, "main", lambda path: seen.append("IBS"))
