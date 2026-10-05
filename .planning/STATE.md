@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
-last_updated: "2026-10-05T02:37:39.035Z"
+last_updated: "2026-10-05T02:37:42.580Z"
 last_activity: 2026-10-05 -- Phase 12 execution started
 progress:
   total_phases: 14
@@ -96,6 +96,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 12 P03 | 12min | 2 tasks | 8 files |
 | Phase 12 P04 | 15min | 2 tasks | 3 files |
 | Phase 12 P06 | 20min | 2 tasks | 3 files |
+| Phase 12 P07 | 15min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -226,6 +227,7 @@ Recent decisions affecting current work:
 - [Phase 12-03]: ibs_* table names keep equity startup_reconcile blind to IBS DB; active-code partial unique index enforces D-05
 - [Phase 12-04]: Parity scenarios use exact-binary prices/IBS so ties are exact; ruling 3 (no same-day re-entry) pinned by a dedicated test
 - [Phase 12]: 12-06: reconcile returns broker map; _decide returns (quotes, exited) for Plan 08 reuse
+- [Phase 12]: [12-07] Probe opens IBS DB only if it exists; plist KeepAlive SuccessfulExit=false so kill-file exit is not restarted
 
 ### Research Flags (must resolve before planning those phases)
 
