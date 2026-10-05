@@ -403,6 +403,15 @@ class IbsBot:
             _logger.warning("ibs_order_settled_after_error", code=row["code"], side=side,
                             order_id=placed[-1], filled_qty=outcome[2], exc_info=True)
             result = outcome if outcome[2] > 0 else None
+        if result is not None and not (math.isfinite(float(result[1])) and float(result[1]) > 0):
+            # WR-04: _poll reports 0.0 when dealt_avg_price is missing; book the
+            # first-attempt limit instead so P&L is never computed from 0.
+            buf = (self._cfg.entry_limit_buffer_usd if side == "BUY"
+                   else -self._cfg.exit_limit_buffer_usd)
+            limit = round(float(last) + buf, 2)
+            _logger.warning("ibs_fill_price_missing", code=row["code"], side=side,
+                            order_id=result[0], reported=result[1], used=limit)
+            result = (result[0], limit, result[2])
         ids = self._store.close_working_orders(
             row["position_id"], "DONE" if result else "CANCELLED")
         append_audit({"event": "ibs_order_done", "position_id": row["position_id"],
