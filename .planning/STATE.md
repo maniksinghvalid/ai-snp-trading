@@ -96,6 +96,7 @@ Progress: [██████████] 9/9 phases (100%)
 
 ### Roadmap Evolution
 
+- Phase 12 added (2026-10-04): IBS ETF mean-reversion bot (`ibs_etf_mean_reversion`) — successor to Trend Join Long (validated no-edge 2026-08-13; screen study 2026-10-03). Operator decisions: unlevered IBS-17, separate bot process, near-close fills, Trend Join Long stopped at cutover. Context in `.planning/phases/12-*/12-CONTEXT.md`.
 - Phase 06.2 inserted after Phase 6 (2026-07-02): Code review remediation — fix 16 confirmed findings from 2026-07-02 review (3 tiers: blockers, correctness, hygiene) (URGENT)
 - Phase 07.1 inserted after Phase 07 (2026-07-06): Close gap: RISK-TICK-STOP — wire gateway into PositionManager (found by /gsd-audit-milestone v1.0: bot/main.py never passes gateway= to PositionManager, so arm_stop_protection() no-ops in production) (URGENT)
 - Phase 9 added (2026-08-17): Options backtester — replay bot/options/strategy.py pure functions over Massive option daily aggregates (contracts reference + O:… daily bars, Black-Scholes IV/delta, own ATM-IV series for IVR); pre-registered hypotheses (IVR 20 vs 30, 16Δ vs 20Δ, IC vs PCS) before any rules_options.json change
