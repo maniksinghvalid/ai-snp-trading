@@ -43,7 +43,7 @@ If everything else is stripped away, a correct and safe automated trade loop is 
 - Config: `rules_ibs.json` (single source of truth; schema in `bot/ibs/schema.py`). Code: `bot/ibs/{strategy,store,execution,service}.py`.
 - Live UAT probe: `python3 scripts/uat_ibs_probe.py` (read-only; run during RTH) and `--live-1lot --confirm` (operator-run, buys then sells one paper share).
 - Research provenance: `docs/research/2026-10-04-ibs-etf-strategy-search.md`; search code `backtester/experimental/ibs_search/`.
-- Invariants: LIMIT orders only; decision at close - 10 min, hard cancel at close - 1 min; overnight holds, no force-close; only rows in its own `ibs_positions` are ever traded; own DB `data/ibs_state.db`, kill file `.bot_kill_ibs`, reports `reports/ibs/`, log `logs/ibs.log`.
+- Invariants: LIMIT orders only; decision at close - 10 min, executor gives up `execution.executor_margin_s` before the hard cancel at close - 1 min (also on SIGTERM / `launchctl unload`); overnight holds, no force-close; only rows in its own `ibs_positions` are ever traded; own DB `data/ibs_state.db`, kill file `.bot_kill_ibs`, reports `reports/ibs/`, log `logs/ibs.log`.
 
 <!-- GSD:stack-start source:codebase/STACK.md -->
 

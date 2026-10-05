@@ -12,7 +12,8 @@ exit buffer), and the quote is passed as bid = ask = last so mid = last: the fir
 price is exactly BUY = last + entry_limit_buffer_usd / SELL = last - exit_limit_buffer_usd,
 then escalated by escalation_step_usd up to max_reprices times.
 
-D-09: work() is bounded by asyncio.wait_for to the hard-cancel deadline. On timeout
+D-09: work() is bounded by asyncio.wait_for to the deadline the service passes
+(hard-cancel time - execution.executor_margin_s, CR-02). On timeout
 fill_leg's shielded cancel removes the resting order and TimeoutError propagates.
 
 Return contract (inherited from fill_leg): (order_id, avg_price, filled_qty) on a full
