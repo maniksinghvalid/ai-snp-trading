@@ -1,0 +1,12 @@
+IBS-17 1x  10 slots (10%)  close             OOS CAGR  16.5% Sharpe 1.30 maxDD  -11.2% | IS CAGR   9.1% Sharpe 0.90 maxDD  -15.3%
+IBS-17 1x  7 slots (14%)  close              OOS CAGR  15.3% Sharpe 1.18 maxDD  -10.5% | IS CAGR   9.6% Sharpe 0.91 maxDD  -15.4%
+IBS-17 1x  5 slots (20%)  close              OOS CAGR  15.8% Sharpe 1.14 maxDD  -11.8% | IS CAGR  10.3% Sharpe 0.94 maxDD  -16.9%
+IBS-17 mixed (4 index ETFs as 2x) 10 slots close     OOS CAGR  20.0% Sharpe 1.22 maxDD  -17.3% | IS CAGR  10.0% Sharpe 0.80 maxDD  -20.4%
+IBS-17 mixed (4 index ETFs as 2x) 7 slots  close     OOS CAGR  19.0% Sharpe 1.15 maxDD  -16.6% | IS CAGR  10.8% Sharpe 0.83 maxDD  -17.7%
+
+IBS-17 1x  10 slots (10%)  next_open         OOS CAGR  12.8% Sharpe 1.09 maxDD  -21.7% | IS CAGR   6.3% Sharpe 0.67 maxDD  -16.1%
+IBS-17 1x  7 slots (14%)  next_open          OOS CAGR  12.2% Sharpe 1.02 maxDD  -21.1% | IS CAGR   5.9% Sharpe 0.62 maxDD  -17.1%
+IBS-17 1x  5 slots (20%)  next_open          OOS CAGR  13.7% Sharpe 1.08 maxDD  -21.3% | IS CAGR   6.4% Sharpe 0.65 maxDD  -16.1%
+IBS-17 mixed (4 index ETFs as 2x) 10 slots next_open OOS CAGR  14.5% Sharpe 0.95 maxDD  -28.1% | IS CAGR   7.0% Sharpe 0.60 maxDD  -20.1%
+IBS-17 mixed (4 index ETFs as 2x) 7 slots  next_open OOS CAGR  14.3% Sharpe 0.96 maxDD  -25.5% | IS CAGR   6.7% Sharpe 0.57 maxDD  -18.4%
+

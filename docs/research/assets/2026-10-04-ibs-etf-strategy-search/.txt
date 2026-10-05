@@ -1,0 +1,1 @@
+/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python: can't open file '/Users/acdc/Documents/AI/ai-snp-trading-claude/.claude/worktrees/intelligent-knuth-f27d36/backtester/experimental/ibs_search/r5_robust r5_robust.py': [Errno 2] No such file or directory

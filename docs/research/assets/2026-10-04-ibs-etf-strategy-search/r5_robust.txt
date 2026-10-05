@@ -1,0 +1,22 @@
+--- OOS 2019-26 ---
+R5 IBS-2x cost 0.04%/side close                CAGR  31.7%  Sharpe 1.22  maxDD  -27.6%  PF 1.89  trades 935
+R5 IBS-2x cost 0.04%/side next_open            CAGR  21.7%  Sharpe 0.92  maxDD  -36.9%  PF 1.60  trades 918
+R5 IBS-2x cost 0.10%/side close                CAGR  27.1%  Sharpe 1.08  maxDD  -29.3%  PF 1.75  trades 935
+R5 IBS-2x cost 0.10%/side next_open            CAGR  17.5%  Sharpe 0.77  maxDD  -37.2%  PF 1.49  trades 918
+R5 IBS-2x cost 0.20%/side close                CAGR  19.6%  Sharpe 0.84  maxDD  -35.2%  PF 1.54  trades 935
+R5 IBS-2x cost 0.20%/side next_open            CAGR  10.7%  Sharpe 0.54  maxDD  -39.5%  PF 1.31  trades 918
+
+IBS-1x same 4 ETFs (unlevered) close           CAGR  16.7%  Sharpe 1.29  maxDD  -13.6%  PF 1.99  trades 935
+IBS-1x same 4 ETFs (unlevered) next_open       CAGR  12.3%  Sharpe 1.00  maxDD  -18.9%  PF 1.70  trades 918
+
+--- per instrument, 1 slot, close fill, OOS ---
+  SSO (signal SPY)                             CAGR  32.0%  Sharpe 1.20  maxDD  -24.5%  PF 2.12  trades 229
+  QLD (signal QQQ)                             CAGR  48.9%  Sharpe 1.40  maxDD  -23.2%  PF 2.31  trades 236
+  UWM (signal IWM)                             CAGR  20.6%  Sharpe 0.75  maxDD  -50.9%  PF 1.49  trades 237
+  DDM (signal DIA)                             CAGR  23.3%  Sharpe 0.94  maxDD  -22.7%  PF 1.82  trades 233
+
+R5 yearly OOS (close): {2019: 16.0, 2020: 162.6, 2021: 23.7, 2022: 45.8, 2023: 21.2, 2024: -7.9, 2025: 25.3, 2026: 10.2}
+R5 yearly OOS (next_open): {2019: 21.6, 2020: 78.2, 2021: 37.9, 2022: 27.5, 2023: 8.8, 2024: -13.0, 2025: 25.9, 2026: 1.1}
+R5 mean invested fraction OOS: 0.39; days with any position: 0.60; mean hold 4.6 cal days
+R5 worst 5 trades OOS: [-0.176, -0.171, -0.154, -0.154, -0.151]
+R5 worst OOS drawdown window: (datetime.date(2025, 4, 8), datetime.date(2024, 7, 16))

@@ -1,0 +1,47 @@
+SPY buy&hold OOS: {'CAGR%': np.float64(17.32), 'Sharpe': np.float64(0.93), 'maxDD%': np.float64(-33.72), 'pos_years': '7/8'}
+cost/side 0.02% close   : CAGR 16.5% Sharpe 1.30 maxDD -11.2% PF 1.63
+cost/side 0.02% next_open: CAGR 12.6% Sharpe 1.07 maxDD -21.7% PF 1.47
+cost/side 0.04% close   : CAGR 14.6% Sharpe 1.17 maxDD -12.0% PF 1.55
+cost/side 0.04% next_open: CAGR 11.0% Sharpe 0.95 maxDD -21.9% PF 1.41
+cost/side 0.08% close   : CAGR 10.9% Sharpe 0.90 maxDD -13.9% PF 1.40
+cost/side 0.08% next_open: CAGR 7.7% Sharpe 0.69 maxDD -22.2% PF 1.28
+
+OOS yearly (next_open): {Timestamp('2019-12-31 00:00:00'): 0.171, Timestamp('2020-12-31 00:00:00'): 0.383, Timestamp('2021-12-31 00:00:00'): 0.228, Timestamp('2022-12-31 00:00:00'): 0.032, Timestamp('2023-12-31 00:00:00'): 0.022, Timestamp('2024-12-31 00:00:00'): -0.021, Timestamp('2025-12-31 00:00:00'): 0.172, Timestamp('2026-12-31 00:00:00'): 0.043}
+
+leave-one-out (next_open, OOS):
+  without SPY : CAGR  12.6% Sharpe 1.08 PF 1.49
+  without QQQ : CAGR  12.3% Sharpe 1.07 PF 1.47
+  without IWM : CAGR  11.8% Sharpe 1.04 PF 1.48
+  without DIA : CAGR  12.5% Sharpe 1.08 PF 1.49
+  without XLK : CAGR  12.2% Sharpe 1.08 PF 1.48
+  without XLF : CAGR  12.3% Sharpe 1.07 PF 1.48
+  without XLE : CAGR  12.2% Sharpe 1.07 PF 1.52
+  without XLV : CAGR  12.8% Sharpe 1.08 PF 1.49
+  without XLI : CAGR  12.2% Sharpe 1.06 PF 1.47
+  without XLY : CAGR  12.1% Sharpe 1.06 PF 1.47
+  without XLP : CAGR  12.9% Sharpe 1.08 PF 1.50
+  without XLU : CAGR  12.8% Sharpe 1.08 PF 1.50
+  without XLB : CAGR  12.1% Sharpe 1.05 PF 1.48
+  without TLT : CAGR  12.3% Sharpe 1.01 PF 1.48
+  without GLD : CAGR  11.7% Sharpe 0.98 PF 1.46
+  without EFA : CAGR  12.5% Sharpe 1.07 PF 1.49
+  without EEM : CAGR  12.5% Sharpe 1.07 PF 1.51
+
+per-ETF standalone (single slot, next_open, OOS PF / trades):
+  SPY  PF 1.61 trades 225 CAGR 8.8%
+  QQQ  PF 1.86 trades 232 CAGR 16.0%
+  IWM  PF 1.55 trades 233 CAGR 12.0%
+  DIA  PF 1.81 trades 228 CAGR 11.6%
+  XLK  PF 1.85 trades 247 CAGR 17.4%
+  XLF  PF 1.83 trades 232 CAGR 15.4%
+  XLE  PF 1.23 trades 220 CAGR 5.7%
+  XLV  PF 1.52 trades 213 CAGR 7.6%
+  XLI  PF 1.81 trades 236 CAGR 14.6%
+  XLY  PF 1.74 trades 247 CAGR 15.7%
+  XLP  PF 1.47 trades 219 CAGR 5.9%
+  XLU  PF 1.17 trades 219 CAGR 2.8%
+  XLB  PF 1.72 trades 230 CAGR 13.7%
+  TLT  PF 1.15 trades 224 CAGR 1.8%
+  GLD  PF 1.57 trades 192 CAGR 8.6%
+  EFA  PF 1.28 trades 249 CAGR 4.7%
+  EEM  PF 1.26 trades 239 CAGR 4.9%
