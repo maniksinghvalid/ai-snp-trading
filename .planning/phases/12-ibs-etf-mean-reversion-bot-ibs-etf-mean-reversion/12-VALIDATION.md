@@ -60,7 +60,7 @@ created: 2026-10-04
 | 12-09-02 | 09 | 5 | IBS-02, IBS-08 | T-12-07f, T-12-08b, T-12-01b, T-12-06d, T-12-15 | shutdown order (cancel decision → sweep → close → alert → scheduler); main wiring (`ibs.log`, own DB/kill file, watchdog); dispatch routes IBS, equity/options unchanged | unit | `python3 -m pytest tests/ibs/test_lifecycle.py tests/ibs/test_dispatch.py tests/options/test_dispatch.py -x -q` | ✅ | ✅ green |
 | 12-09-03 | 09 | 5 | IBS-01, IBS-05 | T-12-15, T-12-18 | static: no `OrderType.MARKET`/`force_close`/`unlock_trade`/`manage_exit`/`yfinance`/`.subscribe(` and no strategy literal in `bot/ibs/`; full suite + options suite green | static + full | `python3 -m pytest tests/ibs/test_hygiene.py -x -q && python3 -m pytest -q` | ✅ | ✅ green |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+*Status: pending (open box) · ✅ green · ❌ red · ⚠️ flaky*
 
 ---
 
@@ -92,6 +92,6 @@ created: 2026-10-04
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
 - [x] Feedback latency < 60s
-- [x] `nyquist_compliant: true` set in frontmatter
+- [x] nyquist_compliant flag set in frontmatter
 
 **Approval:** automated gate green 2026-10-04 (1665 passed, 1 skipped); manual-only items (RTH probe, --live-1lot, launchd kill-file stop, cutover) pending operator
