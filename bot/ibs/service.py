@@ -319,8 +319,6 @@ class IbsBot:
         reason = None
         if not is_trading_day(today):
             reason = "not_trading_day"
-        elif not self._entries_enabled:
-            reason = "entries_disabled"
         elif self._kill_switch.triggered:
             reason = "kill_switch"
         elif self._store.get_meta(_DECISION_META_KEY) == today.isoformat():
@@ -328,8 +326,23 @@ class IbsBot:
         elif now >= self._deadline(today):
             # Ruling 8: defence in depth for a misfired job inside the grace window.
             reason = "past_deadline"
+        elif not self._entries_enabled:
+            # WR-02: the watchdog can lag a reconnect by minutes. If OpenD is back,
+            # run the exits anyway; _decide keeps entries blocked.
+            state = await self._gateway.get_global_state()
+            if state.get("connected"):
+                _logger.warning("ibs_decision_exits_only", date=today.isoformat())
+                await self._alerter.send(
+                    f"<b>IBS entries blocked</b> {_esc(today)} — OpenD reconnect pending; "
+                    f"exits only today.")
+            else:
+                reason = "entries_disabled"
         if reason is not None:
             _logger.info("ibs_decision_skipped", reason=reason, date=today.isoformat())
+            if reason not in ("not_trading_day", "already_decided"):
+                await self._alerter.send(
+                    f"<b>IBS decision skipped</b> {_esc(today)} — {_esc(reason)}; "
+                    f"no exits or entries today.")
             return
 
         # D-07: the meta key is written BEFORE any broker call (cleared again if the
@@ -747,10 +760,20 @@ class IbsBot:
                      jobs={j: t.isoformat() for j, t in armed})
         return armed
 
+    async def _arm_and_alert(self) -> None:
+        """arm_today, then alert when today's decide slot had already passed (WR-02)."""
+        armed = self.arm_today()
+        today = now_et().date()
+        if (is_trading_day(today) and "ibs_decide" not in {j for j, _ in armed}
+                and self._store.get_meta(_DECISION_META_KEY) != today.isoformat()):
+            await self._alerter.send(
+                f"<b>IBS decision missed</b> {_esc(today)} — started after the decision "
+                f"time; no exits or entries today.")
+
     async def _job_arm(self) -> None:
         """Daily cron body (async so APScheduler runs it on the loop)."""
         try:
-            self.arm_today()
+            await self._arm_and_alert()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -864,7 +887,7 @@ class IbsBot:
                     reason="TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured")
             self._register_jobs()
             self._scheduler.start()
-            self.arm_today()  # after start (ruling 8): pending jobs are not deduplicated
+            await self._arm_and_alert()  # after start (ruling 8): pending jobs are not deduplicated
             _logger.info("ibs_bot_started")
 
             if self._watchdog is not None:
