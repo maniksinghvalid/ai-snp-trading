@@ -476,8 +476,16 @@ Plans:
 **Goal:** A new, separate paper-trading bot process (`python3 -m bot --rules rules_ibs.json`, self-contained `bot/ibs/` mirroring `bot/options/`) that trades the IBS mean-reversion rule on 17 liquid US ETFs — buy when IBS = (last−low)/(high−low) < 0.20 at 10 minutes before the close, sell when IBS > 0.80 or after 10 trading days, 10 equal-weight slots of 10% of $100k paper equity, LIMIT orders only, positions held overnight by design — with the full safety stack (paper guard, readiness gate, own-DB-only reconcile, kill switch, watchdog, Telegram, EOD report) and operator cutover tooling (read-only UAT probe, `--live-1lot`, launchd plist, runbook to stop Trend Join Long). Selected 2026-10-04 by a two-round pre-registered search (16 hypotheses): OOS 2019–2026 net CAGR 16.4% (close fill) / 12.7% (next-open), Sharpe 1.30 / 1.07, maxDD −11% / −22% vs SPY 17.3% / 0.93 / −34%. Operator decisions (final): unlevered, separate bot, near-close fills, Trend Join Long stopped at cutover. Context: `12-CONTEXT.md`.
 **Requirements**: IBS-01..IBS-10 (defined in `12-CONTEXT.md`)
 **Depends on:** Phase 11
-**Plans:** 0 plans
+**Plans:** 9 plans (5 waves)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 12 to break down)
+- [ ] 12-01-PLAN.md — Wave 1: research provenance — six scripts to backtester/experimental/ibs_search/ (path constants only) + results doc (IBS-10)
+- [ ] 12-02-PLAN.md — Wave 1: rules_ibs.json + IBS_SCHEMA + fail-closed IbsConfig loader + tests/ibs scaffolding (IBS-01)
+- [ ] 12-03-PLAN.md — Wave 1: additive shared helpers — configure_logging log_name/force, trading_days_between, migration 0008 ibs_* tables, audit-log test isolation (IBS-06, IBS-08)
+- [ ] 12-04-PLAN.md — Wave 2: pure strategy core + research parity test with documented same-day re-entry divergence (IBS-03)
+- [ ] 12-05-PLAN.md — Wave 2: IbsStore + IbsExecutor (LegExecutor reuse, deadline-bounded) (IBS-05, IBS-06)
+- [ ] 12-06-PLAN.md — Wave 3: IbsBot readiness gate, own-rows reconcile, guarded decision job, exit batch with persisted retry (IBS-04, IBS-05, IBS-07)
+- [ ] 12-07-PLAN.md — Wave 3: operator tooling — uat_ibs_probe.py (read-only + --live-1lot --confirm), launchd plist, IBS-RUNBOOK.md, CLAUDE.md section (IBS-09)
+- [ ] 12-08-PLAN.md — Wave 4: entry batch (external-holding guard, same-session exclusion, slots, sizing) + close − 1 min hard-cancel sweep (IBS-04, IBS-05, IBS-07)
+- [ ] 12-09-PLAN.md — Wave 5: calendar-aware job arming, EOD report, shutdown order, main(), bot/main.py dispatch, static hygiene, phase gate + VALIDATION sign-off (IBS-02, IBS-04, IBS-05, IBS-08)
