@@ -201,6 +201,7 @@ def test_ibs_plist_template():
     assert pl["KeepAlive"] == {"SuccessfulExit": False}
     assert pl["RunAtLoad"] is True
     assert pl["ThrottleInterval"] == 30
+    assert pl["ExitTimeOut"] == 60  # IN-08: room for the SIGTERM sweep before SIGKILL
     env = pl["EnvironmentVariables"]
     assert env["PAPER_TRADING"] == "true"
     assert env["FUTU_TRD_ENV"] == "SIMULATE"
