@@ -96,8 +96,11 @@ def configure_logging(log_dir: str = _DEFAULT_LOG_DIR, level: str = _DEFAULT_LEV
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
 
-    # Remove default handlers to avoid duplicates
-    root_logger.handlers.clear()
+    # Remove default handlers to avoid duplicates; close them so a force=True
+    # re-target does not leak the previous log file's descriptor (IN-02).
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        handler.close()
 
     # ---- rotating file handler (JSON output) ----
     file_handler = logging.handlers.RotatingFileHandler(
