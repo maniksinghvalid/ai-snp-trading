@@ -423,6 +423,21 @@ def test_entry_timeout_unfilled_is_aborted(env):
     assert env.store.get_orders(("CANCELLED",))[0]["order_id"] == "B-US.XLU"
 
 
+def test_entry_timeout_filled_all_with_lagging_dealt_qty_is_opened(env):
+    """IN-10: FILLED_ALL with dealt_qty not yet populated settles at the order qty,
+    not as unfilled (which would ABORT a row whose shares are held)."""
+    from unittest.mock import AsyncMock
+    env.setup(snap={"US.XLU": 0.05})
+    env.results[("BUY", "US.XLU")] = _AfterPlace(asyncio.TimeoutError())
+    env.gw.get_order_status = AsyncMock(return_value=[{
+        "order_id": "B-US.XLU", "order_status": "FILLED_ALL", "qty": 7,
+        "dealt_qty": 0, "dealt_avg_price": 0.0}])
+    env.decide()
+    pos = env.store.get_active_positions()
+    assert [(r["code"], r["status"], r["qty"]) for r in pos] == [("US.XLU", "OPEN", 7)]
+    assert env.store.get_positions(("ABORTED",)) == []
+
+
 def test_hard_cancel_nothing_to_do(env, set_now):
     set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
     _run(env.bot._job_hard_cancel())
