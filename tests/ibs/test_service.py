@@ -163,3 +163,238 @@ def test_alert_values_escaped(make_ibs_bot, ibs_store):
     bot = make_ibs_bot()
     _run(bot.reconcile())
     assert "US.&lt;X&gt;" in _alerts(bot)[0]
+
+
+# ============================================================
+# Task 2: decision job guards, one snapshot, exit batch
+# ============================================================
+
+MON_1550 = datetime(2026, 10, 5, 15, 50, tzinfo=ET)
+
+
+@pytest.fixture
+def decide_env(make_ibs_bot, ibs_store, ibs_gateway, make_positions_df,
+               make_snapshot_row, set_now, audits):
+    """Build a bot at Mon 2026-10-05 15:50 with an enabled gate and recording executor."""
+    class Env:
+        pass
+    env = Env()
+    env.store, env.gw, env.audits = ibs_store, ibs_gateway, audits
+    env.bot = make_ibs_bot()
+    env.bot._entries_enabled = True
+    env.bot._executor.work = AsyncMock(return_value=None)
+    env.set_now = set_now
+    set_now(MON_1550)
+
+    def setup(rows, snap):
+        for r in rows:
+            ibs_store.insert_position(r)
+        held = {r["code"]: r["qty"] for r in rows if r["status"] == "OPEN"}
+        ibs_gateway.get_positions.return_value = (0, make_positions_df(held))
+        import pandas as pd
+        ibs_gateway.get_market_snapshot.return_value = (0, pd.DataFrame([
+            make_snapshot_row(c, 100.0 + 10.0 * v, 110.0, 100.0) for c, v in snap.items()
+        ]))
+    env.setup = setup
+    env.status = lambda code: next(
+        p for p in ibs_store.get_active_positions() + ibs_store.get_positions(("CLOSED",))
+        if p["code"] == code)
+    return env
+
+
+def test_decide_noop_on_non_trading_day(decide_env):
+    decide_env.set_now(datetime(2026, 10, 4, 15, 50, tzinfo=ET))
+    _run(decide_env.bot._job_decide())
+    decide_env.gw.get_positions.assert_not_awaited()
+    decide_env.gw.get_market_snapshot.assert_not_awaited()
+    assert decide_env.store.get_meta("ibs_decision_date") is None
+
+
+@pytest.mark.parametrize("case", ["disabled", "kill", "decided", "past_deadline"])
+def test_decide_skip_guards(decide_env, case, monkeypatch):
+    bot = decide_env.bot
+    if case == "disabled":
+        bot._entries_enabled = False
+    elif case == "kill":
+        bot._kill_switch.triggered = True
+    elif case == "decided":
+        decide_env.store.set_meta("ibs_decision_date", "2026-10-05")
+    else:
+        decide_env.set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
+    logged = []
+    monkeypatch.setattr("bot.ibs.service._logger.info",
+                        lambda ev, **kw: logged.append((ev, kw)))
+    _run(bot._job_decide())
+    decide_env.gw.get_market_snapshot.assert_not_awaited()
+    assert any(ev == "ibs_decision_skipped" and kw.get("reason") for ev, kw in logged)
+    if case == "past_deadline":
+        assert decide_env.store.get_meta("ibs_decision_date") is None
+
+
+def test_decide_writes_meta_first_and_is_idempotent(decide_env):
+    seen = []
+    orig = decide_env.gw.get_positions
+
+    async def gp(*a, **k):
+        seen.append(decide_env.store.get_meta("ibs_decision_date"))
+        return await orig(*a, **k)
+
+    decide_env.gw.get_positions = gp
+    _run(decide_env.bot._job_decide())
+    assert seen == ["2026-10-05"]
+    decide_env.gw.get_market_snapshot.assert_awaited_once_with(
+        list(decide_env.bot._cfg.universe))
+    _run(decide_env.bot._job_decide())
+    assert decide_env.gw.get_market_snapshot.await_count == 1
+
+
+def test_reconcile_precedes_snapshot(decide_env):
+    order = []
+    orig_gp, orig_snap = decide_env.gw.get_positions, decide_env.gw.get_market_snapshot
+
+    async def gp(*a, **k):
+        order.append("positions")
+        return await orig_gp(*a, **k)
+
+    async def snap(*a, **k):
+        order.append("snapshot")
+        return await orig_snap(*a, **k)
+
+    decide_env.gw.get_positions, decide_env.gw.get_market_snapshot = gp, snap
+    _run(decide_env.bot._job_decide())
+    assert order == ["positions", "snapshot"]
+
+
+def test_snapshot_failure_alerts_without_exception_text(decide_env):
+    decide_env.gw.get_market_snapshot.return_value = (-1, "secret broker text")
+    _run(decide_env.bot._job_decide())
+    decide_env.bot._executor.work.assert_not_awaited()
+    alerts = _alerts(decide_env.bot)
+    assert len(alerts) == 1 and "<b>IBS decision error</b>" in alerts[0]
+    assert "snapshot failed" not in alerts[0] and "secret" not in alerts[0]
+    assert [a["event"] for a in decide_env.audits] == ["ibs_decision_error"]
+    assert decide_env.bot._decision_task is None
+
+
+def test_exit_decisions(decide_env):
+    decide_env.setup(
+        [_row("US.SPY", "P1", entry_date="2026-10-01"),
+         _row("US.QQQ", "P2", entry_date="2026-09-21"),
+         _row("US.IWM", "P3", entry_date="2026-10-02"),
+         _row("US.DIA", "P4", status="NEEDS_ATTENTION")],
+        {"US.SPY": 0.9, "US.QQQ": 0.5, "US.IWM": 0.5, "US.DIA": 0.95})
+    _run(decide_env.bot._job_decide())
+    calls = decide_env.bot._executor.work.await_args_list
+    assert [(c.args[0], c.args[1]) for c in calls] == [("SELL", "US.SPY"), ("SELL", "US.QQQ")]
+    assert decide_env.store.get_trades_on("2026-10-05") == []  # None result -> no fill
+    reasons = {p["code"]: p["exit_reason"] for p in decide_env.store.get_active_positions()}
+    assert reasons["US.SPY"] == "ibs" and reasons["US.QQQ"] == "time"
+    assert reasons["US.IWM"] is None and reasons["US.DIA"] is None
+
+
+def test_exit_full_fill(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor.work.return_value = ("O1", 780.10, 12)
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_positions(("CLOSED",))[0]
+    assert pos["code"] == "US.SPY" and pos["qty"] == 0
+    trades = decide_env.store.get_trades_on("2026-10-05")
+    assert len(trades) == 1 and trades[0]["pnl_usd"] == pytest.approx(120.0)
+    alert = _alerts(decide_env.bot)[-1]
+    assert "IBS exit" in alert and "US.SPY" in alert
+
+
+def test_exit_partial_fill(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor.work.return_value = ("O2", 780.10, 5)
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_active_positions()[0]
+    assert (pos["status"], pos["qty"], pos["exit_pending"]) == ("OPEN", 7, 1)
+    assert "partial" in _alerts(decide_env.bot)[-1]
+
+
+def test_exit_unfilled(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_active_positions()[0]
+    assert (pos["status"], pos["exit_pending"]) == ("OPEN", 1)
+    assert "unfilled" in _alerts(decide_env.bot)[-1]
+
+
+def test_exit_exception_needs_attention(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor.work.side_effect = RuntimeError("boom broker text")
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_active_positions()[0]
+    assert pos["status"] == "NEEDS_ATTENTION"
+    alert = _alerts(decide_env.bot)[-1]
+    assert "IBS NEEDS ATTENTION" in alert and "boom" not in alert
+    assert "ibs_exit_unknown" in [a["event"] for a in decide_env.audits]
+
+
+def test_exit_deferred_without_quote(decide_env):
+    decide_env.setup([_row("US.QQQ", "P2", entry_date="2026-09-21")], {})
+    _run(decide_env.bot._job_decide())
+    decide_env.bot._executor.work.assert_not_awaited()
+    pos = decide_env.store.get_active_positions()[0]
+    assert pos["exit_pending"] == 1 and pos["status"] == "OPEN"
+    assert "deferred" in _alerts(decide_env.bot)[-1]
+
+
+def test_exit_retry_of_pending(decide_env):
+    decide_env.setup([_row(entry_date="2026-10-02")], {"US.SPY": 0.5})
+    decide_env.store.mark_exit_pending("P1", "ibs", "2026-10-02")
+    _run(decide_env.bot._job_decide())
+    calls = decide_env.bot._executor.work.await_args_list
+    assert [(c.args[0], c.args[1]) for c in calls] == [("SELL", "US.SPY")]
+
+
+def test_exit_deferred_when_not_enough_time(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.set_now(datetime(2026, 10, 5, 15, 58, tzinfo=ET))
+    _run(decide_env.bot._job_decide())
+    decide_env.bot._executor.work.assert_not_awaited()
+    assert decide_env.store.get_active_positions()[0]["exit_pending"] == 1
+    assert "deferred" in _alerts(decide_env.bot)[-1]
+
+
+def test_exit_loop_stops_on_kill_switch(decide_env):
+    decide_env.setup(
+        [_row("US.SPY", "P1"), _row("US.QQQ", "P2")], {"US.SPY": 0.9, "US.QQQ": 0.9})
+
+    async def work(*a, **k):
+        decide_env.bot._kill_switch.triggered = True
+
+    decide_env.bot._executor.work.side_effect = work
+    _run(decide_env.bot._job_decide())
+    assert decide_env.bot._executor.work.await_count == 1
+
+
+def test_work_records_orders(decide_env):
+    decide_env.store.insert_position(_row())
+    row = decide_env.store.get_active_positions()[0]
+
+    async def fake(side, code, qty, last, deadline, on_placed=None):
+        await on_placed("O9")
+        return ("O9", 10.0, 3)
+
+    decide_env.bot._executor.work = fake
+    result = _run(decide_env.bot._work("SELL", row, 12, 100.0, MON_1550))
+    assert result == ("O9", 10.0, 3)
+    assert decide_env.store.get_orders(("DONE",))[0]["order_id"] == "O9"
+    done = [a for a in decide_env.audits if a["event"] == "ibs_order_done"][0]
+    assert done["order_ids"] == ["O9"]
+
+
+def test_work_exception_keeps_order_working(decide_env):
+    decide_env.store.insert_position(_row())
+    row = decide_env.store.get_active_positions()[0]
+
+    async def fake(side, code, qty, last, deadline, on_placed=None):
+        await on_placed("O9")
+        raise RuntimeError("cancel unconfirmed")
+
+    decide_env.bot._executor.work = fake
+    with pytest.raises(RuntimeError):
+        _run(decide_env.bot._work("SELL", row, 12, 100.0, MON_1550))
+    assert decide_env.store.get_orders(("WORKING",))[0]["order_id"] == "O9"
