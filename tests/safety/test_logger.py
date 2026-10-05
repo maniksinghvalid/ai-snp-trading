@@ -92,6 +92,39 @@ def test_bare_configure_logging_does_not_target_production_log():
     )
 
 
+def test_configure_logging_log_name_and_force(tmp_path):
+    """log_name + force=True re-targets logging to <log_dir>/<log_name> (D-13)."""
+    import logging
+    from bot.safety.logger import configure_logging, get_logger
+    log_dir = str(tmp_path / "logs")
+    configure_logging(log_dir=log_dir)
+    configure_logging(log_dir=log_dir, log_name="ibs.log", force=True)
+    get_logger("ibs_test").info("ibs_probe_event")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    ibs_log = os.path.join(log_dir, "ibs.log")
+    assert os.path.isfile(ibs_log)
+    with open(ibs_log, encoding="utf-8") as f:
+        events = [json.loads(l)["event"] for l in f if l.strip()]
+    assert "ibs_probe_event" in events
+
+
+def test_configure_logging_force_false_still_idempotent(tmp_path):
+    """Without force, a second call with a different log_name is a no-op."""
+    from bot.safety.logger import configure_logging
+    log_dir = str(tmp_path / "logs")
+    configure_logging(log_dir=log_dir)
+    configure_logging(log_dir=log_dir, log_name="other.log")
+    assert not os.path.exists(os.path.join(log_dir, "other.log"))
+
+
+def test_kwonly_defaults_survive_conftest_patch():
+    """conftest patches __defaults__; kw-only defaults live in __kwdefaults__."""
+    from bot.safety.logger import configure_logging
+    assert configure_logging.__kwdefaults__ == {"log_name": "bot.log", "force": False}
+    assert len(configure_logging.__defaults__) == 2
+
+
 # ============================================================
 # Log output tests
 # ============================================================
