@@ -9,6 +9,7 @@ Provides:
   make_fill_event  — factory returning a synthetic FillEvent (Phase 4 scaffold)
   make_bar_event   — factory returning a synthetic BarEvent (Phase 4 scaffold)
   _isolate_bot_log — (session, autouse) points configure_logging()'s default log_dir at a session tmp dir
+  _isolate_audit_log — (session, autouse) points audit_log.AUDIT_LOG_PATH at a session tmp file (D-15)
 """
 import os
 from datetime import datetime
@@ -57,6 +58,24 @@ def _isolate_bot_log(tmp_path_factory):
             logger.configure_logging,
             "__defaults__",
             (str(tmp_path_factory.mktemp("logs")), logger._DEFAULT_LEVEL),
+        )
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_audit_log(tmp_path_factory):
+    """Keep every test run out of the operator's real ~/.futu_trade_audit.jsonl
+    (D-15, research Pitfall 2). That file already holds thousands of test
+    entries (kill_switch, opend_reconnect). Tests that set AUDIT_LOG_PATH
+    themselves via monkeypatch keep working: they override this value and
+    restore it afterwards.
+    """
+    from bot.safety import audit_log
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            audit_log, "AUDIT_LOG_PATH",
+            str(tmp_path_factory.mktemp("audit") / "audit.jsonl"),
         )
         yield
 

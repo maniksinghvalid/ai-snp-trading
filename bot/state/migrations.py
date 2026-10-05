@@ -401,6 +401,84 @@ def _migration_0007(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE option_positions ADD COLUMN {col} {decl}")
 
 
+# ============================================================
+# Migration 0008 — Phase 12 IBS bot tables
+# ============================================================
+#
+# New tables for the IBS ETF mean-reversion bot (its own DB file; this shared
+# runner also creates these unused tables in the equity and options DBs on their
+# next StateStore.open(), same as migration 0006):
+#   ibs_positions — one row per position; partial UNIQUE index enforces one
+#                   active row per code (D-05) as a DB invariant.
+#   ibs_trades    — one row per closed round trip.
+#   ibs_orders    — one row per broker order the bot placed.
+#
+# Status vocabularies (plain TEXT, validation in Python):
+#   ibs_positions.status : OPENING | OPEN | CLOSING | CLOSED | ABORTED | NEEDS_ATTENTION
+#   ibs_orders.status    : WORKING | DONE | CANCELLED | CANCEL_FAILED
+# Dates (entry_date, exit_date, session_date, exit_decided_date) are ET ISO dates
+# YYYY-MM-DD; *_at fields are ISO datetimes.
+#
+# Table names are deliberately ibs_*: OpenDWatchdog runs the equity
+# startup_reconcile against whatever StateStore it is given, which must find
+# EMPTY positions / pending_intents tables and so adopt nothing.
+#
+# WR-03: callable using conn.execute() per statement (never executescript) so the
+# DDL commits atomically with the PRAGMA user_version bump. IF NOT EXISTS makes
+# it idempotent.
+
+
+def _migration_0008(conn: sqlite3.Connection) -> None:
+    """Add Phase 12 ibs_positions, ibs_trades, ibs_orders and the active-code index.
+
+    Idempotent (IF NOT EXISTS everywhere, no DROP/ALTER of existing tables).
+
+    D-08: never edit shipped migrations 0001-0007 — new objects always in 0008.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS ibs_positions (
+        position_id        TEXT PRIMARY KEY,
+        code               TEXT NOT NULL,
+        qty                INTEGER NOT NULL,
+        entry_date         TEXT NOT NULL,
+        entry_price        REAL,
+        entry_order_id     TEXT,
+        status             TEXT NOT NULL,
+        exit_pending       INTEGER NOT NULL DEFAULT 0,
+        exit_reason        TEXT,
+        exit_decided_date  TEXT,
+        opened_at          TEXT,
+        closed_at          TEXT,
+        close_reason       TEXT,
+        realized_pnl_usd   REAL
+    )""")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_ibs_positions_active_code "
+        "ON ibs_positions(code) "
+        "WHERE status IN ('OPENING','OPEN','CLOSING','NEEDS_ATTENTION')"
+    )
+    conn.execute("""CREATE TABLE IF NOT EXISTS ibs_trades (
+        trade_id     TEXT PRIMARY KEY,
+        position_id  TEXT NOT NULL,
+        code         TEXT NOT NULL,
+        qty          INTEGER NOT NULL,
+        entry_price  REAL,
+        exit_price   REAL,
+        exit_date    TEXT NOT NULL,
+        reason       TEXT,
+        pnl_usd      REAL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS ibs_orders (
+        order_id      TEXT PRIMARY KEY,
+        position_id   TEXT,
+        code          TEXT NOT NULL,
+        side          TEXT NOT NULL,
+        qty           INTEGER,
+        status        TEXT NOT NULL,
+        session_date  TEXT NOT NULL,
+        created_at    TEXT
+    )""")
+
+
 MIGRATIONS = [
     _MIGRATION_0001,
     _migration_0002,   # adds rich context columns to daily_scan (Phase 2, D-08)
@@ -409,10 +487,11 @@ MIGRATIONS = [
     _migration_0005,   # Phase 7: tod_baselines table + broker_stop_order_id on positions
     _migration_0006,   # Phase 8: option_positions + option_legs (+ legs index)
     _migration_0007,   # Phase 11: strategy_name on option_positions
+    _migration_0008,   # Phase 12: ibs_positions + ibs_trades + ibs_orders (+ active-code unique index)
 ]
 
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 
 # ============================================================
