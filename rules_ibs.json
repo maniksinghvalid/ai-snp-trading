@@ -1,0 +1,55 @@
+{
+    "strategy_name": "ibs_etf_mean_reversion",
+    "universe": [
+        "US.SPY",
+        "US.QQQ",
+        "US.IWM",
+        "US.DIA",
+        "US.XLK",
+        "US.XLF",
+        "US.XLE",
+        "US.XLV",
+        "US.XLI",
+        "US.XLY",
+        "US.XLP",
+        "US.XLU",
+        "US.XLB",
+        "US.TLT",
+        "US.GLD",
+        "US.EFA",
+        "US.EEM"
+    ],
+    "signal": {
+        "ibs_entry_max": 0.2,
+        "ibs_exit_min": 0.8,
+        "max_hold_trading_days": 10,
+        "max_snapshot_age_s": 900
+    },
+    "risk": {
+        "sizing_equity_usd": 100000,
+        "position_pct_of_equity": 10,
+        "max_concurrent_positions": 10
+    },
+    "execution": {
+        "entry_limit_buffer_usd": 0.05,
+        "exit_limit_buffer_usd": 0.05,
+        "order_ttl_seconds": 20,
+        "poll_interval_seconds": 5,
+        "escalation_step_usd": 0.05,
+        "max_reprices": 3
+    },
+    "service": {
+        "arm_time_et": "09:00",
+        "decision_before_close_min": 10,
+        "hard_cancel_before_close_min": 1,
+        "eod_report_after_close_min": 5,
+        "misfire_grace_s": 120,
+        "watchdog_poll_interval_s": 60,
+        "watchdog_reconnect_initial_s": 5,
+        "watchdog_reconnect_cap_s": 300,
+        "state_db": "data/ibs_state.db",
+        "kill_file": ".bot_kill_ibs",
+        "report_dir": "reports/ibs",
+        "log_file": "ibs.log"
+    }
+}
