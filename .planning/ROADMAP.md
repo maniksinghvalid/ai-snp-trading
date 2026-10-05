@@ -476,7 +476,7 @@ Plans:
 **Goal:** A new, separate paper-trading bot process (`python3 -m bot --rules rules_ibs.json`, self-contained `bot/ibs/` mirroring `bot/options/`) that trades the IBS mean-reversion rule on 17 liquid US ETFs — buy when IBS = (last−low)/(high−low) < 0.20 at 10 minutes before the close, sell when IBS > 0.80 or after 10 trading days, 10 equal-weight slots of 10% of $100k paper equity, LIMIT orders only, positions held overnight by design — with the full safety stack (paper guard, readiness gate, own-DB-only reconcile, kill switch, watchdog, Telegram, EOD report) and operator cutover tooling (read-only UAT probe, `--live-1lot`, launchd plist, runbook to stop Trend Join Long). Selected 2026-10-04 by a two-round pre-registered search (16 hypotheses): OOS 2019–2026 net CAGR 16.4% (close fill) / 12.7% (next-open), Sharpe 1.30 / 1.07, maxDD −11% / −22% vs SPY 17.3% / 0.93 / −34%. Operator decisions (final): unlevered, separate bot, near-close fills, Trend Join Long stopped at cutover. Context: `12-CONTEXT.md`.
 **Requirements**: IBS-01..IBS-10 (defined in `12-CONTEXT.md`)
 **Depends on:** Phase 11
-**Plans:** 3/9 plans executed
+**Plans:** 4/9 plans executed
 Plans:
 **Wave 1**
 
@@ -486,7 +486,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 12-04-PLAN.md — Wave 2: pure strategy core + research parity test with documented same-day re-entry divergence (IBS-03)
+- [x] 12-04-PLAN.md — Wave 2: pure strategy core + research parity test with documented same-day re-entry divergence (IBS-03)
 - [ ] 12-05-PLAN.md — Wave 2: IbsStore + IbsExecutor (LegExecutor reuse, deadline-bounded) (IBS-05, IBS-06)
 
 **Wave 3** *(blocked on Wave 2 completion)*
