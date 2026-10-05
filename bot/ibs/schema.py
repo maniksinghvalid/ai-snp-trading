@@ -58,6 +58,8 @@ IBS_SCHEMA = {
             "poll_interval_seconds": {"type": "number", "exclusiveMinimum": 3},
             "escalation_step_usd": _pos(),
             "max_reprices": _int(0),
+            # the executor gives up this long before the hard-cancel sweep (CR-02)
+            "executor_margin_s": _pos(),
         }),
         "service": _block({
             "arm_time_et": {"type": "string", "pattern": _HHMM_PATTERN},

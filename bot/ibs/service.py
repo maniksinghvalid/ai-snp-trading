@@ -54,6 +54,11 @@ _logger = get_logger(__name__)
 _ET = ZoneInfo("America/New_York")
 _RET_OK = 0
 _DECISION_META_KEY = "ibs_decision_date"
+# moomoo order_status values after which an order can no longer fill (same set as
+# bot.execution.engine._TERMINAL_ORDER_STATUSES, which bot/ibs must not import).
+_TERMINAL_ORDER_STATUSES = frozenset({
+    "FILLED_ALL", "CANCELLED_ALL", "CANCELLED_PART", "FAILED", "DELETED", "EXPIRED",
+})
 
 
 # ============================================================
@@ -302,8 +307,10 @@ class IbsBot:
     # --------------------------------------------------------
 
     def _deadline(self, day) -> datetime:
-        """Hard-cancel time: no order is worked past close - hard_cancel_before_close_min."""
-        return _close_dt(day) - timedelta(minutes=self._cfg.hard_cancel_before_close_min)
+        """Executor deadline: executor_margin_s BEFORE the hard-cancel sweep (CR-02), so
+        the executor's own cancel and settle finish before the sweep can race them."""
+        return (_close_dt(day) - timedelta(minutes=self._cfg.hard_cancel_before_close_min)
+                - timedelta(seconds=self._cfg.executor_margin_s))
 
     async def _job_decide(self) -> None:
         """Run the once-per-day decision (D-07: idempotent across restarts / double fires)."""
@@ -365,8 +372,11 @@ class IbsBot:
 
         Raises OrderNotPlaced when it failed before any order was placed (e.g.
         place_order raised: rate limit, buying power) — nothing is exposed.
-        Any other exception means an order was placed and its state is unknown:
-        its rows stay WORKING for the hard-cancel sweep.
+        An exception after placement (deadline TimeoutError, unconfirmed cancel) is
+        settled from the broker: fill_leg cancels its own order before raising, so
+        when the last order reads terminal it returns like an unfilled / partial
+        result (CR-02). Otherwise the state is unknown: the exception propagates
+        and the rows stay WORKING for the hard-cancel sweep.
         """
         placed = []
 
@@ -385,12 +395,35 @@ class IbsBot:
         except Exception as exc:
             if not placed:
                 raise OrderNotPlaced(f"{side} {row['code']}: no order placed") from exc
-            raise
-        ids = self._store.close_working_orders(row["position_id"])
+            # Earlier attempts were confirmed dead by fill_leg's TTL path; only the
+            # last order can still be live.
+            outcome = await self._order_outcome(placed[-1])
+            if outcome is None:
+                raise
+            _logger.warning("ibs_order_settled_after_error", code=row["code"], side=side,
+                            order_id=placed[-1], filled_qty=outcome[2], exc_info=True)
+            result = outcome if outcome[2] > 0 else None
+        ids = self._store.close_working_orders(
+            row["position_id"], "DONE" if result else "CANCELLED")
         append_audit({"event": "ibs_order_done", "position_id": row["position_id"],
                       "code": row["code"], "side": side, "order_ids": ids,
                       "filled_qty": result[2] if result else 0})
         return result
+
+    async def _order_outcome(self, order_id):
+        """(order_id, avg_price, dealt_qty) if the broker reports order_id terminal,
+        else None (unreadable or still working: state unknown)."""
+        try:
+            rows = await self._gateway.get_order_status(order_id)
+        except Exception:
+            _logger.error("ibs_order_status_unreadable", order_id=order_id, exc_info=True)
+            return None
+        for r in rows or []:
+            if (str(r.get("order_id")) == str(order_id)
+                    and str(r.get("order_status")) in _TERMINAL_ORDER_STATUSES):
+                return (order_id, float(r.get("dealt_avg_price") or 0.0),
+                        int(float(r.get("dealt_qty") or 0)))
+        return None
 
     async def _flag_unknown(self, pid, code, what) -> None:
         """An order was placed and its outcome is unknown: NEEDS_ATTENTION (D-11).
@@ -596,7 +629,8 @@ class IbsBot:
         return n
 
     async def _job_hard_cancel(self) -> None:
-        """close - 1 min: cancel an in-flight decision, then every WORKING order (D-09)."""
+        """close - 1 min: cancel an in-flight decision, flag rows it left mid-order,
+        then cancel every WORKING order (D-09)."""
         today = now_et().date()
         if not is_trading_day(today):
             _logger.info("ibs_hard_cancel_skipped", reason="not_trading_day")
@@ -611,6 +645,10 @@ class IbsBot:
                     pass
                 _logger.warning("ibs_decision_cancelled", date=today.isoformat())
                 append_audit({"event": "ibs_decision_cancelled", "date": today.isoformat()})
+            # CR-02: nothing is mid-order now; a row still OPENING/CLOSING is unknown.
+            for row in self._store.get_positions(("OPENING", "CLOSING")):
+                await self._flag_unknown(row["position_id"], row["code"],
+                                         "entry" if row["status"] == "OPENING" else "exit")
             n = await self._sweep_orders("hard_cancel")
             _logger.info("ibs_hard_cancel_done", cancelled=n)
         except asyncio.CancelledError:

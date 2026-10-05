@@ -45,6 +45,7 @@ class IbsConfig:
     poll_interval_seconds: float
     escalation_step_usd: float
     max_reprices: int
+    executor_margin_s: float
     arm_time_et: str
     decision_before_close_min: int
     hard_cancel_before_close_min: int
@@ -107,10 +108,14 @@ def _check(cfg: IbsConfig) -> None:
     if cfg.poll_interval_seconds >= cfg.order_ttl_seconds:
         raise ConfigError("execution: poll_interval_seconds must be < order_ttl_seconds")
     window_s = (cfg.decision_before_close_min - cfg.hard_cancel_before_close_min) * 60
-    if cfg.worst_case_order_s >= window_s:
+    if cfg.executor_margin_s >= window_s:
+        raise ConfigError(
+            f"execution: executor_margin_s must be < the decision -> hard-cancel window {window_s}s")
+    if cfg.worst_case_order_s >= window_s - cfg.executor_margin_s:
         raise ConfigError(
             f"execution: worst-case order time {cfg.worst_case_order_s}s does not fit the "
-            f"decision window {window_s}s (order_ttl_seconds/poll_interval_seconds/max_reprices)")
+            f"decision window {window_s}s less executor_margin_s "
+            f"(order_ttl_seconds/poll_interval_seconds/max_reprices)")
     hh, mm = int(cfg.arm_time_et[:2]), int(cfg.arm_time_et[3:])
     if hh > 23 or mm > 59:
         raise ConfigError(f"service: arm_time_et {cfg.arm_time_et!r} is not a valid HH:MM")
@@ -153,6 +158,7 @@ def load_ibs_config(path: str = "rules_ibs.json") -> IbsConfig:
         poll_interval_seconds=float(e["poll_interval_seconds"]),
         escalation_step_usd=float(e["escalation_step_usd"]),
         max_reprices=int(e["max_reprices"]),
+        executor_margin_s=float(e["executor_margin_s"]),
         arm_time_et=str(v["arm_time_et"]),
         decision_before_close_min=int(v["decision_before_close_min"]),
         hard_cancel_before_close_min=int(v["hard_cancel_before_close_min"]),
