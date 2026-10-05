@@ -551,10 +551,10 @@ class IbsBot:
                     f"<b>IBS exit not placed</b> {_esc(code)} — no order reached the "
                     f"broker; retried next session.")
                 continue
-            except BaseException as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 await self._flag_unknown(pid, code, "exit")
                 if not isinstance(exc, Exception):
-                    raise  # CancelledError: row flagged first
+                    raise  # CancelledError: row flagged first (IN-07: nothing broader)
                 continue
 
             filled = int(result[2]) if result else 0
@@ -643,10 +643,10 @@ class IbsBot:
                     f"<b>IBS entry not placed</b> {_esc(code)} — no order confirmed at the "
                     f"broker; skipped today; check moomoo for a position/order.")
                 continue
-            except BaseException as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 await self._flag_unknown(pid, code, "entry")
                 if not isinstance(exc, Exception):
-                    raise  # CancelledError: row flagged first
+                    raise  # CancelledError: row flagged first (IN-07: nothing broader)
                 continue
             if result is None:  # D-09: unfilled entry is skipped today, no carry-over
                 self._store.set_position_status(
