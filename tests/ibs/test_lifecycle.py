@@ -239,3 +239,193 @@ def test_eod_reconcile_error_does_not_block(make_ibs_bot, ibs_cfg, ibs_gateway,
     ibs_gateway.get_market_snapshot = AsyncMock(return_value=_snap([]))
     _run(bot._job_eod())
     ibs_alerter.send.assert_awaited_once()
+
+
+# ============================================================
+# Task 2: shutdown order
+# ============================================================
+
+def _wire_recorder(bot, ibs_gateway, ibs_alerter, calls):
+    ibs_gateway.cancel_order = AsyncMock(side_effect=lambda oid: calls.append(f"cancel:{oid}"))
+    ibs_gateway.close = MagicMock(side_effect=lambda: calls.append("close"))
+    ibs_alerter.send = AsyncMock(side_effect=lambda text: calls.append(f"alert:{text}"))
+    bot._scheduler = MagicMock(shutdown=MagicMock(
+        side_effect=lambda **k: calls.append("scheduler_shutdown")))
+
+
+def _working_order(store, oid="O1"):
+    store.insert_order({"order_id": oid, "position_id": "P1", "code": "US.SPY",
+                        "side": "BUY", "qty": 1, "status": "WORKING",
+                        "session_date": "2026-10-05", "created_at": "2026-10-05T15:51:00-04:00"})
+
+
+def test_shutdown_order(make_ibs_bot, ibs_gateway, ibs_alerter, ibs_store, audits):
+    bot = make_ibs_bot()
+    calls = []
+    _wire_recorder(bot, ibs_gateway, ibs_alerter, calls)
+    _working_order(ibs_store)
+
+    async def go():
+        async def decision():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                calls.append("decision_cancelled")
+                raise
+        bot._decision_task = asyncio.create_task(decision())
+        await asyncio.sleep(0)  # let it start
+        await bot._shutdown()
+
+    _run(go())
+    assert calls == ["decision_cancelled", "cancel:O1", "close",
+                     "alert:<b>IBS bot stopped</b>", "scheduler_shutdown"]
+    assert {"event": "ibs_bot_shutdown", "reason": "kill_switch"} in audits
+
+
+def test_shutdown_survives_step_failures(make_ibs_bot, ibs_gateway, ibs_alerter,
+                                         ibs_store, audits):
+    bot = make_ibs_bot()
+    calls = []
+    _wire_recorder(bot, ibs_gateway, ibs_alerter, calls)
+    ibs_gateway.close = MagicMock(side_effect=RuntimeError("close boom"))
+    ibs_gateway.cancel_order = AsyncMock(side_effect=RuntimeError("cancel boom"))
+    _working_order(ibs_store)
+    _run(bot._shutdown())
+    assert calls == ["alert:<b>IBS bot stopped</b>", "scheduler_shutdown"]
+
+
+def test_shutdown_never_started_scheduler(make_ibs_bot, audits):
+    bot = make_ibs_bot()
+    _run(bot._shutdown())  # real, never-started scheduler: must not raise
+
+
+# ============================================================
+# Task 2: run loop
+# ============================================================
+
+class _FakeKill:
+    def __init__(self, calls):
+        self.triggered = False
+        self._calls = calls
+        self._polls = 0
+
+    def install(self):
+        self._calls.append("install")
+
+    def check_file(self):
+        self._polls += 1
+        return True
+
+    def trigger(self, reason):
+        self._calls.append(f"trigger:{reason}")
+        self.triggered = True
+
+
+def test_run_order_and_clean_stop(make_ibs_bot, ibs_gateway, ibs_alerter, ibs_store,
+                                  set_now, audits):
+    bot = make_ibs_bot()
+    calls = []
+    bot._kill_switch = _FakeKill(calls)
+    set_now(_at(2026, 10, 4))  # Sunday: arm_today arms nothing
+    ibs_gateway.connect = MagicMock(side_effect=lambda: calls.append("connect"))
+    ibs_gateway.close = MagicMock(side_effect=lambda: calls.append("close"))
+    real_reconcile = bot.reconcile
+
+    async def rec(startup=False):
+        calls.append("reconcile")
+        return await real_reconcile(startup=startup)
+
+    bot.reconcile = rec
+    real_start = bot._scheduler.start
+    bot._scheduler.start = lambda *a, **k: (calls.append("scheduler_start"),
+                                            real_start(*a, **k))[1]
+    real_arm = bot.arm_today
+    bot.arm_today = lambda: (calls.append("arm_today"), real_arm())[1]
+
+    state = {}
+
+    class _Dog:
+        async def run(self):
+            state["started"] = True
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+    bot._watchdog = _Dog()
+    _run(bot.run())
+
+    assert calls[:6] == ["connect", "reconcile", "install", "scheduler_start",
+                         "arm_today", "trigger:sentinel_file"]
+    assert calls[-1] == "close"
+    assert state == {"started": True, "cancelled": True}
+    assert ibs_gateway.place_order.await_count == 0  # positions left held, nothing sold
+
+
+def test_run_connect_failure_never_starts_scheduler(make_ibs_bot, ibs_gateway, audits):
+    bot = make_ibs_bot()
+    ibs_gateway.connect = MagicMock(side_effect=RuntimeError("paper guard"))
+    started = []
+    bot._scheduler.start = lambda *a, **k: started.append(1)
+    shutdown_called = []
+
+    async def fake_shutdown():
+        shutdown_called.append(1)
+
+    bot._shutdown = fake_shutdown
+    with pytest.raises(RuntimeError, match="paper guard"):
+        _run(bot.run())
+    assert started == []
+    assert bot._entries_enabled is False
+    assert shutdown_called == [1]
+
+
+# ============================================================
+# Task 2: main()
+# ============================================================
+
+def _write_ibs_rules(tmp_path, payload):
+    p = tmp_path / "rules_ibs.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return str(p)
+
+
+def test_main_composes_and_runs(ibs_rules, tmp_path, monkeypatch):
+    import bot.ibs.service as svc
+    rules = _write_ibs_rules(tmp_path, ibs_rules)
+    monkeypatch.chdir(tmp_path)
+    cl = MagicMock()
+    store_cls = MagicMock()
+    kill_cls = MagicMock()
+    dog_cls = MagicMock()
+    ran = []
+    for name, obj in (("configure_logging", cl), ("IbsStore", store_cls),
+                      ("KillSwitch", kill_cls), ("OpenDWatchdog", dog_cls),
+                      ("MoomooGateway", MagicMock()), ("TelegramAlerter", MagicMock()),
+                      ("get_gateway_config", MagicMock())):
+        monkeypatch.setattr(svc, name, obj)
+    monkeypatch.setattr(svc.asyncio, "run", lambda coro: (ran.append(1), coro.close()))
+
+    svc.main(rules)
+
+    cl.assert_called_once_with(log_name="ibs.log", force=True)
+    store_cls.assert_called_once_with("data/ibs_state.db")
+    kill_cls.assert_called_once_with(sentinel_path=".bot_kill_ibs")
+    assert ran == [1]
+    assert dog_cls.call_count == 1
+    assert (tmp_path / "data").is_dir()
+
+
+def test_main_invalid_rules_exits_before_gateway(ibs_rules, tmp_path, monkeypatch, capsys):
+    import bot.ibs.service as svc
+    ibs_rules["signal"]["ibs_entry_max"] = 5.0  # violates the schema
+    rules = _write_ibs_rules(tmp_path, ibs_rules)
+    gw = MagicMock()
+    monkeypatch.setattr(svc, "MoomooGateway", gw)
+    monkeypatch.setattr(svc, "configure_logging", MagicMock())
+    with pytest.raises(SystemExit) as exc:
+        svc.main(rules)
+    assert exc.value.code == 1
+    assert "[ERROR]" in capsys.readouterr().err
+    gw.assert_not_called()
