@@ -61,6 +61,10 @@ touch .bot_kill_ibs      # positions stay held by design (D-06); working orders 
 rm .bot_kill_ibs         # before restarting
 ```
 
+Under launchd, `launchctl unload ~/Library/LaunchAgents/com.bot.ibs.plist` sends SIGTERM, which takes
+the same graceful path (decision cancelled, working orders swept, "stopped" alert). `kill -9` does not:
+after one, check moomoo for working orders and expect NEEDS_ATTENTION alerts on the next start.
+
 ## 6. First week — every trading day after 16:05 ET
 
 - `reports/ibs/latest.html` written, and the Telegram EOD names `ibs_etf_mean_reversion`.

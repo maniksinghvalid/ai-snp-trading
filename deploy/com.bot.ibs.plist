@@ -11,6 +11,8 @@
     4. Load:    launchctl load ~/Library/LaunchAgents/com.bot.ibs.plist
        Status:  launchctl list | grep com.bot.ibs
        Unload:  launchctl unload ~/Library/LaunchAgents/com.bot.ibs.plist
+                (sends SIGTERM: same graceful stop as touch .bot_kill_ibs — the in-flight
+                 decision is cancelled and working orders are swept; positions stay held)
 
   ThrottleInterval (D-06): launchd waits at least this many seconds between crash-restarts.
   Increase to 60 if the bot is crash-looping on a persistent error.

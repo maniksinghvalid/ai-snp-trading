@@ -22,6 +22,7 @@ import asyncio
 import html
 import math
 import os
+import signal
 import sqlite3
 import sys
 from datetime import datetime, time, timedelta
@@ -878,7 +879,11 @@ class IbsBot:
         _logger.info("ibs_shutdown_complete")
 
     async def run(self) -> None:
-        """Run the IBS lifecycle until the kill switch trips."""
+        """Run the IBS lifecycle until the kill switch trips (sentinel, SIGINT or SIGTERM)."""
+        # WR-05: launchctl unload / kill send SIGTERM; take the same graceful path as
+        # the kill file (cancel the decision, sweep orders, alert). SIGINT is KillSwitch's.
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM, self._kill_switch.trigger, "SIGTERM")
         try:
             await self._readiness_gate()
             if not self._alerter._enabled:
