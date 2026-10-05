@@ -5,7 +5,7 @@ bot.ibs.config — Load and validate rules_ibs.json into a frozen IbsConfig (IBS
 rules_ibs.json is the single source of truth for every IBS strategy number; no
 strategy value is defaulted in Python. Raises ConfigError (re-used from
 bot.config.loader: one config exception type for the whole bot) on a missing
-file, bad JSON, schema violation or semantic error. Never calls sys.exit.
+file, bad JSON, schema violation or semantic error. Never terminates the process.
 
 Exports: IbsConfig, load_ibs_config
 """
