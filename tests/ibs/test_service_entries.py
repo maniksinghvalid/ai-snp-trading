@@ -258,14 +258,19 @@ def test_aborted_entry_that_filled_alerts_and_is_never_traded(env):
     assert len(held) == 1 and "check moomoo" in held[0]
 
 
-def test_entry_exception_needs_attention_and_continues(env):
+def test_entry_exception_needs_attention_and_continues(env, monkeypatch):
+    errors = []
+    monkeypatch.setattr("bot.ibs.service._logger.error",
+                        lambda ev, **kw: errors.append((ev, kw)))
     env.setup(snap={"US.XLU": 0.05, "US.XLP": 0.10})
     env.results[("BUY", "US.XLU")] = _AfterPlace(RuntimeError("boom broker text"))
     env.decide()
     rows = {r["code"]: r["status"] for r in env.store.get_active_positions()}
     assert rows == {"US.XLU": "NEEDS_ATTENTION", "US.XLP": "OPEN"}
-    assert any("IBS NEEDS ATTENTION" in a and "boom" not in a for a in _alerts(env.bot))
+    assert any("IBS NEEDS ATTENTION" in a and "boom" not in a
+               and "cancel any working order" in a for a in _alerts(env.bot))
     assert any(a["event"] == "ibs_entry_unknown" for a in env.audits)
+    assert [kw["exc_info"] for ev, kw in errors if ev == "ibs_entry_unknown"] == [True]
 
 
 def test_duplicate_active_row_integrity_error_skips(env):
@@ -399,14 +404,22 @@ def test_hard_cancel_cancels_running_decision_first(env, set_now):
 
 
 @pytest.mark.parametrize("status", ["OPENING", "CLOSING"])
-def test_hard_cancel_flags_rows_left_mid_order(env, set_now, status):
-    """CR-02: after cancelling the decision, any OPENING/CLOSING row is flagged + alerted."""
+def test_hard_cancel_flags_rows_left_mid_order(env, set_now, status, monkeypatch):
+    """CR-02: after cancelling the decision, any OPENING/CLOSING row is flagged + alerted.
+    IN-06: no exception is active there (no exc_info) and the sweep that follows
+    cancels the order, so the alert says verify, not cancel."""
+    errors = []
+    monkeypatch.setattr("bot.ibs.service._logger.error",
+                        lambda ev, **kw: errors.append((ev, kw)))
     env.store.insert_position(_row("US.XLU", "X1", 5, status=status))
     set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
     _run(env.bot._job_hard_cancel())
     assert env.store.get_active_positions()[0]["status"] == "NEEDS_ATTENTION"
     al = _alerts(env.bot)
     assert len(al) == 1 and "IBS NEEDS ATTENTION" in al[0] and "US.XLU" in al[0]
+    assert "mid-order at the close" in al[0] and "cancel any working order" not in al[0]
+    unknown = [kw for ev, kw in errors if ev.endswith("_unknown")]
+    assert unknown and not unknown[0]["exc_info"]
 
 
 def test_entry_timeout_unfilled_is_aborted(env):
