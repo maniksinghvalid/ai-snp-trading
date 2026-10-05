@@ -450,8 +450,12 @@ class IbsBot:
             outcome = await self._order_outcome(placed[-1])
             if outcome is None:
                 raise
-            _logger.warning("ibs_order_settled_after_error", code=row["code"], side=side,
-                            order_id=placed[-1], filled_qty=outcome[2], exc_info=True)
+            # IN-11: a timeout after a re-price can leave an order whose place_order was
+            # still in flight (never recorded); the unmanaged-holding alert backstops it.
+            log = (_logger.error if isinstance(exc, asyncio.TimeoutError) and len(placed) > 1
+                   else _logger.warning)
+            log("ibs_order_settled_after_error", code=row["code"], side=side,
+                order_id=placed[-1], filled_qty=outcome[2], exc_info=True)
             result = outcome if outcome[2] > 0 else None
         if result is not None and not (math.isfinite(float(result[1])) and float(result[1]) > 0):
             # WR-04: _poll reports 0.0 when dealt_avg_price is missing; book the
