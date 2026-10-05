@@ -98,7 +98,7 @@ def _active_rows(state_db):
                 ACTIVE_STATUSES)]
         finally:
             con.close()
-    except sqlite3.OperationalError as exc:  # IN-09: unmigrated / locked file
+    except sqlite3.DatabaseError as exc:  # OperationalError is a subclass; also covers "file is not a database"  # IN-09: unmigrated / locked file
         _p(f"IBS DB at {path} unreadable ({exc}); DB guard not applied")
         return None
 
