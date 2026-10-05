@@ -50,6 +50,7 @@ def ibs_rules():
             "poll_interval_seconds": 5,
             "escalation_step_usd": 0.05,
             "max_reprices": 3,
+            "executor_margin_s": 30,
         },
         "service": {
             "arm_time_et": "09:00",

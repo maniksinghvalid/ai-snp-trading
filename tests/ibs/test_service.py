@@ -363,6 +363,84 @@ def test_exit_place_failure_stays_open_and_retries(decide_env):
         ("SELL", "US.SPY")]
 
 
+def test_executor_deadline_is_before_the_hard_cancel_sweep(decide_env):
+    """CR-02: the executor gives up executor_margin_s before the sweep fires."""
+    bot = decide_env.bot
+    assert bot._deadline(MON_1550.date()) == datetime(2026, 10, 5, 15, 58, 30, tzinfo=ET)
+
+
+def _placed_then(exc, oid="O9"):
+    async def work(side, code, qty, last, deadline, on_placed=None):
+        await on_placed(oid)
+        raise exc
+    return work
+
+
+def _broker_order(status, dealt=0, avg=0.0, oid="O9"):
+    return AsyncMock(return_value=[{"order_id": oid, "order_status": status,
+                                    "dealt_qty": dealt, "dealt_avg_price": avg}])
+
+
+def test_exit_timeout_cleanly_cancelled_is_retried(decide_env):
+    """CR-02: deadline hit, fill_leg cancelled the order, broker confirms 0 filled ->
+    OPEN + exit_pending (retried next session), order row CANCELLED, no NEEDS_ATTENTION."""
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor.work.side_effect = _placed_then(asyncio.TimeoutError())
+    decide_env.gw.get_order_status = _broker_order("CANCELLED_ALL")
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_active_positions()[0]
+    assert (pos["status"], pos["exit_pending"], pos["qty"]) == ("OPEN", 1, 12)
+    assert decide_env.store.get_orders(("CANCELLED",))[0]["order_id"] == "O9"
+    assert decide_env.store.get_orders(("WORKING",)) == []
+    alerts = _alerts(decide_env.bot)
+    assert "unfilled" in alerts[-1] and not any("NEEDS ATTENTION" in a for a in alerts)
+
+
+def test_exit_timeout_partial_fill_is_recorded(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor.work.side_effect = _placed_then(asyncio.TimeoutError())
+    decide_env.gw.get_order_status = _broker_order("CANCELLED_PART", 5, 780.10)
+    _run(decide_env.bot._job_decide())
+    pos = decide_env.store.get_active_positions()[0]
+    assert (pos["status"], pos["qty"], pos["exit_pending"]) == ("OPEN", 7, 1)
+    assert len(decide_env.store.get_trades_on("2026-10-05")) == 1
+    assert "partial" in _alerts(decide_env.bot)[-1]
+
+
+def test_exit_timeout_order_still_live_needs_attention(decide_env):
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+    decide_env.bot._executor.work.side_effect = _placed_then(asyncio.TimeoutError())
+    decide_env.gw.get_order_status = _broker_order("SUBMITTED")
+    _run(decide_env.bot._job_decide())
+    assert decide_env.store.get_active_positions()[0]["status"] == "NEEDS_ATTENTION"
+    assert decide_env.store.get_orders(("WORKING",))[0]["order_id"] == "O9"
+
+
+def test_hard_cancel_mid_exit_flags_row_and_alerts(decide_env):
+    """CR-02: a decision cancelled mid-order never leaves the row CLOSING."""
+    decide_env.setup([_row()], {"US.SPY": 0.9})
+
+    async def hang(side, code, qty, last, deadline, on_placed=None):
+        await on_placed("O9")
+        await asyncio.sleep(3600)
+
+    decide_env.bot._executor.work.side_effect = hang
+
+    async def scenario():
+        job = asyncio.create_task(decide_env.bot._job_decide())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await decide_env.bot._job_hard_cancel()
+        try:
+            await job
+        except asyncio.CancelledError:
+            pass
+
+    _run(scenario())
+    assert decide_env.store.get_active_positions()[0]["status"] == "NEEDS_ATTENTION"
+    assert any("IBS NEEDS ATTENTION" in a for a in _alerts(decide_env.bot))
+
+
 def test_exit_deferred_without_quote(decide_env):
     decide_env.setup([_row("US.QQQ", "P2", entry_date="2026-09-21")], {})
     _run(decide_env.bot._job_decide())

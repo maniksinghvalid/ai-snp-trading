@@ -349,6 +349,31 @@ def test_hard_cancel_cancels_running_decision_first(env, set_now):
     env.gw.cancel_order.assert_awaited_once_with("O1")
 
 
+@pytest.mark.parametrize("status", ["OPENING", "CLOSING"])
+def test_hard_cancel_flags_rows_left_mid_order(env, set_now, status):
+    """CR-02: after cancelling the decision, any OPENING/CLOSING row is flagged + alerted."""
+    env.store.insert_position(_row("US.XLU", "X1", 5, status=status))
+    set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
+    _run(env.bot._job_hard_cancel())
+    assert env.store.get_active_positions()[0]["status"] == "NEEDS_ATTENTION"
+    al = _alerts(env.bot)
+    assert len(al) == 1 and "IBS NEEDS ATTENTION" in al[0] and "US.XLU" in al[0]
+
+
+def test_entry_timeout_unfilled_is_aborted(env):
+    """CR-02: entry deadline hit with the order cleanly cancelled and 0 filled -> ABORTED."""
+    from unittest.mock import AsyncMock
+    env.setup(snap={"US.XLU": 0.05})
+    env.results[("BUY", "US.XLU")] = _AfterPlace(asyncio.TimeoutError())
+    env.gw.get_order_status = AsyncMock(return_value=[{
+        "order_id": "B-US.XLU", "order_status": "CANCELLED_ALL",
+        "dealt_qty": 0, "dealt_avg_price": 0.0}])
+    env.decide()
+    ab = env.store.get_positions(("ABORTED",))
+    assert [(r["code"], r["close_reason"]) for r in ab] == [("US.XLU", "entry_unfilled")]
+    assert env.store.get_orders(("CANCELLED",))[0]["order_id"] == "B-US.XLU"
+
+
 def test_hard_cancel_nothing_to_do(env, set_now):
     set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
     _run(env.bot._job_hard_cancel())
