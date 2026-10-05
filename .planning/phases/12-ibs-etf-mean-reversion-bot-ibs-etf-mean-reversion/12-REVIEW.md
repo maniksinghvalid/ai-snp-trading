@@ -1,171 +1,100 @@
 ---
 phase: 12-ibs-etf-mean-reversion-bot-ibs-etf-mean-reversion
-reviewed: 2026-10-04T19:59:00-07:00
+reviewed: 2026-10-04T20:30:00-07:00
 depth: standard
-files_reviewed: 42
+iteration: 2
+diff_base: a4b35c5
+files_reviewed: 19
 files_reviewed_list:
-  - bot/ibs/__init__.py
-  - bot/ibs/schema.py
-  - bot/ibs/config.py
-  - bot/ibs/strategy.py
-  - bot/ibs/store.py
-  - bot/ibs/execution.py
   - bot/ibs/service.py
-  - bot/main.py
-  - bot/safety/logger.py
-  - bot/scanner/calendar.py
-  - bot/state/migrations.py
+  - bot/ibs/execution.py
+  - bot/ibs/store.py
+  - bot/ibs/config.py
+  - bot/ibs/schema.py
   - rules_ibs.json
   - scripts/uat_ibs_probe.py
+  - bot/safety/logger.py
   - deploy/com.bot.ibs.plist
   - deploy/IBS-RUNBOOK.md
-  - CLAUDE.md
-  - docs/research/2026-10-04-ibs-etf-strategy-search.md
-  - backtester/experimental/ibs_search/strategy_search.py
-  - backtester/experimental/ibs_search/strategy_search_r2.py
-  - backtester/experimental/ibs_search/ibs_robust.py
-  - backtester/experimental/ibs_search/r5_robust.py
-  - backtester/experimental/ibs_search/ibs_sizing.py
-  - backtester/experimental/ibs_search/screen_study.py
-  - tests/conftest.py
   - tests/ibs/conftest.py
-  - tests/ibs/test_schema_config.py
-  - tests/ibs/test_dispatch.py
-  - tests/ibs/test_strategy.py
-  - tests/ibs/test_parity.py
-  - tests/ibs/test_store.py
-  - tests/ibs/test_execution.py
   - tests/ibs/test_service.py
   - tests/ibs/test_service_entries.py
   - tests/ibs/test_lifecycle.py
-  - tests/ibs/test_hygiene.py
+  - tests/ibs/test_execution.py
+  - tests/ibs/test_schema_config.py
   - tests/ibs/test_operator_tooling.py
-  - tests/ibs/test_research_provenance.py
-  - tests/safety/test_audit_log.py
   - tests/safety/test_logger.py
-  - tests/scanner/test_calendar.py
-  - tests/state/test_migrations.py
+  - bot/options/execution.py
 findings:
-  critical: 2
-  warning: 6
-  info: 5
-  total: 13
+  critical: 0
+  warning: 1
+  info: 6
+  total: 7
 status: issues_found
 ---
 
-# Phase 12: Code Review Report
+# Phase 12: Code Review Report (iteration 2, re-review of fixes a4b35c5..HEAD)
 
-**Depth:** standard — **Status:** issues_found
+**Depth:** standard. **Status:** issues_found, with no blockers. The only warning is a narrow, silent position-tracking gap that the CR-01 fix opens for entries. Iteration-1 report preserved as `12-REVIEW.iter2.md`.
 
 ## Summary
-Strategy core (`strategy.py`), schema/config validation, store SQL, additive shared-file edits and test isolation are
-sound. The defects are concentrated in `bot/ibs/service.py` error paths: the broad "any exception means exposure unknown"
-handling leaves positions in states the bot never recovers from, and the hard-cancel/deadline design races itself.
 
-Confirmed clean: no non-LIMIT order path (`place_order` always uses `OrderType.NORMAL`; `IbsExecutor` rejects any side other than BUY/SELL); no code outside the bot's own `ibs_positions` rows can be traded; SQL fully parameterised (f-strings interpolate only fixed column names and marker counts); Telegram/HTML output escaped; research scripts repo-relative (no `/Users/acdc`); additive shared-file edits do not change the equity or options bots' behaviour. CR-01 and WR-01 were reproduced with a scratch script driving `IbsBot._job_decide` with mocks.
+CR-01, CR-02 and WR-01 to WR-06 (iteration 1) are genuinely closed. Every exit and entry error path in `_run_exits`, `_run_entries`, `_work`, `_order_outcome`, `_job_hard_cancel` and `_sweep_orders` was traced, and the real `IbsExecutor` + `LegExecutor` were run against a mock gateway with a real-time clock (the existing tests use a frozen clock, so this exercises the deadline path they never reach):
+- Deadline lands mid-order → `wait_for` times out, `fill_leg` cancels its order, `_work` settles from broker status → row `OPEN`, `exit_pending=1`, order row `CANCELLED`, one "exit unfilled" alert.
+- `place_order` raises on the re-price attempt after a TTL cancel → same settle path → `OPEN`, `exit_pending=1`.
 
-## Critical Issues
+Verification: `python3 -m pytest tests/ibs tests/safety/test_logger.py` 305 passed; full suite 1708 passed, 1 skipped; no test run dirtied the repo; hygiene grep (`OrderType\.MARKET|force_close|unlock_trade|<script` in bot/ibs) empty; `git diff a4b35c5..HEAD -- bot/options` empty.
 
-### CR-01: Any exception from `_work` permanently parks the position in NEEDS_ATTENTION, even when no order was ever placed (exits never retried)
-**File:** `bot/ibs/service.py:417-426` (exit) and `:502-513` (entry); root in `bot/ibs/execution.py:74-77`
-**Issue:** `_run_exits` and `_run_entries` treat every exception from `_work` as "exposure unknown". That includes
-`gateway.place_order` raising (`GatewayError` for rate limit, insufficient buying power, price band, OpenD blip), where no
-order id exists and nothing can be exposed.
-- Result: an exit row flips `CLOSING -> NEEDS_ATTENTION`. NEEDS_ATTENTION is excluded from `_run_exits` (only `OPEN` is selected) and from steady-state reconcile, so the position is never sold again.
-- That contradicts "exit_pending retried every session". It needs manual SQL, and the alert text tells the operator to "cancel any working order" that does not exist.
-- This is plausible in production. `rules_ibs.json` sizes 10 x 10% = 100% of equity, and the executor escalates the limit up to +$0.20 above the sized price, on an account shared with the options bot's margin, so buying-power rejects are realistic.
-- Reproduced: with `place_order` raising `RuntimeError("rate limited")` on a SELL, the row ends as `('NEEDS_ATTENTION', exit_pending=1)` with no orders recorded.
-**Fix:** Track whether any order was placed for this attempt and only escalate to NEEDS_ATTENTION when one was; otherwise restore the pre-attempt state: exit with no order placed → back to `OPEN` (exit_pending stays 1 → retried next session) + alert "no order placed; retried next session"; entry with no order placed → `ABORTED` with `close_reason="entry_place_failed"`. Expose "orders placed" from `_work` (return it or raise a wrapper exception) so the callers can branch. Add tests for `place_order` raising on both sides.
+### Iteration-1 findings verified CLOSED
 
-### CR-02: Hard-cancel (or shutdown-free decision cancel) mid-order leaves the row stuck in CLOSING/OPENING with no alert and no recovery
-**File:** `bot/ibs/service.py:560-581` (`_job_hard_cancel`), `:416-426` / `:496-513` (callers), `:300-302` (`_deadline`)
-**Issue:** `CancelledError` is a `BaseException`. `_run_exits` and `_run_entries` catch `Exception` only (entries re-raise `CancelledError`), so a cancelled decision never resets the status it set earlier.
-- `_job_hard_cancel` fires at exactly `_deadline` (close - hard_cancel_before_close_min), the same instant the executor's `wait_for` timeout expires. Whichever wins, the row ends badly.
-- The cancel path leaves a `CLOSING` row. Reproduced: `('CLOSING', exit_pending=1)`, with the order marked `CANCELLED` and only a log line.
-- A `CLOSING` row is never retried: `_run_exits` selects only `OPEN`, and steady-state `reconcile()` checks only `OPEN`. Only a restart flags it. A partial exit fill that happened before the cancel is also never recorded.
-- The `OPENING` case is the same: a possibly-filled BUY is untracked and unflagged until restart.
-- The timeout path gives NEEDS_ATTENTION, which has the same never-retried problem as CR-01 for what is really a clean "unfilled at the deadline" outcome.
-**Fix:** After cancelling the in-flight decision in `_job_hard_cancel`, reconcile any `OPENING`/`CLOSING` rows (set NEEDS_ATTENTION and alert, or re-query the broker). Give the executor an earlier deadline than the sweep (new `rules_ibs.json` key, e.g. `execution.executor_margin_s`, validated in config; no literal in Python). Treat a TimeoutError on an exit (order cleanly cancelled by `fill_leg`) like "unfilled": set back to `OPEN` and retry next session.
+| ID | Verdict | Evidence |
+|----|---------|----------|
+| CR-01 | CLOSED | `service.py:430-435`: `OrderNotPlaced` raised only when `placed` is empty; `on_placed` appends the id before the DB insert so a failing insert still counts as placed. Exits → `OPEN` (`exit_pending` kept) + alert (`:527-534`); entries → `ABORTED` `entry_place_failed` (`:617-626`). Exception chain preserved; broker text never reaches the alert. Reproduced with the real executor. |
+| CR-02 | CLOSED | `_deadline` = close − `hard_cancel_before_close_min` − `executor_margin_s` (`:310-314`) → 15:58:30 vs sweep 15:59:00. `wait_for` waits for `fill_leg`'s shielded cancel before raising `TimeoutError`. `_work` settles from broker status: terminal → unfilled/partial recorded; live or unreadable → `NEEDS_ATTENTION`. `CancelledError` flags the row then re-raises (`:535-539`, `:627-631`). `_job_hard_cancel` flags leftover `OPENING`/`CLOSING` rows (`:704-706`), which also backstops a non-`_work` failure such as `record_exit_fill` raising. |
+| WR-01 | CLOSED | `_read_front` (`:367-386`) bounded by retry count and deadline; read-only so retries cannot re-place orders; already-flagged rows are not alerted twice; config validates retries × retry_s against the order window. |
+| WR-02 | CLOSED | Alerts for `kill_switch`, `past_deadline`, `entries_disabled` with no exception text; exits-only runs only when `get_global_state()` reports connected (never raises); `_decide` (`:401`) and `_run_entries` (`:594`) both still block entries (test confirms no BUY); `_arm_and_alert` silent when today's decision already ran. |
+| WR-03 | CLOSED | `_sweep_orders` reads status first; terminal orders marked `DONE`/`CANCELLED` with no cancel call. |
+| WR-04 | CLOSED | `:444-452` handles `<=0` and NaN; the settle path goes through the same guard. |
+| WR-05 | CLOSED | `add_signal_handler(SIGTERM, kill_switch.trigger, "SIGTERM")`; kill switch idempotent; clean exit 0 + `KeepAlive SuccessfulExit=false` → no restart. |
+| WR-06 | CLOSED (see IN-09) | Read-only `mode=ro` DB access, no `IbsStore`, no migrations. `live_1lot` refuses (exit 3, no order) on symbol outside universe / held at broker / active row / unreadable positions / inside the decision window (start = close − decision_min − 4 × worst_case_order_s = 15:43:20, covering both legs). |
+| IN-02, IN-05 | CLOSED | Handlers removed and closed; tests repo-relative and pin CR-01/CR-02. |
+| IN-01, IN-03, IN-04 | Still open | Explicitly deferred by the fixer; not re-raised. |
+
+New-knob validation: schema `executor_margin_s` `_pos()`, `decision_read_retries` `_int(0)`, `decision_read_retry_s` `_pos()`; fail-closed cross-checks (`config.py:112-125`): margin < decide→hard-cancel window, worst-case order + margin < window, retries × retry_s + worst-case order + margin < window; mirrored in the `conftest` `ibs_rules` literal and `test_schema_config` `_LEAVES`/bad-value cases; shipped-file drift guard passes; no strategy literal added to Python.
 
 ## Warnings
 
-### WR-01: A single transient failure consumes the whole day's decision (no retry inside the 9-minute window)
-**File:** `bot/ibs/service.py:324-337`, `:341-347`
-**Issue:** `ibs_decision_date` is written before any broker call (D-07). If `reconcile()` or `get_market_snapshot` fails (one `position_list_query` blip, `ret != 0`), `_decide` raises and the day is done: no exits (including time-stops), no entries, no retry. Exits slip a full session.
-**Fix:** Retry the read-only front half (reconcile and snapshot) a bounded number of times, bounded by the deadline, before giving up. The retry count and sleep must come from `rules_ibs.json`. Only after the first order is attempted is the "do not re-run" guarantee needed, so write the meta key at that point, or clear it on a pre-order failure.
-
-### WR-02: Skipped decisions are silent (log only), including the OpenD-disconnect case that blocks exits
-**File:** `bot/ibs/service.py:304-322`, `:606-631`
-**Issue:** `entries_disabled`, `kill_switch`, `past_deadline` and a mid-window restart (`ibs_job_slot_passed`) skip the entire decision, exits included, with an `info` log and no Telegram alert.
-- The watchdog sets `_entries_enabled=False` on disconnect, but reconnect detection can lag 60 s plus backoff up to 300 s, so any disconnect in about the 15:40-15:50 window drops the day silently.
-- A mid-window restart (including a KeepAlive crash-restart) does the same: `arm_today` skips the passed decide slot and the operator is never told.
-**Fix:** Send an alert for `entries_disabled`/`past_deadline` and when `arm_today` skips `ibs_decide` on a trading day. Optionally let exits run when only `_entries_enabled` is false but the gateway is connected.
-
-### WR-03: Order rows left WORKING after a timeout/exception cause false "cancel FAILED" alerts
-**File:** `bot/ibs/service.py:359-378`, `:531-558`
-**Issue:** On any `_work` exception, `close_working_orders` is skipped. `fill_leg` guarantees it already cancelled the order (CR-03 in the options code), so the DB row is stale.
-- `_sweep_orders` then cancels it again. `GatewayError` on an already-cancelled order is caught and marked `CANCEL_FAILED` with the alert "cancel it in moomoo before the close".
-- That is noise that trains the operator to ignore the real alert.
-**Fix:** In `_sweep_orders`, call `get_order_status(oid)` first and mark terminal orders `CANCELLED`/`DONE` without a cancel call. Alternatively, in `_work` on `TimeoutError`/`CancelledError`, mark that position's WORKING rows `CANCELLED`, since `fill_leg` has already cancelled them.
-
-### WR-04: Fill average price of 0.0 is not guarded, so entry_price and P&L are corrupted
-**File:** `bot/ibs/service.py:434-436`, `:519-520`; source `bot/options/execution.py::_poll`
-**Issue:** `_poll` returns `0.0` when `dealt_avg_price` is missing or empty, and the SIMULATE/broker lag makes this plausible on the TTL-partial path.
-- `mark_opened(..., float(avg))` stores `entry_price=0.0`.
-- Later, `record_exit_fill` computes P&L as `(exit - 0) * qty`, a huge fake gain, and the EOD unrealised figure is wrong.
-- An exit with `avg=0.0` records a 100% loss trade.
-**Fix:** Reject `avg <= 0` and fall back to the order's limit price, or skip the P&L figures and log, e.g. `avg = float(result[1]) or limit`.
-
-### WR-05: SIGTERM / `launchctl unload` bypass the shutdown path
-**File:** `deploy/com.bot.ibs.plist:9-11` (unload instruction), `bot/ibs/service.py:230`, `bot/safety/kill_switch.py:install`
-**Issue:** `KillSwitch.install()` handles only SIGINT. The plist header advertises `launchctl unload`, which sends SIGTERM. The process dies immediately: no sweep of WORKING orders, no "stopped" alert, and rows left OPENING/CLOSING.
-- The runbook (section 5) claims that stopping cancels working orders, but that holds only for the sentinel file.
-**Fix:** Register a SIGTERM handler in `IbsBot.run`, e.g. `loop.add_signal_handler(signal.SIGTERM, lambda: self._kill_switch.trigger("sigterm"))`, or remove the unload line from the plist and runbook and state that the sentinel is the only supported stop.
-
-### WR-06: `--live-1lot` probe can corrupt live bot state, and the "read-only" probe opens the production DB through `IbsStore.open()`
-**File:** `scripts/uat_ibs_probe.py:99-107` (DB open), `:164-217` (`live_1lot`)
-**Issue:** `live_1lot` BUYs then SELLs one share of `--symbol` on the shared account without checking:
-- that the symbol is not already held at the broker;
-- that it has no active row in `cfg.state_db`;
-- that it is in the configured universe;
-- that the IBS bot is not running.
-
-If the symbol is held or active, the extra buy/sell shifts the broker quantity by 1, so the next reconcile flips the live position to NEEDS_ATTENTION. The default-mode probe's "never create a DB" guard still calls `IbsStore(state_db).open()`, which runs migrations (a write) and takes a lock on the file the running bot uses.
-**Fix:** In `live_1lot`, call `get_positions()` first and refuse if `symbol` has a broker holding or an active `ibs_positions` row (open the DB with `sqlite3` `mode=ro`), and require `symbol in cfg.universe`. For the read-only probe, use `sqlite3.connect(f"file:{path}?mode=ro", uri=True)`.
+### WR-07: A BUY that actually reached the broker can be recorded as ABORTED and then ignored forever (CR-01 fix opens a silent gap for entries)
+**File:** `bot/ibs/service.py:430-435` (wrapper), `:617-626` (entry ABORTED), `:582-584` (external holdings only logged)
+**Issue:** `OrderNotPlaced` assumes "`place_order` raised, so nothing is exposed". The moomoo SDK reports a request timeout as a non-RET_OK return, which `_check_ret` turns into `GatewayError` — OpenD may already have accepted the order. For an entry, the row becomes `ABORTED` `entry_place_failed`; if that BUY then fills, the holding is a universe code with no active row: `_run_entries` classifies it as `external`, logs it, excludes it from entries and never alerts; it is never sold either (D-12). The exit side is safe (next `reconcile()` sees DB qty vs broker 0 → `NEEDS_ATTENTION`). The documented ceiling (orphan order from a re-price in flight at the deadline) has the same shape.
+**Fix:** In `_run_entries`, alert when an `external` universe holding has an `ABORTED` row with `close_reason` in (`entry_place_failed`, `entry_unfilled`) from the last couple of sessions; dedupe with a meta key per code/day. More generally, alert once per code whenever a universe code is held at the broker with no active row. Reword the "entry not placed" alert to "no order confirmed at the broker; check moomoo for a position/order".
 
 ## Info
 
-### IN-01: Anchor limits on stale `last` (up to 900 s old)
-**File:** `bot/ibs/execution.py:73-77`, `rules_ibs.json:26`
-`max_snapshot_age_s=900` lets the BUY/SELL limit start from a price up to 15 minutes old. In a fast close the SELL (last - 0.05 up to -0.20) may never become marketable, so the exit is unfilled and retried next session. Consider passing the snapshot `bid_price`/`ask_price` into `fill_leg` (it already accepts bid/ask) instead of `last, last`, or tighten the age.
+### IN-06: `_flag_unknown` logs `exc_info=True` outside an exception when called from the hard-cancel sweep, and its alert wording is wrong there
+**File:** `bot/ibs/service.py:481`, callers `:704-706`
+From `_job_hard_cancel` there is no active exception (log carries `NoneType: None`); the alert says "cancel any working order" but the following sweep cancels it. **Fix:** pass `exc_info` only when an exception is active; alert variant "left mid-order at the close; verify position and orders in moomoo".
 
-### IN-02: `configure_logging(force=True)` leaks the replaced handlers
-**File:** `bot/safety/logger.py:~94` (`root_logger.handlers.clear()`)
-The old `RotatingFileHandler` (`logs/bot.log`, opened by `bot.main`'s earlier call) is dropped without `close()`, leaving an open file descriptor and an empty `logs/bot.log` created by the IBS process. Harmless but sloppy. Fix: `for h in root_logger.handlers[:]: root_logger.removeHandler(h); h.close()`.
+### IN-07: `except BaseException` handlers `await` inside non-cancellation paths
+**File:** `bot/ibs/service.py:535-539`, `:627-631`
+Intent is `CancelledError`; `BaseException` also catches `GeneratorExit` (awaiting there raises "coroutine ignored GeneratorExit"), `KeyboardInterrupt`, `SystemExit`. **Fix:** `except (Exception, asyncio.CancelledError) as exc:` and re-raise when not an `Exception`.
 
-### IN-03: Shutdown and run-loop small defects
-**File:** `bot/ibs/service.py:707`, `:744`, `:769-772`
-- The audit event always records `reason: "kill_switch"`, even when `run()` exits through a startup or error path.
-- The "IBS bot stopped" alert and a no-op sweep also run after a failed `_readiness_gate`.
-- `self._alerter._enabled` reads a private attribute.
-- Swallowing `CancelledError` in `_job_hard_cancel` (`:572`) and `_shutdown` (`:718`) also swallows a cancellation of those coroutines themselves.
+### IN-08: launchd's default 20 s ExitTimeOut can cut the SIGTERM graceful path short
+**File:** `deploy/com.bot.ibs.plist`
+Shutdown = shielded cancel + per-order status/cancel calls (`get_order_status` can add ~9 s of rate-limit backoff each); launchd SIGKILLs after 20 s by default. **Fix:** `<key>ExitTimeOut</key><integer>60</integer>`.
 
-### IN-04: Research scripts: hygiene and reproducibility
-**File:** `backtester/experimental/ibs_search/*.py`
-- `ibs_robust.py:2-6` has unused `importlib.util`, `spec`, `np`, and a no-op `sys.argv=["x"]`.
-- `ibs_sizing.py`, `r5_robust.py`, `ibs_robust.py` define `ROOT` (or `HERE`) but only partly use it.
-- Every script `exec()`s `strategy_search.py` split on a magic comment string (fragile; use a shared module).
-- `glob(...)[-1]` raises a bare `IndexError` if `data/sp500_*.csv` (gitignored) is absent.
-- `screen_study.py:17` does `os.makedirs(OUT)` at import time.
-- `yfinance` data is not pinned, so results drift; the committed `assets/*.txt` are the only reproducible record.
-- Paths are repo-relative, which is correct (no `/Users/acdc`).
+### IN-09: Probe DB guard silently passes on a wrong cwd or an unmigrated file
+**File:** `scripts/uat_ibs_probe.py:81-96`, `:117`
+`state_db` is relative; from another cwd `_active_rows` returns `None`, which `_refusal` treats as "no active rows". A file without the `ibs_positions` table raises `sqlite3.OperationalError` and aborts even read-only mode. **Fix:** print "no IBS DB at <abs path>, DB guard not applied"; catch `OperationalError` → `None`; runbook: run from the repo root.
 
-### IN-05: Test fragility
-**File:** `tests/ibs/test_dispatch.py:69`, `tests/ibs/test_operator_tooling.py:93-106`, `tests/safety/test_logger.py` (new tests)
-- `Path("rules.json")` is cwd-relative; use the `parents[2]` pattern used elsewhere.
-- `test_live_1lot_buys_then_sells_one_share` uses wall-clock `datetime.now(ET)` (flaky across an ET midnight) and leaks `tempfile.mkdtemp` dirs.
-- The new `test_logger` tests leave the root logger pointed at a deleted tmp dir for later tests; no test pins CR-01/CR-02 behaviour, and `test_service.py:330` pins the NEEDS_ATTENTION-on-any-exception behaviour that CR-01 argues against.
+### IN-10: Settle-by-status treats a terminal order with `dealt_qty == 0` as unfilled even when the status is FILLED_ALL
+**File:** `bot/ibs/service.py:468-473`
+Broker lag with `dealt_qty` not yet populated on a `FILLED_ALL` order → entry `ABORTED` with shares held (see WR-07) or exit `OPEN` (self-corrects via reconcile; the entry does not). **Fix:** for `FILLED_ALL`, take filled qty from the order's `qty` when `dealt_qty` is 0.
+
+### IN-11: Documented ceiling confirmed, not a regression
+**File:** `bot/ibs/execution.py:76-79`, `bot/options/execution.py:117-118`
+If the deadline's `wait_for` cancellation lands during a re-price `place_order` thread call, the thread still places the order; `_work` settles on the previous (dead) order; the new order is untracked until DAY TIF expiry / next reconcile / the WR-07 alert. Window is small (an order only starts with ≥ `worst_case_order_s` remaining; margin 30 s). **Fix:** none required beyond WR-07; optionally log `ibs_order_settled_after_error` when the exception was a `TimeoutError` and `placed` had more than one id.
 
 ---
-_Reviewed: 2026-10-04_
-_Reviewer: Claude (gsd-code-reviewer, sonnet, standard depth; report transcribed by the orchestrator because the reviewer harness cannot write .md files)_
+_Reviewed: 2026-10-04 (iteration 2)_
+_Reviewer: Claude (gsd-code-reviewer, sonnet, standard depth; transcribed by the orchestrator because the reviewer harness cannot write .md files)_
