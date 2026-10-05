@@ -253,3 +253,96 @@ def test_no_time_skips_entries(env, set_now, monkeypatch):
     assert env.buys() == []
     assert any(ev == "ibs_entry_skipped" and kw.get("reason") == "no_time"
                for ev, kw in logged)
+
+
+# ============================================================
+# Task 2: hard-cancel sweep
+# ============================================================
+
+def _order(store, oid, code="US.XLU", status="WORKING", day="2026-10-05"):
+    store.insert_order({"order_id": oid, "position_id": "P-" + oid, "code": code,
+                        "side": "BUY", "qty": 5, "status": status,
+                        "session_date": day, "created_at": "x"})
+
+
+def _status(store, oid):
+    return next(o["status"] for o in store.get_orders(
+        ("WORKING", "CANCELLED", "CANCEL_FAILED", "DONE")) if o["order_id"] == oid)
+
+
+def test_sweep_cancels_every_working_order(env):
+    _order(env.store, "O1")
+    _order(env.store, "O0", day="2026-10-02")
+    _order(env.store, "O2", status="DONE")
+    n = _run(env.bot._sweep_orders("hard_cancel"))
+    assert n == 2
+    assert [c.args[0] for c in env.gw.cancel_order.await_args_list] == ["O1", "O0"]
+    assert _status(env.store, "O1") == _status(env.store, "O0") == "CANCELLED"
+    assert _status(env.store, "O2") == "DONE"
+    ev = [a for a in env.audits if a["event"] == "ibs_order_cancel"]
+    assert {a["order_id"] for a in ev} == {"O1", "O0"} and all(
+        a["reason"] == "hard_cancel" for a in ev)
+
+
+def test_sweep_cancel_failure_marks_and_alerts(env):
+    _order(env.store, "O1")
+    _order(env.store, "O0")
+
+    async def cancel(oid):
+        if oid == "O1":
+            raise RuntimeError("secret broker text")
+    env.gw.cancel_order.side_effect = cancel
+    _run(env.bot._sweep_orders("hard_cancel"))
+    assert _status(env.store, "O1") == "CANCEL_FAILED"
+    assert _status(env.store, "O0") == "CANCELLED"
+    al = _alerts(env.bot)
+    assert len(al) == 1 and "IBS cancel FAILED" in al[0] and "O1" in al[0]
+    assert "secret" not in al[0]
+    assert any(a["event"] == "ibs_order_cancel_failed" for a in env.audits)
+
+
+def test_hard_cancel_non_trading_day(env, set_now):
+    _order(env.store, "O1")
+    set_now(datetime(2026, 10, 4, 15, 59, tzinfo=ET))
+    _run(env.bot._job_hard_cancel())
+    env.gw.cancel_order.assert_not_awaited()
+
+
+def test_hard_cancel_cancels_running_decision_first(env, set_now):
+    _order(env.store, "O1")
+    set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
+
+    async def scenario():
+        async def never():
+            await asyncio.sleep(3600)
+        env.bot._decision_task = asyncio.create_task(never())
+        await asyncio.sleep(0)
+        task = env.bot._decision_task
+        await env.bot._job_hard_cancel()
+        return task
+    task = _run(scenario())
+    assert task.cancelled()
+    assert any(a["event"] == "ibs_decision_cancelled" for a in env.audits)
+    env.gw.cancel_order.assert_awaited_once_with("O1")
+
+
+def test_hard_cancel_nothing_to_do(env, set_now):
+    set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
+    _run(env.bot._job_hard_cancel())
+    env.gw.cancel_order.assert_not_awaited()
+    assert _alerts(env.bot) == []
+
+
+def test_hard_cancel_swallows_error_but_not_cancellation(env, set_now, monkeypatch):
+    set_now(datetime(2026, 10, 5, 15, 59, tzinfo=ET))
+
+    async def boom(reason):
+        raise RuntimeError("x")
+    monkeypatch.setattr(env.bot, "_sweep_orders", boom)
+    _run(env.bot._job_hard_cancel())  # swallowed
+
+    async def cancelled(reason):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(env.bot, "_sweep_orders", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        _run(env.bot._job_hard_cancel())
