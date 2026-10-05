@@ -67,6 +67,12 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
+    <!-- ExitTimeOut: seconds launchd waits after SIGTERM before SIGKILL (default 20). -->
+    <!-- The graceful stop cancels the decision and sweeps orders; each status read   -->
+    <!-- can back off ~9 s on the rate limit, so 20 s can cut it short.               -->
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
+
     <!-- ============================================================ -->
     <!-- Environment variables (D-05/D-13)                            -->
     <!-- Paper-safety flags are HARDCODED here (T-05-04-SAFE).        -->
