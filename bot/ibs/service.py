@@ -297,10 +297,22 @@ class IbsBot:
             _logger.warning("ibs_reconcile_mismatch", position_id=pid, code=code,
                             expected=expected, broker=actual)
 
-        # D-12: somebody else's holdings on the shared account — log only.
+        # D-12: a universe holding with no active row is never traded or adopted.
+        # WR-07: it may be ours (a BUY recorded as not placed / unfilled that did
+        # reach OpenD, or an orphan re-price order), so alert once per code per session.
         active = {r["code"] for r in self._store.get_positions(ACTIVE_STATUSES)}
         external = [c for c in self._cfg.universe if broker.get(c, 0) != 0 and c not in active]
         _logger.info("ibs_reconcile_external_ignored", count=len(external), codes=external)
+        day = now_et().date().isoformat()
+        for code in external:
+            key = f"ibs_unmanaged_alerted:{code}"
+            if self._store.get_meta(key) == day:
+                continue
+            self._store.set_meta(key, day)
+            await self._alerter.send(
+                f"<b>IBS unmanaged holding</b> {_esc(code)} — broker holds "
+                f"{_esc(broker[code])} with no IBS row; not traded by this bot. If it is "
+                f"not yours elsewhere, check moomoo for a position/order.")
         return broker
 
     # --------------------------------------------------------
@@ -621,8 +633,8 @@ class IbsBot:
                     close_reason="entry_place_failed")
                 append_audit({"event": "ibs_entry_not_placed", "position_id": pid, "code": code})
                 await self._alerter.send(
-                    f"<b>IBS entry not placed</b> {_esc(code)} — no order reached the "
-                    f"broker; skipped today.")
+                    f"<b>IBS entry not placed</b> {_esc(code)} — no order confirmed at the "
+                    f"broker; skipped today; check moomoo for a position/order.")
                 continue
             except BaseException as exc:
                 await self._flag_unknown(pid, code, "entry")
