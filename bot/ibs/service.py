@@ -425,3 +425,59 @@ class IbsBot:
             if int(filled) < qty:
                 msg += f" — partial {_esc(filled)}/{_esc(qty)}"
             await self._alerter.send(msg)
+
+    # --------------------------------------------------------
+    # Hard-cancel sweep (D-09)
+    # --------------------------------------------------------
+
+    async def _sweep_orders(self, reason) -> int:
+        """Cancel every WORKING ibs_orders row (any session); returns rows processed.
+
+        D-09 primary mechanism; the DAY time-in-force at the broker is only the
+        backstop (Pitfall 9). A cancel of an order that has just filled fails, which
+        is the safe side: it is marked CANCEL_FAILED and alerted for manual review.
+        """
+        n = 0
+        for row in self._store.get_orders(("WORKING",)):
+            oid, code = row["order_id"], row["code"]
+            n += 1
+            try:
+                await self._gateway.cancel_order(oid)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.error("ibs_order_cancel_failed", order_id=oid, code=code, exc_info=True)
+                self._store.set_order_status(oid, "CANCEL_FAILED")
+                append_audit({"event": "ibs_order_cancel_failed", "order_id": oid,
+                              "code": code, "reason": reason})
+                await self._alerter.send(
+                    f"<b>IBS cancel FAILED</b> order {_esc(oid)} {_esc(code)} — "
+                    f"cancel it in moomoo before the close.")
+                continue
+            self._store.set_order_status(oid, "CANCELLED")
+            append_audit({"event": "ibs_order_cancel", "order_id": oid,
+                          "code": code, "reason": reason})
+        return n
+
+    async def _job_hard_cancel(self) -> None:
+        """close - 1 min: cancel an in-flight decision, then every WORKING order (D-09)."""
+        today = now_et().date()
+        if not is_trading_day(today):
+            _logger.info("ibs_hard_cancel_skipped", reason="not_trading_day")
+            return
+        try:
+            task = self._decision_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                _logger.warning("ibs_decision_cancelled", date=today.isoformat())
+                append_audit({"event": "ibs_decision_cancelled", "date": today.isoformat()})
+            n = await self._sweep_orders("hard_cancel")
+            _logger.info("ibs_hard_cancel_done", cancelled=n)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("ibs_hard_cancel_error", exc_info=True)
