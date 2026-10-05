@@ -60,6 +60,10 @@ _DECISION_META_KEY = "ibs_decision_date"
 # Helpers
 # ============================================================
 
+class OrderNotPlaced(Exception):
+    """_work failed before any order reached the broker: nothing is exposed (CR-01)."""
+
+
 def _esc(value) -> str:
     """HTML-escape any value for interpolation into an alert body (T-12-06)."""
     return html.escape(str(value))
@@ -359,9 +363,15 @@ class IbsBot:
     async def _work(self, side, row, qty, last, deadline):
         """Work one order via IbsExecutor, recording every placed order id (T-12-03d).
 
-        Exceptions propagate: their orders stay WORKING for the hard-cancel sweep.
+        Raises OrderNotPlaced when it failed before any order was placed (e.g.
+        place_order raised: rate limit, buying power) — nothing is exposed.
+        Any other exception means an order was placed and its state is unknown:
+        its rows stay WORKING for the hard-cancel sweep.
         """
+        placed = []
+
         async def on_placed(order_id):
+            placed.append(str(order_id))
             self._store.insert_order({
                 "order_id": str(order_id), "position_id": row["position_id"],
                 "code": row["code"], "side": side, "qty": int(qty), "status": "WORKING",
@@ -369,13 +379,31 @@ class IbsBot:
                 "created_at": now_et().isoformat(),
             })
 
-        result = await self._executor.work(
-            side, row["code"], qty, last, deadline, on_placed=on_placed)
+        try:
+            result = await self._executor.work(
+                side, row["code"], qty, last, deadline, on_placed=on_placed)
+        except Exception as exc:
+            if not placed:
+                raise OrderNotPlaced(f"{side} {row['code']}: no order placed") from exc
+            raise
         ids = self._store.close_working_orders(row["position_id"])
         append_audit({"event": "ibs_order_done", "position_id": row["position_id"],
                       "code": row["code"], "side": side, "order_ids": ids,
                       "filled_qty": result[2] if result else 0})
         return result
+
+    async def _flag_unknown(self, pid, code, what) -> None:
+        """An order was placed and its outcome is unknown: NEEDS_ATTENTION (D-11).
+
+        The DB write comes first so a second cancellation during the alert
+        cannot leave the row OPENING/CLOSING.
+        """
+        _logger.error(f"ibs_{what}_unknown", code=code, exc_info=True)
+        self._store.set_position_status(pid, "NEEDS_ATTENTION")
+        append_audit({"event": f"ibs_{what}_unknown", "position_id": pid, "code": code})
+        await self._alerter.send(
+            f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — {_esc(what)} order state unknown; "
+            f"cancel any working order for it in moomoo, then reconcile manually.")
 
     async def _run_exits(self, today, deadline, quotes) -> set:
         """D-04: work rule-decided exits sequentially (Pitfall 7); returns attempted codes.
@@ -416,13 +444,18 @@ class IbsBot:
             self._store.set_position_status(pid, "CLOSING")
             try:
                 result = await self._work("SELL", row, qty, quote["last"], deadline)
-            except Exception:
-                _logger.error("ibs_exit_unknown", code=code, exc_info=True)
-                self._store.set_position_status(pid, "NEEDS_ATTENTION")
-                append_audit({"event": "ibs_exit_unknown", "position_id": pid, "code": code})
+            except OrderNotPlaced:
+                _logger.error("ibs_exit_not_placed", code=code, exc_info=True)
+                self._store.set_position_status(pid, "OPEN")  # exit_pending kept
+                append_audit({"event": "ibs_exit_not_placed", "position_id": pid, "code": code})
                 await self._alerter.send(
-                    f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — exit order state unknown; "
-                    f"cancel any working order for it in moomoo, then reconcile manually.")
+                    f"<b>IBS exit not placed</b> {_esc(code)} — no order reached the "
+                    f"broker; retried next session.")
+                continue
+            except BaseException as exc:
+                await self._flag_unknown(pid, code, "exit")
+                if not isinstance(exc, Exception):
+                    raise  # CancelledError: row flagged first
                 continue
 
             filled = int(result[2]) if result else 0
@@ -501,15 +534,20 @@ class IbsBot:
             pid = row["position_id"]
             try:
                 result = await self._work("BUY", row, qty, last, deadline)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _logger.error("ibs_entry_unknown", code=code, exc_info=True)
-                self._store.set_position_status(pid, "NEEDS_ATTENTION")
-                append_audit({"event": "ibs_entry_unknown", "position_id": pid, "code": code})
+            except OrderNotPlaced:
+                _logger.error("ibs_entry_not_placed", code=code, exc_info=True)
+                self._store.set_position_status(
+                    pid, "ABORTED", closed_at=now_et().isoformat(),
+                    close_reason="entry_place_failed")
+                append_audit({"event": "ibs_entry_not_placed", "position_id": pid, "code": code})
                 await self._alerter.send(
-                    f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — entry order outcome "
-                    f"unknown; check moomoo.")
+                    f"<b>IBS entry not placed</b> {_esc(code)} — no order reached the "
+                    f"broker; skipped today.")
+                continue
+            except BaseException as exc:
+                await self._flag_unknown(pid, code, "entry")
+                if not isinstance(exc, Exception):
+                    raise  # CancelledError: row flagged first
                 continue
             if result is None:  # D-09: unfilled entry is skipped today, no carry-over
                 self._store.set_position_status(

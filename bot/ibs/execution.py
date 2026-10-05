@@ -16,8 +16,9 @@ D-09: work() is bounded by asyncio.wait_for to the hard-cancel deadline. On time
 fill_leg's shielded cancel removes the resting order and TimeoutError propagates.
 
 Return contract (inherited from fill_leg): (order_id, avg_price, filled_qty) on a full
-or TTL-partial fill, None when nothing filled (or the deadline already passed), and
-every exception means "exposure unknown" — the caller flags NEEDS_ATTENTION.
+or TTL-partial fill, None when nothing filled (or the deadline already passed). An
+exception after on_placed fired means "exposure unknown"; one before it (place_order
+raised) placed nothing — the service tells the two apart (CR-01).
 
 Pitfall 7: callers work orders SEQUENTIALLY, never in parallel (broker rate limits are
 shared with the options bot).
