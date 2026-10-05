@@ -29,22 +29,22 @@ def _at(y, mo, d, h=9, mi=0):
 
 
 def _with_started_scheduler(bot, fn):
-    """Run fn() with the scheduler started paused; return fn's result."""
+    """Run fn() with the scheduler started paused; return (result, {job_id: job}).
+
+    Jobs are captured before shutdown (shutdown clears the job store).
+    """
     async def go():
         bot._scheduler.start(paused=True)
         try:
-            return fn()
+            result = fn()
+            return result, {j.id: j for j in bot._scheduler.get_jobs()}
         finally:
             bot._scheduler.shutdown(wait=False)
     return _run(go())
 
 
-def _jobs(bot):
-    return {j.id: j for j in bot._scheduler.get_jobs()}
-
-
-def _times(bot):
-    return {i: j.trigger.run_date.strftime("%Y-%m-%d %H:%M") for i, j in _jobs(bot).items()}
+def _times(jobs):
+    return {i: j.trigger.run_date.strftime("%Y-%m-%d %H:%M") for i, j in jobs.items()}
 
 
 @pytest.fixture
@@ -61,8 +61,8 @@ def audits(monkeypatch):
 def test_arm_normal_day(make_ibs_bot, set_now):
     bot = make_ibs_bot()
     set_now(_at(2026, 10, 5))
-    _with_started_scheduler(bot, bot.arm_today)
-    assert _times(bot) == {
+    _, jobs = _with_started_scheduler(bot, bot.arm_today)
+    assert _times(jobs) == {
         "ibs_decide": "2026-10-05 15:50",
         "ibs_hard_cancel": "2026-10-05 15:59",
         "ibs_eod": "2026-10-05 16:05",
@@ -72,8 +72,8 @@ def test_arm_normal_day(make_ibs_bot, set_now):
 def test_arm_half_day(make_ibs_bot, set_now):
     bot = make_ibs_bot()
     set_now(_at(2026, 11, 27))
-    _with_started_scheduler(bot, bot.arm_today)
-    assert _times(bot) == {
+    _, jobs = _with_started_scheduler(bot, bot.arm_today)
+    assert _times(jobs) == {
         "ibs_decide": "2026-11-27 12:50",
         "ibs_hard_cancel": "2026-11-27 12:59",
         "ibs_eod": "2026-11-27 13:05",
@@ -84,16 +84,16 @@ def test_arm_half_day(make_ibs_bot, set_now):
 def test_arm_non_trading_day(make_ibs_bot, set_now, day):
     bot = make_ibs_bot()
     set_now(_at(*day))
-    armed = _with_started_scheduler(bot, bot.arm_today)
+    armed, jobs = _with_started_scheduler(bot, bot.arm_today)
     assert armed == []
-    assert _jobs(bot) == {}
+    assert jobs == {}
 
 
 def test_arm_skips_passed_slot(make_ibs_bot, set_now):
     bot = make_ibs_bot()
     set_now(_at(2026, 10, 5, 15, 55))
-    _with_started_scheduler(bot, bot.arm_today)
-    assert set(_jobs(bot)) == {"ibs_hard_cancel", "ibs_eod"}
+    _, jobs = _with_started_scheduler(bot, bot.arm_today)
+    assert set(jobs) == {"ibs_hard_cancel", "ibs_eod"}
 
 
 def test_arm_twice_is_idempotent(make_ibs_bot, set_now):
@@ -104,16 +104,16 @@ def test_arm_twice_is_idempotent(make_ibs_bot, set_now):
         bot.arm_today()
         bot.arm_today()
 
-    _with_started_scheduler(bot, twice)
-    assert sorted(j.id for j in bot._scheduler.get_jobs()) == [
-        "ibs_decide", "ibs_eod", "ibs_hard_cancel"]
+    _, jobs = _with_started_scheduler(bot, twice)
+    assert sorted(jobs) == ["ibs_decide", "ibs_eod", "ibs_hard_cancel"]
 
 
 def test_armed_job_options(make_ibs_bot, set_now, ibs_cfg):
     bot = make_ibs_bot()
     set_now(_at(2026, 10, 5))
-    _with_started_scheduler(bot, bot.arm_today)
-    for job in _jobs(bot).values():
+    _, jobs = _with_started_scheduler(bot, bot.arm_today)
+    assert len(jobs) == 3
+    for job in jobs.values():
         assert job.coalesce is True
         assert job.max_instances == 1
         assert job.misfire_grace_time == ibs_cfg.misfire_grace_s
@@ -127,8 +127,7 @@ def test_register_jobs_no_force_close(make_ibs_bot, set_now):
         bot._register_jobs()
         bot.arm_today()
 
-    _with_started_scheduler(bot, both)
-    jobs = _jobs(bot)
+    _, jobs = _with_started_scheduler(bot, both)
     assert set(jobs) <= JOB_IDS
     assert not any("force" in i for i in jobs)
     trig = jobs["ibs_arm"].trigger

@@ -20,12 +20,16 @@ Exports: IbsBot
 """
 import asyncio
 import html
+import math
+import os
 import sqlite3
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from bot.ibs.execution import IbsExecutor
 from bot.ibs.store import ACTIVE_STATUSES
@@ -36,6 +40,7 @@ from bot.safety.audit_log import append_audit
 from bot.safety.et_helpers import now_et
 from bot.safety.logger import get_logger
 from bot.scanner.calendar import get_market_close_et, is_trading_day, trading_days_between
+from bot.service.report import write_reports
 
 _logger = get_logger(__name__)
 
@@ -77,6 +82,92 @@ def _rows(data) -> list:
     if hasattr(data, "iterrows"):
         return [row.to_dict() for _, row in data.iterrows()]
     return list(data)
+
+
+def _marks(rows) -> dict:
+    """{code: last_price} for finite positive prices — a report mark only.
+
+    Deliberately NOT the decision-grade parse_snapshot gate: a stale mark on an
+    EOD report is harmless, a missing one just renders "n/a".
+    """
+    out = {}
+    for row in rows:
+        try:
+            price = float(row.get("last_price"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price) and price > 0:
+            out[str(row.get("code"))] = price
+    return out
+
+
+def _fmt_eod(strategy_name, date_str, open_rows, marks, trades_today,
+             realized, unrealized) -> str:
+    """Telegram body for the EOD summary (every field escaped, T-12-06)."""
+    lines = [
+        f"<b>IBS EOD</b> {_esc(strategy_name)} {_esc(date_str)}",
+        f"open {_esc(len(open_rows))} | closed today {_esc(len(trades_today))} "
+        f"| realized ${_esc(_signed(realized))} | unrealized ${_esc(_signed(unrealized))}",
+    ]
+    for r in open_rows:
+        mark = marks.get(r["code"])
+        line = (f"{_esc(r['code'])} {_esc(r['qty'])} @ {_esc(r.get('entry_price'))} "
+                f"since {_esc(r.get('entry_date'))} mark "
+                f"{_esc(mark if mark is not None else 'n/a')} {_esc(r.get('status'))}")
+        if r.get("exit_pending"):
+            line += " exit pending"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _ibs_html(strategy_name, date_str, open_rows, marks, trades_today,
+              realized, unrealized) -> str:
+    """Self-contained EOD HTML document: no JS, no CDN, every cell escaped."""
+    def _cells(values):
+        return "".join(f"<td>{_esc(v)}</td>" for v in values)
+
+    def _unreal(r):
+        mark = marks.get(r["code"])
+        if mark is None or r.get("entry_price") is None:
+            return "n/a"
+        return _signed((mark - float(r["entry_price"])) * int(r["qty"]))
+
+    open_html = "".join(
+        "<tr>" + _cells([
+            r["code"], r["qty"], r.get("entry_price"), r.get("entry_date"),
+            marks.get(r["code"], "n/a"), _unreal(r),
+            f"{r.get('status')}{' (exit pending)' if r.get('exit_pending') else ''}",
+        ]) + "</tr>"
+        for r in open_rows
+    ) or "<tr><td colspan='7'>none</td></tr>"
+
+    closed_html = "".join(
+        "<tr>" + _cells([
+            t["code"], t["qty"], t.get("entry_price"), t.get("exit_price"),
+            t.get("reason"), _signed(t.get("pnl_usd") or 0.0),
+        ]) + "</tr>"
+        for t in trades_today
+    ) or "<tr><td colspan='6'>none</td></tr>"
+
+    return (
+        "<!DOCTYPE html>\n<html><head><meta charset='utf-8'>"
+        f"<title>IBS - {_esc(date_str)}</title>\n"
+        "<style>\n"
+        "  body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; }\n"
+        "  h1, h2 { color: #58a6ff; }\n"
+        "  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }\n"
+        "  th { background: #161b22; text-align: left; padding: 6px 12px; }\n"
+        "  td { padding: 4px 12px; border-bottom: 1px solid #21262d; }\n"
+        "</style></head><body>\n"
+        f"<h1>{_esc(strategy_name)} - {_esc(date_str)}</h1>\n"
+        f"<p>open {_esc(len(open_rows))} | closed today {_esc(len(trades_today))} | "
+        f"realized ${_esc(_signed(realized))} | unrealized ${_esc(_signed(unrealized))}</p>\n"
+        "<h2>Open</h2><table><tr><th>Code</th><th>Qty</th><th>Entry</th><th>Entry date</th>"
+        f"<th>Mark</th><th>Unrealized</th><th>Status</th></tr>{open_html}</table>\n"
+        "<h2>Closed today</h2><table><tr><th>Code</th><th>Qty</th><th>Entry</th><th>Exit</th>"
+        f"<th>Reason</th><th>P&amp;L</th></tr>{closed_html}</table>\n"
+        "</body></html>\n"
+    )
 
 
 # ============================================================
@@ -481,3 +572,114 @@ class IbsBot:
             raise
         except Exception:
             _logger.error("ibs_hard_cancel_error", exc_info=True)
+
+    # --------------------------------------------------------
+    # Job registration + daily arming (D-07, ruling 8)
+    # --------------------------------------------------------
+
+    def _register_jobs(self) -> None:
+        """Register the daily ibs_arm cron. D-06: no force-close job, ever."""
+        hour, minute = _parse_hhmm(self._cfg.arm_time_et)
+        self._scheduler.add_job(
+            self._job_arm, CronTrigger(hour=hour, minute=minute, timezone=_ET),
+            id="ibs_arm", coalesce=True, max_instances=1,
+            misfire_grace_time=self._cfg.misfire_grace_s, replace_existing=True,
+        )
+        _logger.info("ibs_jobs_registered", job_ids=["ibs_arm"])
+
+    def arm_today(self) -> list:
+        """Arm today's one-shot decide / hard-cancel / EOD jobs from the NYSE close.
+
+        Must run AFTER scheduler.start(): a pending job is not deduplicated by
+        replace_existing. DateTriggers (not cron) because half-day closes move
+        the times. A slot already in the past is skipped, so a mid-day restart
+        after the decision time makes no decision today. There is deliberately
+        no force-close job (D-06). Returns the armed (job_id, run_at) pairs.
+        """
+        now = now_et()
+        today = now.date()
+        if not is_trading_day(today):
+            _logger.info("ibs_arm_skipped", reason="not_trading_day", date=today.isoformat())
+            return []
+        cfg = self._cfg
+        close = _close_dt(today)
+        slots = (
+            ("ibs_decide", self._job_decide, close - timedelta(minutes=cfg.decision_before_close_min)),
+            ("ibs_hard_cancel", self._job_hard_cancel, close - timedelta(minutes=cfg.hard_cancel_before_close_min)),
+            ("ibs_eod", self._job_eod, close + timedelta(minutes=cfg.eod_report_after_close_min)),
+        )
+        armed = []
+        for job_id, fn, run_at in slots:
+            if run_at <= now:
+                _logger.info("ibs_job_slot_passed", job_id=job_id, run_at=run_at.isoformat())
+                continue
+            self._scheduler.add_job(
+                fn, DateTrigger(run_date=run_at, timezone=_ET), id=job_id,
+                coalesce=True, max_instances=1,
+                misfire_grace_time=cfg.misfire_grace_s, replace_existing=True,
+            )
+            armed.append((job_id, run_at))
+        _logger.info("ibs_jobs_armed", date=today.isoformat(),
+                     jobs={j: t.isoformat() for j, t in armed})
+        return armed
+
+    async def _job_arm(self) -> None:
+        """Daily cron body (async so APScheduler runs it on the loop)."""
+        try:
+            self.arm_today()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("ibs_arm_error", exc_info=True)
+
+    # --------------------------------------------------------
+    # EOD (D-14)
+    # --------------------------------------------------------
+
+    async def _job_eod(self) -> None:
+        """close + 5 min: reconcile, one snapshot for marks, Telegram + HTML report."""
+        try:
+            today = now_et().date()
+            if not is_trading_day(today):
+                _logger.info("ibs_eod_skipped", reason="not_trading_day")
+                return
+            try:
+                await self.reconcile()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.error("ibs_eod_reconcile_error", exc_info=True)
+
+            marks = {}
+            try:
+                ret, data = await self._gateway.get_market_snapshot(list(self._cfg.universe))
+                if ret == _RET_OK:
+                    marks = _marks(_rows(data))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.error("ibs_eod_snapshot_error", exc_info=True)
+
+            day = today.isoformat()
+            open_rows = self._store.get_positions(("OPEN", "NEEDS_ATTENTION"))
+            unrealized = sum(
+                (marks[r["code"]] - float(r["entry_price"])) * int(r["qty"])
+                for r in open_rows
+                if r["code"] in marks and r.get("entry_price") is not None
+            )
+            trades = self._store.get_trades_on(day)
+            realized = self._store.get_realized_pnl_on(day)
+            name = self._cfg.strategy_name
+
+            await self._alerter.send(
+                _fmt_eod(name, day, open_rows, marks, trades, realized, unrealized))
+            # write_reports' own mkdir is not recursive ("reports/ibs").
+            os.makedirs(self._cfg.report_dir, exist_ok=True)
+            write_reports(
+                _ibs_html(name, day, open_rows, marks, trades, realized, unrealized),
+                day, report_dir=self._cfg.report_dir)
+            _logger.info("ibs_eod_done", date=day)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("ibs_eod_error", exc_info=True)
