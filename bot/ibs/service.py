@@ -191,3 +191,150 @@ class IbsBot:
         external = [c for c in self._cfg.universe if broker.get(c, 0) != 0 and c not in active]
         _logger.info("ibs_reconcile_external_ignored", count=len(external), codes=external)
         return broker
+
+    # --------------------------------------------------------
+    # Daily decision job
+    # --------------------------------------------------------
+
+    def _deadline(self, day) -> datetime:
+        """Hard-cancel time: no order is worked past close - hard_cancel_before_close_min."""
+        return _close_dt(day) - timedelta(minutes=self._cfg.hard_cancel_before_close_min)
+
+    async def _job_decide(self) -> None:
+        """Run the once-per-day decision (D-07: idempotent across restarts / double fires)."""
+        now = now_et()
+        today = now.date()
+        reason = None
+        if not is_trading_day(today):
+            reason = "not_trading_day"
+        elif not self._entries_enabled:
+            reason = "entries_disabled"
+        elif self._kill_switch.triggered:
+            reason = "kill_switch"
+        elif self._store.get_meta(_DECISION_META_KEY) == today.isoformat():
+            reason = "already_decided"
+        elif now >= self._deadline(today):
+            # Ruling 8: defence in depth for a misfired job inside the grace window.
+            reason = "past_deadline"
+        if reason is not None:
+            _logger.info("ibs_decision_skipped", reason=reason, date=today.isoformat())
+            return
+
+        # D-07: the meta key is written BEFORE any broker call.
+        self._store.set_meta(_DECISION_META_KEY, today.isoformat())
+        self._decision_task = asyncio.create_task(self._decide(today, self._deadline(today)))
+        try:
+            await self._decision_task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.error("ibs_decision_error", exc_info=True, date=today.isoformat())
+            append_audit({"event": "ibs_decision_error", "date": today.isoformat()})
+            # Never interpolate exception or broker text into an alert (T-12-06).
+            await self._alerter.send(
+                f"<b>IBS decision error</b> {_esc(today)} — see logs/ibs.log"
+            )
+        finally:
+            self._decision_task = None
+
+    async def _decide(self, today, deadline):
+        """reconcile -> ONE batched snapshot -> exits. Plan 08 appends the entry batch."""
+        await self.reconcile()
+        ret, data = await self._gateway.get_market_snapshot(list(self._cfg.universe))
+        if ret != _RET_OK:
+            raise RuntimeError("ibs snapshot failed")
+        quotes, skipped = parse_snapshot(_rows(data), now_et(), self._cfg.max_snapshot_age_s)
+        for code, why in skipped.items():
+            _logger.info("ibs_snapshot_skipped", code=code, reason=why)
+        _logger.info("ibs_snapshot_parsed", valid=len(quotes), skipped=len(skipped))
+        exited = await self._run_exits(today, deadline, quotes)
+        return quotes, exited
+
+    async def _work(self, side, row, qty, last, deadline):
+        """Work one order via IbsExecutor, recording every placed order id (T-12-03d).
+
+        Exceptions propagate: their orders stay WORKING for the hard-cancel sweep.
+        """
+        async def on_placed(order_id):
+            self._store.insert_order({
+                "order_id": str(order_id), "position_id": row["position_id"],
+                "code": row["code"], "side": side, "qty": int(qty), "status": "WORKING",
+                "session_date": now_et().date().isoformat(),
+                "created_at": now_et().isoformat(),
+            })
+
+        result = await self._executor.work(
+            side, row["code"], qty, last, deadline, on_placed=on_placed)
+        ids = self._store.close_working_orders(row["position_id"])
+        append_audit({"event": "ibs_order_done", "position_id": row["position_id"],
+                      "code": row["code"], "side": side, "order_ids": ids,
+                      "filled_qty": result[2] if result else 0})
+        return result
+
+    async def _run_exits(self, today, deadline, quotes) -> set:
+        """D-04: work rule-decided exits sequentially (Pitfall 7); returns attempted codes.
+
+        D-06: nothing here force-closes — only decide_exits output is sold.
+        """
+        rows = self._store.get_positions(("OPEN",))  # D-11: NEEDS_ATTENTION never traded
+        if not rows:
+            return set()
+        by_code = {r["code"]: r for r in rows}
+        entry = {c: datetime.strptime(r["entry_date"], "%Y-%m-%d").date()
+                 for c, r in by_code.items()}
+        sessions = trading_days_between(min(entry.values()), today)
+        held = {c: trading_days_held(d, today, sessions) for c, d in entry.items()}
+        pending = {c for c, r in by_code.items() if r.get("exit_pending")}
+        ibs = {c: q["ibs"] for c, q in quotes.items()}
+        exits = decide_exits(list(by_code), ibs, held, pending, self._cfg)
+
+        for code, reason in exits:
+            row = by_code[code]
+            pid = row["position_id"]
+            self._store.mark_exit_pending(pid, reason, today.isoformat())
+            if self._kill_switch.triggered:
+                break  # pending persists; retried next session
+            quote = quotes.get(code)
+            if quote is None:
+                await self._alerter.send(
+                    f"<b>IBS exit deferred</b> {_esc(code)} — no valid quote; "
+                    f"retried next session.")
+                continue
+            if (deadline - now_et()).total_seconds() < self._cfg.worst_case_order_s:
+                await self._alerter.send(
+                    f"<b>IBS exit deferred</b> {_esc(code)} — no time left; "
+                    f"retried next session.")
+                continue
+            shown = row.get("exit_reason") or reason
+            qty = int(row["qty"])
+            self._store.set_position_status(pid, "CLOSING")
+            try:
+                result = await self._work("SELL", row, qty, quote["last"], deadline)
+            except Exception:
+                _logger.error("ibs_exit_unknown", code=code, exc_info=True)
+                self._store.set_position_status(pid, "NEEDS_ATTENTION")
+                append_audit({"event": "ibs_exit_unknown", "position_id": pid, "code": code})
+                await self._alerter.send(
+                    f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — exit order state unknown; "
+                    f"cancel any working order for it in moomoo, then reconcile manually.")
+                continue
+
+            filled = int(result[2]) if result else 0
+            if filled <= 0:
+                self._store.set_position_status(pid, "OPEN")
+                await self._alerter.send(
+                    f"<b>IBS exit unfilled</b> {_esc(code)} — retried next session.")
+                continue
+            avg = float(result[1])
+            remaining = self._store.record_exit_fill(
+                pid, uuid4().hex, filled, avg, today.isoformat(), now_et().isoformat())
+            if remaining > 0:
+                await self._alerter.send(
+                    f"<b>IBS exit partial</b> {_esc(code)} {_esc(filled)}/{_esc(qty)} "
+                    f"filled; {_esc(remaining)} retried next session.")
+            else:
+                pnl = (avg - float(row["entry_price"] or 0.0)) * filled
+                await self._alerter.send(
+                    f"<b>IBS exit</b> {_esc(code)} SELL {_esc(filled)} @ {_esc(avg)} "
+                    f"({_esc(shown)}) P&amp;L ${_esc(_signed(pnl))}")
+        return {code for code, _ in exits}
