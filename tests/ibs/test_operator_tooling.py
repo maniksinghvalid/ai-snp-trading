@@ -84,12 +84,39 @@ def test_probe_is_read_only_and_prints_plan(ibs_cfg, tmp_path, capsys,
     assert not os.path.exists(cfg.state_db)
 
 
-def test_live_1lot_buys_then_sells_one_share(ibs_cfg, monkeypatch, capsys, make_snapshot_row):
+def test_probe_reads_db_read_only_without_migrations(ibs_cfg, tmp_path, capsys, monkeypatch,
+                                                     make_snapshot_row, make_positions_df):
+    """WR-06: the read-only probe never opens the live bot's DB through IbsStore.open()."""
+    from bot.ibs.store import IbsStore
+    db = tmp_path / "ibs_state.db"
+    st = IbsStore(str(db)).open()
+    st.insert_position({"position_id": "P1", "code": "US.XLU", "qty": 5,
+                        "entry_date": "2026-10-01", "status": "OPEN", "opened_at": "x"})
+    st.close()
+    before = db.read_bytes()
     mod = _load_probe()
-    now = datetime.now(ET)
+    monkeypatch.setattr(mod, "IbsStore", MagicMock(side_effect=AssertionError("IbsStore used")))
+    cfg = dataclasses.replace(ibs_cfg, state_db=str(db))
+    gw = MagicMock()
+    gw.get_market_snapshot = AsyncMock(return_value=(0, pd.DataFrame([])))
+    gw.get_positions = AsyncMock(return_value=(0, make_positions_df({"US.XLU": 5})))
+    asyncio.run(mod.probe(cfg, gw, datetime(2026, 10, 5, 15, 45, tzinfo=ET)))
+    out = capsys.readouterr().out
+    assert "US.XLU qty=5 OPEN" in out and "IBS row" in out
+    assert db.read_bytes() == before
+
+
+MON_10 = datetime(2026, 10, 5, 10, 0, tzinfo=ET)
+
+
+def _live_env(ibs_cfg, tmp_path, monkeypatch, make_snapshot_row, make_positions_df,
+              held=None, now=MON_10):
+    """Probe module + mocks for live_1lot; never the wall clock, no leaked temp dirs."""
+    mod = _load_probe()
     row = make_snapshot_row("US.XLU", 100.5, 110.0, 100.0, now.strftime("%Y-%m-%d %H:%M:%S"))
     gw = MagicMock()
     gw.get_market_snapshot = AsyncMock(return_value=(0, pd.DataFrame([row])))
+    gw.get_positions = AsyncMock(return_value=(0, make_positions_df(held or {})))
     calls = []
 
     class FakeExecutor:
@@ -103,9 +130,57 @@ def test_live_1lot_buys_then_sells_one_share(ibs_cfg, monkeypatch, capsys, make_
 
     monkeypatch.setattr(mod, "IbsExecutor", FakeExecutor)
     monkeypatch.setattr(mod, "now_et", lambda: now)
-    asyncio.run(mod.live_1lot(ibs_cfg, gw, "US.XLU", now))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(mod.tempfile, "mkdtemp", lambda **k: str(scratch))
+    cfg = dataclasses.replace(ibs_cfg, state_db=str(tmp_path / "ibs_state.db"))
+    return mod, cfg, gw, calls
+
+
+def test_live_1lot_buys_then_sells_one_share(ibs_cfg, tmp_path, monkeypatch, capsys,
+                                             make_snapshot_row, make_positions_df):
+    mod, cfg, gw, calls = _live_env(ibs_cfg, tmp_path, monkeypatch, make_snapshot_row,
+                                    make_positions_df)
+    asyncio.run(mod.live_1lot(cfg, gw, "US.XLU", MON_10))
     assert calls == [("BUY", "US.XLU", 1), ("SELL", "US.XLU", 1)]
     assert "round-trip friction" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("case", ["not_universe", "held", "active_row", "unreadable", "window"])
+def test_live_1lot_refuses_unsafe_symbol(ibs_cfg, tmp_path, monkeypatch, capsys,
+                                         make_snapshot_row, make_positions_df, case):
+    """WR-06: never shift the share count of a symbol the live bot trades or could trade."""
+    now = datetime(2026, 10, 5, 15, 48, tzinfo=ET) if case == "window" else MON_10
+    mod, cfg, gw, calls = _live_env(
+        ibs_cfg, tmp_path, monkeypatch, make_snapshot_row, make_positions_df,
+        held={"US.XLU": 7} if case == "held" else None, now=now)
+    symbol = "US.AAPL" if case == "not_universe" else "US.XLU"
+    if case == "unreadable":
+        gw.get_positions = AsyncMock(return_value=(-1, None))
+    if case == "active_row":
+        from bot.ibs.store import IbsStore
+        st = IbsStore(cfg.state_db).open()
+        st.insert_position({"position_id": "P1", "code": "US.XLU", "qty": 5,
+                            "entry_date": "2026-10-01", "status": "NEEDS_ATTENTION",
+                            "opened_at": "x"})
+        st.close()
+    assert asyncio.run(mod.live_1lot(cfg, gw, symbol, now)) is False
+    assert calls == []
+    assert "refusing" in capsys.readouterr().out
+
+
+def test_live_1lot_refusal_exits_nonzero(monkeypatch, tmp_path):
+    mod = _load_probe()
+    gw = MagicMock()
+    monkeypatch.setattr(mod, "MoomooGateway", MagicMock(return_value=gw))
+    monkeypatch.setattr(mod, "get_gateway_config", MagicMock())
+    monkeypatch.setattr(mod, "probe", AsyncMock())
+    with pytest.raises(SystemExit) as e:
+        mod.main(["--rules", os.path.join(ROOT, "rules_ibs.json"), "--live-1lot",
+                  "--confirm", "--symbol", "US.AAPL"])
+    assert e.value.code not in (0, None)
+    gw.place_order.assert_not_called()
+    gw.close.assert_called_once()
 
 
 # ============================================================
