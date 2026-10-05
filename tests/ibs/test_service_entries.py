@@ -332,8 +332,8 @@ def test_sweep_reads_status_first_and_skips_dead_orders(env):
     status = {"DEAD": "CANCELLED_ALL", "FILLED": "FILLED_ALL", "LIVE": "SUBMITTED"}
 
     async def order_status(oid):
-        return [{"order_id": oid, "order_status": status[oid], "dealt_qty": 0,
-                 "dealt_avg_price": 0.0}]
+        return [{"order_id": oid, "order_status": status[oid],
+                 "dealt_qty": 5 if oid == "FILLED" else 0, "dealt_avg_price": 0.0}]
 
     async def cancel(oid):
         if oid != "LIVE":

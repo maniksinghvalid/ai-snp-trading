@@ -603,13 +603,21 @@ class IbsBot:
         """Cancel every WORKING ibs_orders row (any session); returns rows processed.
 
         D-09 primary mechanism; the DAY time-in-force at the broker is only the
-        backstop (Pitfall 9). A cancel of an order that has just filled fails, which
-        is the safe side: it is marked CANCEL_FAILED and alerted for manual review.
+        backstop (Pitfall 9). The broker status is read first (WR-03): an order that
+        is already terminal (fill_leg cancelled it, or it filled) is marked without a
+        cancel call. A cancel that still fails is marked CANCEL_FAILED and alerted.
         """
         n = 0
         for row in self._store.get_orders(("WORKING",)):
             oid, code = row["order_id"], row["code"]
             n += 1
+            outcome = await self._order_outcome(oid)
+            if outcome is not None:
+                status = "DONE" if outcome[2] > 0 else "CANCELLED"
+                self._store.set_order_status(oid, status)
+                append_audit({"event": "ibs_order_already_closed", "order_id": oid,
+                              "code": code, "status": status, "reason": reason})
+                continue
             try:
                 await self._gateway.cancel_order(oid)
             except asyncio.CancelledError:
