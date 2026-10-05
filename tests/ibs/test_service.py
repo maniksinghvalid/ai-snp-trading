@@ -148,6 +148,29 @@ def test_external_holdings_ignored(make_ibs_bot, ibs_store, ibs_gateway,
     assert ext and ext[0]["count"] == 1 and ext[0]["codes"] == ["US.XLU"]
 
 
+def test_unmanaged_universe_holding_alerts_once_per_session(
+        make_ibs_bot, ibs_store, ibs_gateway, make_positions_df, set_now):
+    """WR-07: a universe code held at the broker with no active row (e.g. a BUY
+    recorded as not placed that did reach OpenD) alerts once per code per session;
+    it is never traded or adopted (D-12)."""
+    ibs_gateway.get_positions.return_value = (
+        0, make_positions_df({"US.XLU": 100, "US.DIVO": 630}))
+    bot = make_ibs_bot()
+    set_now(datetime(2026, 10, 5, 9, 31, tzinfo=ET))
+    _run(bot.reconcile(startup=True))
+    _run(bot.reconcile())
+    alerts = _alerts(bot)
+    assert len(alerts) == 1
+    assert "US.XLU" in alerts[0] and "check moomoo" in alerts[0]
+    assert "DIVO" not in alerts[0]
+    set_now(datetime(2026, 10, 6, 15, 50, tzinfo=ET))
+    _run(bot.reconcile())
+    assert len(_alerts(bot)) == 2
+    assert ibs_store.get_active_positions() == []
+    for m in ("place_order", "cancel_order"):
+        getattr(ibs_gateway, m).assert_not_awaited()
+
+
 def test_reconcile_query_failure(make_ibs_bot, ibs_store, ibs_gateway):
     ibs_store.insert_position(_row())
     ibs_gateway.get_positions.return_value = (-1, None)

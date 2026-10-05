@@ -241,6 +241,21 @@ def test_entry_place_failure_aborts_and_continues(env):
     assert [(r["code"], r["close_reason"]) for r in ab] == [("US.XLU", "entry_place_failed")]
     assert not any("NEEDS ATTENTION" in a or "secret" in a for a in _alerts(env.bot))
     assert any(a["event"] == "ibs_entry_not_placed" for a in env.audits)
+    # WR-07: a timed-out place may still have reached OpenD; never claim it did not
+    msg = next(a for a in _alerts(env.bot) if "entry not placed" in a)
+    assert "no order confirmed at the broker" in msg and "check moomoo" in msg
+
+
+def test_aborted_entry_that_filled_alerts_and_is_never_traded(env):
+    """WR-07: next session the broker holds a universe code with no active row
+    (the ABORTED BUY did fill): one alert, no BUY and no SELL of it (D-12)."""
+    env.store.insert_position(_row("US.XLU", "A1", 5, status="ABORTED",
+                                   entry_date="2026-10-02", close_reason="entry_place_failed"))
+    env.setup(snap={"US.XLU": 0.05}, held={"US.XLU": 5})
+    env.decide()
+    assert not any(c[1] == "US.XLU" for c in env.calls)
+    held = [a for a in _alerts(env.bot) if "US.XLU" in a]
+    assert len(held) == 1 and "check moomoo" in held[0]
 
 
 def test_entry_exception_needs_attention_and_continues(env):
