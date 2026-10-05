@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from bot.state.migrations import run_migrations, CURRENT_VERSION, MIGRATIONS, _migration_0007
+from bot.state.migrations import run_migrations, CURRENT_VERSION, MIGRATIONS, _migration_0007, _migration_0008
 
 
 # ============================================================
@@ -712,7 +712,7 @@ class TestMigration0007:
         """Fresh DB: strategy_name is NOT NULL DEFAULT 'tasty_credit_spreads'; version==7."""
         run_migrations(in_memory_conn)
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == CURRENT_VERSION == 7 == len(MIGRATIONS)
+        assert version == CURRENT_VERSION == 8 == len(MIGRATIONS)
 
         info = in_memory_conn.execute("PRAGMA table_info(option_positions)").fetchall()
         row = next(r for r in info if r[1] == "strategy_name")
@@ -747,9 +747,100 @@ class TestMigration0007:
         run_migrations(in_memory_conn)
 
         version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == CURRENT_VERSION == 7
+        assert version == CURRENT_VERSION == 8
 
         row = in_memory_conn.execute(
             "SELECT strategy_name FROM option_positions WHERE position_id='legacy-1'"
         ).fetchone()
         assert row[0] == "tasty_credit_spreads"
+
+
+# ============================================================
+# Migration 0008 tests (Phase 12: ibs_positions / ibs_trades / ibs_orders)
+# ============================================================
+
+_IBS_COLUMNS = {
+    "ibs_positions": [
+        "position_id", "code", "qty", "entry_date", "entry_price", "entry_order_id",
+        "status", "exit_pending", "exit_reason", "exit_decided_date", "opened_at",
+        "closed_at", "close_reason", "realized_pnl_usd",
+    ],
+    "ibs_trades": [
+        "trade_id", "position_id", "code", "qty", "entry_price", "exit_price",
+        "exit_date", "reason", "pnl_usd",
+    ],
+    "ibs_orders": [
+        "order_id", "position_id", "code", "side", "qty", "status", "session_date",
+        "created_at",
+    ],
+}
+
+
+def _ins_pos(conn, pid, code, status):
+    conn.execute(
+        "INSERT INTO ibs_positions (position_id, code, qty, entry_date, status) "
+        "VALUES (?, ?, 10, '2026-10-02', ?)", (pid, code, status))
+
+
+class TestMigration0008:
+    """Migration 0008 adds the ibs_* tables and the active-code unique index."""
+
+    def test_fresh_db_version_tables_columns(self, in_memory_conn):
+        run_migrations(in_memory_conn)
+        version = in_memory_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == CURRENT_VERSION == 8 == len(MIGRATIONS)
+        for table, cols in _IBS_COLUMNS.items():
+            info = in_memory_conn.execute(f"PRAGMA table_info({table})").fetchall()
+            assert [r[1] for r in info] == cols
+        info = in_memory_conn.execute("PRAGMA table_info(ibs_positions)").fetchall()
+        row = next(r for r in info if r[1] == "exit_pending")
+        assert row[2] == "INTEGER" and row[3] == 1 and row[4] == "0"
+
+    def test_active_code_index_is_unique(self, in_memory_conn):
+        run_migrations(in_memory_conn)
+        idx = {r[1]: r[2] for r in in_memory_conn.execute("PRAGMA index_list(ibs_positions)")}
+        assert idx.get("ux_ibs_positions_active_code") == 1
+
+    def test_one_active_row_per_code(self, in_memory_conn):
+        run_migrations(in_memory_conn)
+        _ins_pos(in_memory_conn, "a", "US.SPY", "OPEN")
+        with pytest.raises(sqlite3.IntegrityError):
+            _ins_pos(in_memory_conn, "b", "US.SPY", "OPEN")
+
+    def test_active_statuses_collide_across_vocabulary(self, in_memory_conn):
+        run_migrations(in_memory_conn)
+        _ins_pos(in_memory_conn, "a", "US.SPY", "OPENING")
+        with pytest.raises(sqlite3.IntegrityError):
+            _ins_pos(in_memory_conn, "b", "US.SPY", "NEEDS_ATTENTION")
+
+    @pytest.mark.parametrize("terminal", ["CLOSED", "ABORTED"])
+    def test_terminal_row_does_not_block_new_active(self, in_memory_conn, terminal):
+        run_migrations(in_memory_conn)
+        _ins_pos(in_memory_conn, "a", "US.SPY", terminal)
+        _ins_pos(in_memory_conn, "b", "US.SPY", "OPEN")  # must not raise
+
+    def test_double_apply_idempotent(self, in_memory_conn):
+        run_migrations(in_memory_conn)
+        _migration_0008(in_memory_conn)
+        run_migrations(in_memory_conn)
+        n = in_memory_conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='ux_ibs_positions_active_code'"
+        ).fetchone()[0]
+        assert n == 1
+
+    def test_upgrade_from_v7_keeps_existing_rows(self, in_memory_conn):
+        in_memory_conn.executescript(MIGRATIONS[0])
+        for migration in MIGRATIONS[1:7]:
+            migration(in_memory_conn)
+        in_memory_conn.execute("PRAGMA user_version = 7")
+        in_memory_conn.execute(
+            "INSERT INTO option_positions (position_id, underlying, structure, "
+            "expiry, status) VALUES ('legacy-1', 'US.SPY', 'iron_condor', "
+            "'2026-09-18', 'CLOSED')"
+        )
+        in_memory_conn.commit()
+        run_migrations(in_memory_conn)
+        assert in_memory_conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert in_memory_conn.execute(
+            "SELECT COUNT(*) FROM option_positions WHERE position_id='legacy-1'"
+        ).fetchone()[0] == 1

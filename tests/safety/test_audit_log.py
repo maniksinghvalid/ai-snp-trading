@@ -118,3 +118,12 @@ class TestAppendAudit:
         assert set(original.keys()) == original_keys_before, (
             "append_audit mutated the caller's dict"
         )
+
+
+def test_session_audit_log_isolated():
+    """Guards the conftest _isolate_audit_log fixture: tests must never append
+    to the operator's real ~/.futu_trade_audit.jsonl (D-15)."""
+    import bot.safety.audit_log as audit_mod
+    real = os.path.join(os.path.expanduser("~"), ".futu_trade_audit.jsonl")
+    assert audit_mod.AUDIT_LOG_PATH != real
+    assert audit_mod.AUDIT_LOG_PATH.endswith("audit.jsonl")
