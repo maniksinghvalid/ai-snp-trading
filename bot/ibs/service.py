@@ -486,18 +486,23 @@ class IbsBot:
                 return (order_id, float(r.get("dealt_avg_price") or 0.0), dealt)
         return None
 
-    async def _flag_unknown(self, pid, code, what) -> None:
+    async def _flag_unknown(self, pid, code, what, at_close=False) -> None:
         """An order was placed and its outcome is unknown: NEEDS_ATTENTION (D-11).
 
         The DB write comes first so a second cancellation during the alert
-        cannot leave the row OPENING/CLOSING.
+        cannot leave the row OPENING/CLOSING. at_close: called by the hard-cancel
+        job, whose sweep cancels the order itself (IN-06).
         """
-        _logger.error(f"ibs_{what}_unknown", code=code, exc_info=True)
+        _logger.error(f"ibs_{what}_unknown", code=code,
+                      exc_info=sys.exc_info()[0] is not None)
         self._store.set_position_status(pid, "NEEDS_ATTENTION")
         append_audit({"event": f"ibs_{what}_unknown", "position_id": pid, "code": code})
+        tail = ("left mid-order at the close; verify position and orders in moomoo"
+                if at_close else
+                "order state unknown; cancel any working order for it in moomoo")
         await self._alerter.send(
-            f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — {_esc(what)} order state unknown; "
-            f"cancel any working order for it in moomoo, then reconcile manually.")
+            f"<b>IBS NEEDS ATTENTION</b> {_esc(code)} — {_esc(what)} {tail}, "
+            f"then reconcile manually.")
 
     async def _run_exits(self, today, deadline, quotes) -> set:
         """D-04: work rule-decided exits sequentially (Pitfall 7); returns attempted codes.
@@ -717,7 +722,8 @@ class IbsBot:
             # CR-02: nothing is mid-order now; a row still OPENING/CLOSING is unknown.
             for row in self._store.get_positions(("OPENING", "CLOSING")):
                 await self._flag_unknown(row["position_id"], row["code"],
-                                         "entry" if row["status"] == "OPENING" else "exit")
+                                         "entry" if row["status"] == "OPENING" else "exit",
+                                         at_close=True)
             n = await self._sweep_orders("hard_cancel")
             _logger.info("ibs_hard_cancel_done", cancelled=n)
         except asyncio.CancelledError:
