@@ -16,6 +16,8 @@ The options bot keeps running. Sentinels are separate: `.bot_kill` (equity), `.b
 - One-share round trip clean (`--live-1lot --confirm`):
   `python3 scripts/uat_ibs_probe.py --live-1lot --confirm --symbol US.XLU` (same env vars)
   (placed BUY fills, SELL fills; if it prints "1 share still held", sell it manually in moomoo).
+  It refuses (exit 3, nothing placed) a symbol outside the universe, held at the broker or on an
+  active IBS row, and anything inside the bot's decision window — pick a flat universe ETF.
 
 ## 1. Stop Trend Join Long
 

@@ -11,6 +11,13 @@ ask - bid (calibrates the limit buffers). Tune rules_ibs.json, never code.
 `--live-1lot` (operator-run, places PAPER orders on the shared SIMULATE account):
 BUYs 1 share of --symbol then SELLs it back through IbsExecutor (full
 TTL / re-price / cancel path) on a scratch IbsStore; prints fills and friction.
+It refuses (exit 3, no order) when --symbol is outside the IBS universe, held at
+the broker, on an active IBS DB row, or when it is inside the bot's decision
+window. There is no IBS lock file (.bot_kill_ibs only means "stop"), so those
+checks are what keep a running bot's share counts untouched.
+
+The IBS DB is only ever opened read-only (sqlite mode=ro): no migrations, no
+write lock on the file the running bot uses.
 
 Usage:
   PAPER_TRADING=true FUTU_TRD_ENV=SIMULATE FUTU_ACC_ID=1727266 \\
@@ -20,9 +27,11 @@ Usage:
 import argparse
 import asyncio
 import os
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,7 +40,7 @@ from bot.config.loader import ConfigError  # noqa: E402
 from bot.gateway.gateway import MoomooGateway, get_gateway_config  # noqa: E402
 from bot.ibs.config import load_ibs_config  # noqa: E402
 from bot.ibs.execution import IbsExecutor  # noqa: E402
-from bot.ibs.store import IbsStore  # noqa: E402
+from bot.ibs.store import ACTIVE_STATUSES, IbsStore  # noqa: E402
 from bot.ibs.strategy import (  # noqa: E402
     decide_entries, decide_exits, parse_snapshot, size_position, trading_days_held,
 )
@@ -69,6 +78,47 @@ def _spread(row):
         return "-"
 
 
+def _active_rows(state_db):
+    """Active ibs_positions rows read with sqlite mode=ro, or None if there is no DB.
+
+    Never creates the DB, never runs migrations, never takes a write lock (WR-06).
+    """
+    if not os.path.exists(state_db):
+        return None
+    con = sqlite3.connect(Path(state_db).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        con.row_factory = sqlite3.Row
+        marks = ", ".join("?" * len(ACTIVE_STATUSES))
+        return [dict(r) for r in con.execute(
+            f"SELECT * FROM ibs_positions WHERE status IN ({marks}) ORDER BY rowid",
+            ACTIVE_STATUSES)]
+    finally:
+        con.close()
+
+
+async def _refusal(cfg, gateway, symbol, now):
+    """Why --live-1lot must not trade `symbol` now, or None (WR-06)."""
+    if symbol not in cfg.universe:
+        return f"{symbol} is not in the IBS universe"
+    if is_trading_day(now.date()):
+        hh, mm = map(int, get_market_close_et(now.date()).split(":"))
+        close = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        # each leg below may run 2 x worst_case_order_s; keep both legs out of the window
+        start = close - timedelta(minutes=cfg.decision_before_close_min,
+                                  seconds=4 * cfg.worst_case_order_s)
+        if start <= now <= close:
+            return "inside the IBS bot's decision window"
+    ret, pos = await gateway.get_positions()
+    if ret != 0:
+        return "broker positions unreadable"
+    if any(str(r.get("code")) == symbol and int(float(r.get("qty") or 0)) != 0
+           for r in _rows(pos)):
+        return f"{symbol} is held at the broker"
+    if any(r["code"] == symbol for r in (_active_rows(cfg.state_db) or [])):
+        return f"{symbol} has an active IBS DB row"
+    return None
+
+
 async def probe(cfg, gateway, now):
     today = now.date()
     _hr(f"1. IBS table — {len(cfg.universe)} universe ETFs (one snapshot)")
@@ -102,18 +152,14 @@ async def probe(cfg, gateway, now):
         _p("!! positions query failed")
 
     _hr("3. IBS DB rows")
-    active = []
-    if os.path.exists(cfg.state_db):  # never create a DB as a probe side effect
-        store = IbsStore(cfg.state_db).open()
-        try:
-            active = store.get_active_positions()
-        finally:
-            store.close()
+    active = _active_rows(cfg.state_db)
+    if active is not None:
         for r in active:
             _p(f"  {r['code']} qty={r['qty']} {r['status']} entry={r['entry_date']} exit_pending={r['exit_pending']}")
         if not active:
             _p("  (no active rows)")
     else:
+        active = []
         _p(f"no IBS DB yet ({cfg.state_db})")
     active_codes = {r["code"] for r in active}
     for code, (qty, cost) in broker.items():
@@ -155,7 +201,12 @@ async def probe(cfg, gateway, now):
 
 
 async def live_1lot(cfg, gateway, symbol, now):
+    """Returns False when refused (nothing placed), else None."""
     _hr(f"LIVE 1-LOT round trip on {symbol} (PAPER)")
+    reason = await _refusal(cfg, gateway, symbol, now)
+    if reason is not None:
+        _p(f"refusing: {reason} — no order placed")
+        return False
     tmpdb = os.path.join(tempfile.mkdtemp(prefix="uat_ibs_"), "ibs.db")
     store = IbsStore(tmpdb).open()
     try:
@@ -238,10 +289,12 @@ def main(argv=None):
         async def _run():
             await probe(cfg, gw, now_et())
             if a.live_1lot:
-                await live_1lot(cfg, gw, a.symbol, now_et())
-        asyncio.run(_run())
+                return await live_1lot(cfg, gw, a.symbol, now_et())
+        refused = asyncio.run(_run()) is False
     finally:
         gw.close()
+    if refused:
+        sys.exit(3)
 
 
 if __name__ == "__main__":
