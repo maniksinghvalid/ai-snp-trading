@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
+status: executing
 stopped_at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
-last_updated: "2026-10-05T02:04:18.371Z"
-last_activity: "2026-09-28 - Completed quick task 260927-w4r: Fix after-20:00-ET wall-clock flake in trade-recording tests"
+last_updated: "2026-10-05T02:12:07.171Z"
+last_activity: 2026-10-05 -- Phase 12 execution started
 progress:
-  total_phases: 13
+  total_phases: 14
   completed_phases: 12
-  total_plans: 63
-  completed_plans: 64
-  percent: 92
+  total_plans: 72
+  completed_plans: 65
+  percent: 86
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-23)
 
 **Core value:** The bot autonomously executes the Trend Join Long strategy end-to-end on a paper account — scan, enter, manage risk, exit, and report — correctly and unattended.
-**Current focus:** Phase 11 complete — merge to develop, then milestone close
+**Current focus:** Phase 12 — IBS ETF mean-reversion bot (ibs_etf_mean_reversion)
 
 ## Current Position
 
-Phase: 11 (multi-strategy-options-bot-bull-call-spread) — COMPLETE
-Plan: 9 of 9
-Status: Complete (UAT 5/5, verification passed)
-Last activity: 2026-09-28 - Completed quick task 260927-w4r: Fix after-20:00-ET wall-clock flake in trade-recording tests
+Phase: 12 (IBS ETF mean-reversion bot (ibs_etf_mean_reversion)) — EXECUTING
+Plan: 2 of 9
+Status: Ready to execute
+Last activity: 2026-10-05 -- Phase 12 execution started
 
 Progress: [██████████] 9/9 phases (100%)
 
@@ -91,6 +91,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11 P07 | 20min | 3 tasks | 4 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P08 | 25min | 3 tasks | 5 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P09 | 15min | 3 tasks | 4 files |
+| Phase 12 P01 | 25min | 2 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -216,6 +217,7 @@ Recent decisions affecting current work:
 - [Phase 11-09]: IN-08: self._quote_miss_streak now stores (ET session date, count) so a day-before-expiry streak can no longer make the first expiry-day miss escalate
 - [Phase 11-09]: WR-11: self._snapshot_outage_cycles is a process-level counter (reuses _QUOTE_MISS_ESCALATE_CYCLES, no new knob) that alerts once per episode and re-arms on any clean cycle -- corrects 11-08's T-11-46 rationale (OpenDWatchdog only polls get_global_state, cannot see a quote-rights/whole-batch snapshot failure while connected)
 - [Phase 11-09]: Phase 11 gap-closure loop CLOSED per operator scope (2026-09-25): CR-03 + WR-10 + WR-11 + IN-08 were the last four findings from 11-REVIEW.md @06b6787; residual T-11-56 (shutdown-order cancel failure) and T-11-57 (late-restart inside the last manage interval) accepted, not fixed
+- [Phase 12]: Phase 12-01: HERE/ROOT defined below prelude data marker so exec()'d prelude works without __file__
 
 ### Research Flags (must resolve before planning those phases)
 
@@ -264,6 +266,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-26T22:00:00Z
+Last session: 2026-10-05T02:12:03.736Z
 Stopped at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
 Resume file: None
