@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """tests/ibs/test_operator_tooling.py — probe / plist / runbook / CLAUDE.md checks (12-07)."""
+import asyncio
 import dataclasses
 import importlib.util
 import os
@@ -50,7 +51,7 @@ def test_bad_rules_exits_1_before_gateway(monkeypatch, tmp_path, capsys):
     gw_cls.assert_not_called()
 
 
-async def test_probe_is_read_only_and_prints_plan(ibs_cfg, tmp_path, capsys,
+def test_probe_is_read_only_and_prints_plan(ibs_cfg, tmp_path, capsys,
                                                   make_snapshot_row, make_positions_df):
     mod = _load_probe()
     cfg = dataclasses.replace(ibs_cfg, state_db=str(tmp_path / "absent.db"))
@@ -68,7 +69,7 @@ async def test_probe_is_read_only_and_prints_plan(ibs_cfg, tmp_path, capsys,
     gw.place_order = AsyncMock()
     gw.cancel_order = AsyncMock()
 
-    await mod.probe(cfg, gw, datetime(2026, 10, 5, 15, 45, tzinfo=ET))
+    asyncio.run(mod.probe(cfg, gw, datetime(2026, 10, 5, 15, 45, tzinfo=ET)))
 
     out = capsys.readouterr().out
     gw.place_order.assert_not_awaited()
@@ -81,3 +82,27 @@ async def test_probe_is_read_only_and_prints_plan(ibs_cfg, tmp_path, capsys,
     assert "WOULD ENTER" in out and "US.SPY" in out and "qty 98" in out
     assert "WOULD ENTER US.XLU" not in out
     assert not os.path.exists(cfg.state_db)
+
+
+def test_live_1lot_buys_then_sells_one_share(ibs_cfg, monkeypatch, capsys, make_snapshot_row):
+    mod = _load_probe()
+    now = datetime.now(ET)
+    row = make_snapshot_row("US.XLU", 100.5, 110.0, 100.0, now.strftime("%Y-%m-%d %H:%M:%S"))
+    gw = MagicMock()
+    gw.get_market_snapshot = AsyncMock(return_value=(0, pd.DataFrame([row])))
+    calls = []
+
+    class FakeExecutor:
+        def __init__(self, gateway, cfg):
+            pass
+
+        async def work(self, side, code, qty, last, deadline, on_placed=None):
+            calls.append((side, code, qty))
+            await on_placed("O-" + side)
+            return ("O-" + side, last + (0.05 if side == "BUY" else -0.05), qty)
+
+    monkeypatch.setattr(mod, "IbsExecutor", FakeExecutor)
+    monkeypatch.setattr(mod, "now_et", lambda: now)
+    asyncio.run(mod.live_1lot(ibs_cfg, gw, "US.XLU", now))
+    assert calls == [("BUY", "US.XLU", 1), ("SELL", "US.XLU", 1)]
+    assert "round-trip friction" in capsys.readouterr().out
