@@ -130,6 +130,7 @@ def ibs_gateway(make_positions_df):
     gw.place_order = AsyncMock()
     gw.cancel_order = AsyncMock()
     gw.get_order_status = AsyncMock()
+    gw.get_global_state = AsyncMock(return_value={"connected": True})
     return gw
 
 

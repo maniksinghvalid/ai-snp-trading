@@ -217,6 +217,7 @@ def test_decide_skip_guards(decide_env, case, monkeypatch):
     bot = decide_env.bot
     if case == "disabled":
         bot._entries_enabled = False
+        decide_env.gw.get_global_state.return_value = {"connected": False}
     elif case == "kill":
         bot._kill_switch.triggered = True
     elif case == "decided":
@@ -231,6 +232,22 @@ def test_decide_skip_guards(decide_env, case, monkeypatch):
     assert any(ev == "ibs_decision_skipped" and kw.get("reason") for ev, kw in logged)
     if case == "past_deadline":
         assert decide_env.store.get_meta("ibs_decision_date") is None
+    # WR-02: a skipped decision is never silent (except the idempotent re-fire)
+    alerts = _alerts(bot)
+    if case == "decided":
+        assert alerts == []
+    else:
+        assert len(alerts) == 1 and "<b>IBS decision skipped</b>" in alerts[0]
+
+
+def test_entries_disabled_but_connected_still_runs_exits(decide_env):
+    """WR-02: a watchdog lag (entries off, OpenD already back) must not drop exits."""
+    decide_env.setup([_row()], {"US.SPY": 0.9, "US.XLU": 0.05})
+    decide_env.bot._entries_enabled = False
+    _run(decide_env.bot._job_decide())
+    calls = decide_env.bot._executor.work.await_args_list
+    assert [c.args[:2] for c in calls] == [("SELL", "US.SPY")]  # no BUY
+    assert any("exits only" in a for a in _alerts(decide_env.bot))
 
 
 def test_decide_writes_meta_first_and_is_idempotent(decide_env):

@@ -96,6 +96,40 @@ def test_arm_skips_passed_slot(make_ibs_bot, set_now):
     assert set(jobs) == {"ibs_hard_cancel", "ibs_eod"}
 
 
+def _arm_job_alerts(bot):
+    async def go():
+        bot._scheduler.start(paused=True)
+        try:
+            await bot._job_arm()
+        finally:
+            bot._scheduler.shutdown(wait=False)
+    _run(go())
+    return [c.args[0] for c in bot._alerter.send.await_args_list]
+
+
+def test_arm_after_decision_time_alerts(make_ibs_bot, set_now):
+    """WR-02: a restart past the decide slot on a trading day tells the operator."""
+    bot = make_ibs_bot()
+    set_now(_at(2026, 10, 5, 15, 55))
+    alerts = _arm_job_alerts(bot)
+    assert len(alerts) == 1 and "<b>IBS decision missed</b>" in alerts[0]
+    assert "2026-10-05" in alerts[0]
+
+
+def test_arm_after_decision_already_made_is_silent(make_ibs_bot, set_now, ibs_store):
+    bot = make_ibs_bot()
+    ibs_store.set_meta("ibs_decision_date", "2026-10-05")
+    set_now(_at(2026, 10, 5, 15, 55))
+    assert _arm_job_alerts(bot) == []
+
+
+@pytest.mark.parametrize("now", [_at(2026, 10, 5), _at(2026, 10, 4, 15, 55)])
+def test_arm_before_decision_or_non_trading_day_is_silent(make_ibs_bot, set_now, now):
+    bot = make_ibs_bot()
+    set_now(now)
+    assert _arm_job_alerts(bot) == []
+
+
 def test_arm_twice_is_idempotent(make_ibs_bot, set_now):
     bot = make_ibs_bot()
     set_now(_at(2026, 10, 5))
