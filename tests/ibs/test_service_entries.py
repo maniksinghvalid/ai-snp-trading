@@ -202,6 +202,16 @@ def test_opening_row_precedes_buy_and_fill_recorded(env):
     assert any("IBS entry" in a for a in _alerts(env.bot))
 
 
+@pytest.mark.parametrize("avg", [0.0, -1.0, float("nan")])
+def test_entry_fill_without_avg_price_uses_limit(env, avg):
+    """WR-04: entry_price is never stored <= 0 (later P&L would be a fake gain)."""
+    env.setup(snap={"US.XLU": 0.05})  # last 100.5
+    env.results[("BUY", "US.XLU")] = ("B1", avg, 99)
+    env.decide()
+    row = env.store.get_active_positions()[0]
+    assert row["entry_price"] == pytest.approx(100.55)  # last + entry_limit_buffer_usd
+
+
 def test_partial_entry_opens_filled_qty(env):
     env.setup(snap={"US.XLU": 0.05})
     env.results[("BUY", "US.XLU")] = ("B2", 50.04, 5)

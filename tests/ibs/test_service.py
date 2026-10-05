@@ -305,6 +305,17 @@ def test_exit_full_fill(decide_env):
     assert "IBS exit" in alert and "US.SPY" in alert
 
 
+@pytest.mark.parametrize("avg", [0.0, float("nan")])
+def test_exit_fill_without_avg_price_uses_limit(decide_env, avg):
+    """WR-04: a fill reported with no average price never books a 100% loss."""
+    decide_env.setup([_row()], {"US.SPY": 0.9})  # last 109.0
+    decide_env.bot._executor.work.return_value = ("O1", avg, 12)
+    _run(decide_env.bot._job_decide())
+    trade = decide_env.store.get_trades_on("2026-10-05")[0]
+    assert trade["exit_price"] == pytest.approx(108.95)  # last - exit_limit_buffer_usd
+    assert trade["pnl_usd"] == pytest.approx((108.95 - 770.10) * 12)
+
+
 def test_exit_partial_fill(decide_env):
     decide_env.setup([_row()], {"US.SPY": 0.9})
     decide_env.bot._executor.work.return_value = ("O2", 780.10, 5)
