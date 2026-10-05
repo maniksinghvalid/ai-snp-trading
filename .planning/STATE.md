@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 11 complete — UAT 5/5 passed (2026-09-26); verified passed; branch not yet merged to develop
-last_updated: "2026-10-05T02:15:23.815Z"
+last_updated: "2026-10-05T02:15:27.055Z"
 last_activity: 2026-10-05 -- Phase 12 execution started
 progress:
   total_phases: 14
@@ -92,6 +92,7 @@ Progress: [██████████] 9/9 phases (100%)
 | Phase 11-multi-strategy-options-bot-bull-call-spread P08 | 25min | 3 tasks | 5 files |
 | Phase 11-multi-strategy-options-bot-bull-call-spread P09 | 15min | 3 tasks | 4 files |
 | Phase 12 P01 | 25min | 2 tasks | 18 files |
+| Phase 12 P02 | 15min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -218,6 +219,7 @@ Recent decisions affecting current work:
 - [Phase 11-09]: WR-11: self._snapshot_outage_cycles is a process-level counter (reuses _QUOTE_MISS_ESCALATE_CYCLES, no new knob) that alerts once per episode and re-arms on any clean cycle -- corrects 11-08's T-11-46 rationale (OpenDWatchdog only polls get_global_state, cannot see a quote-rights/whole-batch snapshot failure while connected)
 - [Phase 11-09]: Phase 11 gap-closure loop CLOSED per operator scope (2026-09-25): CR-03 + WR-10 + WR-11 + IN-08 were the last four findings from 11-REVIEW.md @06b6787; residual T-11-56 (shutdown-order cancel failure) and T-11-57 (late-restart inside the last manage interval) accepted, not fixed
 - [Phase 12]: Phase 12-01: HERE/ROOT defined below prelude data marker so exec()'d prelude works without __file__
+- [Phase 12]: Phase 12-02: rules_ibs.json sole source of IBS strategy numbers; loader fails closed (unlevered, D-13 path collision, deadline window)
 
 ### Research Flags (must resolve before planning those phases)
 
